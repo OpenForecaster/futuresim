@@ -9,7 +9,7 @@ Usage:
 import argparse
 from pathlib import Path
 
-import htcondor
+import htcondor2 as htcondor
 
 
 def submit_cpu_job(
