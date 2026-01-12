@@ -11,7 +11,7 @@ DATA_INPUT_1="/is/cluster/fast/sgoel/forecasting/news/articlesuntil2024/deduped"
 DATA_INPUT_2="/is/cluster/fast/sgoel/forecasting/news/articles2025/deduped"
 DATA_OUTPUT="/is/cluster/fast/sgoel/forecasting/news/deduped_articles"
 WORKERS=32
-BATCH_SIZE=128  # 4x workers for efficient parallelism
+BATCH_SIZE=32  # Keep small to limit memory (~60-70GB peak per batch)
 
 # Activate environment
 source ~/forecast/bin/activate
