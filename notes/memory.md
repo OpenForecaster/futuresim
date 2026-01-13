@@ -16,33 +16,25 @@ The ultimate goal is **training agents whose forecasting behaviors generalize to
 
 ---
 
-## Why We Chose Metaculus-Style Scoring (Not LMSR)
+## Scoring Approach
 
-### LMSR (Logarithmic Market Scoring Rule) - REJECTED
+**Method**: Brier-based peer scores + time-weighted averaging.
 
-We initially implemented LMSR but rejected it for several reasons:
+**How it works**:
+1. Agents predict `{outcome: probability}` pairs (probabilities need not sum to 1)
+2. At each time snapshot, compare all agents' current (carried-forward) predictions via Brier score
+3. Peer score = how much better than average (zero-sum)
+4. Final score = time-weighted average of peer scores
 
-1. **Simultaneous trades are problematic**: LMSR is path-dependent. If Agent A and B both bet at the "same time", execution order affects prices. No mathematically clean way to handle true simultaneity.
+**Good properties**:
+- Proper for free-form: no incentive to inflate probabilities on named outcomes
+- Rewards early prediction (weighted by duration)
+- Zero-sum (measures relative skill)
+- Pluggable: can swap in alternative scorers
 
-2. **Stake ≠ Probability**: LMSR conflates belief strength with budget. An agent with $1000 moves the market more than one with $10, even if beliefs are identical.
-
-### Parimutuel - CONSIDERED
-
-Parimutuel (pool all bets, winners split pool) was considered because:
-- ✅ Naturally simultaneous (no ordering issues)
-- ✅ Handles N outcomes trivially
-- ❌ No incentive to predict EARLY (only final pool ratio matters)
-- ❌ Late bettors see more information, no disadvantage
-
-### Metaculus-Style Peer Scoring - CHOSEN
-
-Final choice: Log score + peer comparison + time-weighted averaging.
-
-**Why it works:**
-- **Proper scoring rule** (log score): Optimal strategy is to report true beliefs
-- **Peer comparison**: Score = 100 × (my_log - avg_of_others). Measures relative skill.
-- **Time-weighted**: Predictions weighted by how long they were active. Early correct predictions earn more.
-- **Simultaneous**: All agents on same day scored against each other. No ordering issues.
+**Potential drawbacks**:
+- Peer scores are NOT strictly proper (optimal strategy may depend on others' predictions)
+- Abstention incentive: agents who skip questions get 0, which may be better than a bad prediction. (Open issue: consider assigning crowd aggregate to non-predictors.)
 
 ---
 
@@ -94,61 +86,69 @@ This incentivizes:
 
 ---
 
-## Context Data Organization (NOT YET IMPLEMENTED)
+## Context Data Organization (COMPLETED)
 
-We discussed but deferred implementing context (news articles) organization.
+News articles are organized in `/is/cluster/fast/sgoel/forecasting/news/deduped_articles/`.
 
-**Preferred approach: Hybrid**
-- **Canonical storage**: Single `articles.parquet` file
-- **Filesystem view**: Build script generates `{date}/{source}/article.json` tree
-- **Search index**: FAISS index built from same parquet source
+**Directory structure:**
+```
+deduped_articles/
+├── data/
+│   └── {YYYY}/{MM}/{DD}/
+│       ├── articles_b0000.parquet  # Per-batch parquet files
+│       ├── articles_b0001.parquet
+│       ├── headlines_b0000.json    # Lightweight headline index
+│       └── headlines_b0001.json
+├── index/
+│   ├── date_range.json   # {min, max, total_days, total_articles}
+│   └── sources.json      # List of all source domains
+├── current_sim/          # For simulation state (empty initially)
+└── README.md
+```
 
-Agents need both:
-- **Filesystem navigation**: List dates → list sources → list articles → read content
-- **Semantic search**: Query → relevant articles (for RAG-style agents)
-
-The `SimDocInterface` is currently stubbed, waiting for context format finalization.
+**Key decisions:**
+- Multiple parquet files per day (one per processing batch) - PyArrow reads them as a single dataset
+- ~20M+ articles across ~3000 days
+- Headlines JSON files are lightweight for quick browsing without loading full articles
 
 ---
 
-## Scoring Math Reference
+## Cluster Job Tips
 
-### Log Score
-```
-log_score(p) = ln(p)  # where p = probability assigned to true outcome
-```
-- Perfect (p=1): score = 0
-- Worst (p→0): score → -∞
-- We clamp to [0.001, 0.999] to avoid infinities
+- **htcondor v25+ uses `htcondor2` module**, not `htcondor`
+- **Cluster access**: `kinit` on seal-node1, then `ssh login.cluster.is.localnet`
+- **Memory limit**: Jobs killed if exceeding requested memory. Request 100GB+ for large data jobs.
+- **Batch processing**: For large data, process in batches to avoid memory spikes. See `scripts/convert_jsonl_to_parquet.py` for example.
 
-### Peer Score
-```
-peer_score = 100 × (my_log_score - mean(others_log_scores))
-```
-- Positive = better than average
-- Zero-sum across all agents per question
+## Scoring Implementation
 
-### Time-Weighted Average
 ```
-For each prediction interval [t_start, t_end]:
-    weight = duration
-    contribution = peer_score × weight
+environment/scoring/
+├── base.py       # BaseScorer ABC (extend this for new scorers)
+├── brier.py      # BrierScorer (default) - Brier Skill Score
+└── log_score.py  # LogScorer (Metaculus-style, not recommended for free-form)
+```
 
-final_score = sum(contributions) / sum(weights)
-```
+**Brier Skill Score** (default): `1 - Σ(p_i - y_i)²` over `{named outcomes} ∪ {truth}`
+- p_i = probability assigned (0 if not named)
+- y_i = 1 if truth, 0 otherwise
+- Range: -1 to +1, **0 = abstainer baseline**
+- Higher is better
+
+**Log** (alternative): `ln(p)` where p = P(truth). ⚠️ Incentivizes overconfidence in free-form.
+
+**Peer score**: `100 × (my_score - avg_others)`. Zero-sum across agents.
 
 ---
 
-## Rejected Alternatives
+## Rejected Scoring Alternatives
 
-| Idea | Why Rejected |
-|------|--------------|
-| LMSR market | Path-dependent, ordering issues, stakes ≠ beliefs |
-| Parimutuel | No early prediction incentive |
-| Brier score only | No early prediction incentive (best to predict at end) |
-| Sequential agent execution | Unfair ordering, first agent sees different state |
-| Stakes determine weights | Conflates budget with belief strength |
-| LLM-only answer matching | LLM is inconsistent, violates transitivity |
+| Approach | Why Rejected |
+|----------|-------------|
+| LMSR | Path-dependent; simultaneous trades have no clean solution |
+| Parimutuel | No incentive to predict early |
+| Log score (for free-form) | Incentivizes overconfidence on named outcomes |
+| Score implicit P(other) | Gameable via `{garbage: 0.01}` + P(other)=0.99 |
 
 ---
 
@@ -156,21 +156,25 @@ final_score = sum(contributions) / sum(weights)
 
 | File | Purpose |
 |------|---------|
-| `environment/scoring.py` | Log score, peer score, time-weighted averaging |
+| `environment/scoring/` | Modular scoring (Brier default, Log alternative) |
 | `environment/ansmatching.py` | Union-Find based answer matching with LLM |
 | `environment/interfaces.py` | QuestionView, PredictionSubmission datatypes |
 | `environment/env.py` | SimulationEnvironment orchestrating daily flow |
 | `environment/data_loader.py` | QuestionPool with heap-based resolution tracking |
 | `agents/base.py` | BaseAgent abstract class |
 | `scripts/run_sim.py` | CLI entry point with stub agents |
+| `scripts/convert_jsonl_to_parquet.py` | Streaming JSONL→Parquet conversion |
+| `mpi_scripts/organize_news/submit_job.py` | HTCondor job submission (uses htcondor2) |
+| `mpi_scripts/organize_news/run_conversion.sh` | Shell wrapper for cluster jobs |
 
 ---
 
 ## Future Work
 
-1. **Implement SimDocInterface**: Read articles from context directory
-2. **Build context organization**: Parquet + filesystem view + FAISS index  
+1. **Implement SimDocInterface**: Read articles from organized parquet files
+2. **Build FAISS index**: Semantic search over articles for RAG-style agents
 3. **Real LLM agents**: Replace stub agents with actual inference
 4. **Async agent execution**: Parallel prompts for speed
 5. **Evaluation metrics**: Track Brier scores separately from peer scores
 6. **Checkpointing**: Save/resume simulation state
+7. **Deduplication across batches**: Current approach may have duplicates if same article appears in multiple JSONL files
