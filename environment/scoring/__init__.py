@@ -90,8 +90,13 @@ def compute_snapshot_peer_scores(
         {agent_id: peer_score}
     """
     if len(predictions) < 2:
-        # Can't compute peer score with < 2 agents
-        return {agent_id: 0.0 for agent_id in predictions}
+        # Single agent: compare against baseline abstainer (score 0)
+        # This is equivalent to having a virtual abstainer as a peer
+        # peer_score = 100 × (agent_score - 0) = 100 × agent_score
+        return {
+            agent_id: 100 * scorer.score_prediction(pred, ground_truth, matcher)
+            for agent_id, pred in predictions.items()
+        }
     
     # Compute raw score for each agent
     raw_scores = {}
@@ -169,7 +174,7 @@ def resolve_question(
         # Get snapshot at start of segment (carries forward through segment)
         snapshot = _get_snapshot_at(history, segment_start)
         
-        if len(snapshot) >= 2:
+        if snapshot:  # Changed from len(snapshot) >= 2 - single agent now gets scored
             # Compute peer scores for this snapshot
             segment_peer_scores = compute_snapshot_peer_scores(
                 snapshot, ground_truth, scorer, matcher
@@ -178,7 +183,6 @@ def resolve_question(
             # Weight by segment duration
             for agent_id, score in segment_peer_scores.items():
                 weighted_scores[agent_id] += score * segment_days
-        # If < 2 agents in snapshot, their peer scores are 0 for this segment
     
     # Normalize by total days
     agent_scores = {

@@ -20,10 +20,20 @@ class QuestionPool:
     """
     Manages forecasting questions loaded from HuggingFace.
     Uses heap for O(log N) resolution lookups.
+    
+    Args:
+        dataset_name: Path to dataset
+        split: Dataset split to use
+        resolution_start: Only include questions resolving on/after this date
+        resolution_end: Only include questions resolving on/before this date
     """
-    def __init__(self, dataset_name: str, split: str = "train"):
+    def __init__(self, dataset_name: str, split: str = "train",
+                 resolution_start: date = None, resolution_end: date = None):
         print(f"Loading dataset {dataset_name}...")
         self.ds = load_dataset(dataset_name, split=split)
+        
+        self.resolution_start = resolution_start
+        self.resolution_end = resolution_end
         
         self._all_questions: Dict[str, Question] = {}
         # Min-heap by (resolution_date, qid) for efficient resolution lookup
@@ -33,6 +43,8 @@ class QuestionPool:
         
         print("Indexing questions...")
         self._build_index()
+        if resolution_start or resolution_end:
+            print(f"Filtered to questions resolving {resolution_start} to {resolution_end}")
         print(f"Indexed {len(self._all_questions)} questions.")
         
     def _parse_date(self, date_val) -> Optional[date]:
@@ -54,11 +66,17 @@ class QuestionPool:
         return None
 
     def _build_index(self):
-        """Build heap and question dictionary."""
+        """Build heap and question dictionary, filtering by date range if specified."""
         for item in self.ds:
             r_date = self._parse_date(item.get('resolution_date'))
             
             if not r_date:
+                continue
+            
+            # Filter by resolution date range
+            if self.resolution_start and r_date < self.resolution_start:
+                continue
+            if self.resolution_end and r_date > self.resolution_end:
                 continue
                 
             q = Question(

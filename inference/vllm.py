@@ -5,40 +5,66 @@ import os
 _VLLM_ENGINES = {}
 
 class VLLMInference:
-    def __init__(self, model_path: str, model_name: str = None, **kwargs):
+    def __init__(self, model_path: str, model_name: str = None, 
+                 max_model_len: int = 32768, **kwargs):
         """
         Initialize VLLM engine. 
         If model_path is already loaded, reuse the engine.
-        kwargs are passed to LLM check the vllm documentation for details.
+        
+        Args:
+            model_path: Path to the model
+            model_name: Optional display name
+            max_model_len: Maximum context length (default 32768)
+            **kwargs: Additional args passed to vllm.LLM
         """
         global _VLLM_ENGINES
         self.model_path = model_path
         self.model_name = model_name or model_path
         
-        if model_path in _VLLM_ENGINES:
-            self.llm = _VLLM_ENGINES[model_path]
+        # Include max_model_len in cache key since different lengths need different engines
+        cache_key = f"{model_path}::{max_model_len}"
+        
+        if cache_key in _VLLM_ENGINES:
+            self.llm = _VLLM_ENGINES[cache_key]
         else:
             try:
                 from vllm import LLM
             except ImportError:
                 raise ImportError("vllm module not found. Please install vllm.")
                 
-            print(f"Loading VLLM model: {model_path}")
-            # Default to some reasonable GPU util if not specified to allow multiple agents/models?
-            # Actually user probably runs one model.
-            # trust_remote_code=True is often needed.
+            print(f"Loading VLLM model: {model_path} (max_model_len={max_model_len})")
+            
             if "trust_remote_code" not in kwargs:
                 kwargs["trust_remote_code"] = True
-                
-            self.llm = LLM(model=model_path, **kwargs)
-            _VLLM_ENGINES[model_path] = self.llm
+            
+            # Set max_model_len to prevent OOM on limited GPU memory
+            self.llm = LLM(model=model_path, max_model_len=max_model_len, **kwargs)
+            _VLLM_ENGINES[cache_key] = self.llm
             
     def generate(self, prompt: str, sampling_params: Dict[str, Any]) -> str:
+        """Generate text from a raw prompt string (no chat template)."""
         from vllm import SamplingParams
         
-        # Ensure we don't pass invalid params
-        # Construct SamplingParams object
         sp = SamplingParams(**sampling_params)
-        
         outputs = self.llm.generate([prompt], sp, use_tqdm=False)
         return outputs[0].outputs[0].text
+    
+    def chat(self, messages: List[Dict[str, str]], sampling_params: Dict[str, Any]) -> str:
+        """
+        Chat completion using messages format.
+        
+        Args:
+            messages: List of {"role": "system"|"user"|"assistant", "content": "..."}
+            sampling_params: Dict with temperature, max_tokens, etc.
+            
+        Returns:
+            The assistant's response text.
+        """
+        from vllm import SamplingParams
+        
+        sp = SamplingParams(**sampling_params)
+        
+        # vLLM's chat() expects a list of conversations (batch of 1 here)
+        outputs = self.llm.chat([messages], sp, use_tqdm=False)
+        return outputs[0].outputs[0].text
+

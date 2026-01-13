@@ -1,7 +1,8 @@
 import os
 import json
+import pandas as pd
 from datetime import date, timedelta
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 
 from .interfaces import (
     AgentInterface, ForecastInterface, ArticleMeta, 
@@ -13,6 +14,7 @@ from .scoring import (
     compute_aggregate, resolve_question
 )
 from .ansmatching import AnswerMatcher
+from .safe_executor import QueryExecutor
 
 
 
@@ -94,13 +96,19 @@ class SimulationEnvironment:
                  end_date: date,
                  context_dir: str,
                  inference_provider=None,
-                 output_dir: str = "."):
+                 output_dir: str = ".",
+                 resolution_start: date = None,
+                 resolution_end: date = None):
         self.current_date = start_date
         self.end_date = end_date
         self.context_dir = context_dir
         
-        # Components
-        self.q_pool = QuestionPool(dataset_name)
+        # Components - filter questions to resolution window
+        self.q_pool = QuestionPool(
+            dataset_name,
+            resolution_start=resolution_start,
+            resolution_end=resolution_end
+        )
         self.matcher = AnswerMatcher(inference_provider) if inference_provider else None
         
         # Track prediction history per question
@@ -112,12 +120,23 @@ class SimulationEnvironment:
         self.agents = []
         self.agent_scores: Dict[str, float] = {}  # Cumulative scores
         
+        # Track prediction outcomes for summary
+        self.agent_correct: Dict[str, int] = {}  # Count of positive scores
+        self.agent_wrong: Dict[str, int] = {}    # Count of negative scores
+        self.agent_questions: Dict[str, int] = {}  # Total questions predicted on
+        
+        # Track resolved questions for agent learning
+        self.resolved_questions: List[Question] = []
+        
         # Logging
         self.logger = SimLogger(output_dir)
         
     def add_agent(self, agent):
         self.agents.append(agent)
         self.agent_scores[agent.agent_id] = 0.0
+        self.agent_correct[agent.agent_id] = 0
+        self.agent_wrong[agent.agent_id] = 0
+        self.agent_questions[agent.agent_id] = 0
         
     def run(self):
         print(f"Starting simulation from {self.current_date} to {self.end_date}")
@@ -130,15 +149,19 @@ class SimulationEnvironment:
         
         self.logger.close()
         print("\nSimulation ended.")
-        print("Final Scores:")
+        print("\nFinal Scores:")
         for agent_id, score in sorted(self.agent_scores.items()):
-            print(f"  {agent_id}: {score:.2f}")
+            correct = self.agent_correct.get(agent_id, 0)
+            wrong = self.agent_wrong.get(agent_id, 0)
+            total = self.agent_questions.get(agent_id, 0)
+            print(f"  {agent_id}: {score:+.2f} ({correct} correct, {wrong} wrong, {total} total predictions)")
 
     def step(self):
         # 1. Resolve questions expiring today
         resolving = self.q_pool.pop_resolving(self.current_date)
         for q in resolving:
             self._resolve_question(q)
+            self.resolved_questions.append(q)  # Track for agent learning
             
         # 2. Get active questions
         active_questions = self.q_pool.get_active()
@@ -159,7 +182,8 @@ class SimulationEnvironment:
             self.current_aggregates,
             self.prediction_histories,
             self.current_date,
-            self.logger
+            self.logger,
+            resolved_questions=self.resolved_questions
         )
         
         for agent in self.agents:
@@ -182,6 +206,11 @@ class SimulationEnvironment:
         for agent_id, score in result.agent_scores.items():
             if agent_id in self.agent_scores:
                 self.agent_scores[agent_id] += score
+                self.agent_questions[agent_id] = self.agent_questions.get(agent_id, 0) + 1
+                if score > 0:
+                    self.agent_correct[agent_id] = self.agent_correct.get(agent_id, 0) + 1
+                elif score < 0:
+                    self.agent_wrong[agent_id] = self.agent_wrong.get(agent_id, 0) + 1
                 
         self.logger.log_resolution(
             self.current_date, q.qid, 
@@ -236,16 +265,23 @@ class SimForecastInterface(ForecastInterface):
                  aggregates: Dict[str, Dict[str, float]],
                  histories: Dict[str, PredictionHistory],
                  sim_date: date,
-                 logger: SimLogger):
+                 logger: SimLogger,
+                 resolved_questions: List[Question] = None):
         self.questions = {q.qid: q for q in questions}
         self.aggregates = aggregates
         self.histories = histories
         self.sim_date = sim_date
         self.logger = logger
         self.current_agent_id: Optional[str] = None
+        self.resolved_questions = resolved_questions or []
+        
+        # Query execution
+        self.query_executor = QueryExecutor(timeout_seconds=5.0)
+        self._df_cache: Optional[pd.DataFrame] = None
         
     def set_agent_context(self, agent_id: str):
         self.current_agent_id = agent_id
+        self._df_cache = None  # Rebuild DataFrame for each agent (different my_prediction)
 
     def list_questions(self) -> List[QuestionView]:
         """Return questions with frozen aggregates."""
@@ -302,3 +338,98 @@ class SimForecastInterface(ForecastInterface):
             self.logger.log_model_output(
                 self.sim_date, self.current_agent_id, prompt, response, metadata
             )
+    
+    def execute_query(self, code: str, current_date: date = None) -> Tuple[str, Optional[str]]:
+        """
+        Execute agent's Python code on the questions DataFrame.
+        
+        Returns (result_string, error_message).
+        """
+        df = self._get_dataframe()
+        return self.query_executor.execute(
+            df, code, 
+            current_date=current_date or self.sim_date
+        )
+    
+    def get_dataframe_info(self) -> Dict[str, Any]:
+        """Get DataFrame schema info for agent prompting."""
+        df = self._get_dataframe()
+        
+        columns_desc = []
+        for col in df.columns:
+            dtype = str(df[col].dtype)
+            sample = str(df[col].iloc[0]) if len(df) > 0 else "N/A"
+            if len(sample) > 50:
+                sample = sample[:50] + "..."
+            columns_desc.append(f"- {col} ({dtype}): e.g. {sample}")
+        
+        return {
+            'n_rows': len(df),
+            'n_active': len([q for q in self.questions.values()]),
+            'n_resolved': len(self.resolved_questions),
+            'columns': list(df.columns),
+            'columns_desc': "\n".join(columns_desc),
+        }
+    
+    def _get_dataframe(self) -> pd.DataFrame:
+        """Build or return cached DataFrame for current agent."""
+        if self._df_cache is not None:
+            return self._df_cache
+        
+        rows = []
+        
+        # Active questions
+        for q in self.questions.values():
+            agg = self.aggregates.get(q.qid, {})
+            
+            # Get agent's current prediction if any
+            my_pred = None
+            my_pred_date = None
+            history = self.histories.get(q.qid)
+            if history and self.current_agent_id:
+                pred = history.get_latest_prediction(self.current_agent_id)
+                if pred:
+                    my_pred = pred.outcomes
+                    my_pred_date = pred.day
+            
+            # Count total predictions
+            num_preds = 0
+            if history:
+                for agent_preds in history.predictions.values():
+                    num_preds += len(agent_preds)
+            
+            rows.append({
+                'qid': q.qid,
+                'title': q.title,
+                'background': q.background,
+                'resolution_criteria': q.resolution_criteria,
+                'answer_type': q.answer_type,
+                'resolution_date': q.resolution_date,
+                'is_resolved': False,
+                'ground_truth': None,
+                'market_aggregate': json.dumps(agg) if agg else None,
+                'num_predictions': num_preds,
+                'my_prediction': json.dumps(my_pred) if my_pred else None,
+                'my_prediction_date': my_pred_date,
+            })
+        
+        # Resolved questions
+        for q in self.resolved_questions:
+            rows.append({
+                'qid': q.qid,
+                'title': q.title,
+                'background': q.background,
+                'resolution_criteria': q.resolution_criteria,
+                'answer_type': q.answer_type,
+                'resolution_date': q.resolution_date,
+                'is_resolved': True,
+                'ground_truth': q.ground_truth_answer,
+                'market_aggregate': None,
+                'num_predictions': 0,
+                'my_prediction': None,
+                'my_prediction_date': None,
+            })
+        
+        self._df_cache = pd.DataFrame(rows)
+        return self._df_cache
+

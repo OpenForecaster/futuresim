@@ -1,6 +1,6 @@
 # Forecasting Simulator: Design Context & Decisions
 
-This document captures design decisions, rejected alternatives, and context that isn't obvious from code alone. For future developers/models working on this codebase.
+This document captures the goal of my project, design decisions, and context that isn't obvious from code alone. For future developers/models working on this codebase. If you have better ideas for any of the design choices that better support my project goal, always let me know. I am always open to feedback and criticism for my ideas, as I'm just a researcher exploring the unknown. If you have any questions, or any uncertainty about any design decision whatsoever, please ask me. Its okay to take obvious next steps on your own, but if there are any assumptions I or future collaborators/agents working on this project should know of, please let me know, and also update them here.
 
 ---
 
@@ -15,6 +15,18 @@ Build a **multi-agent forecasting simulator** where LLM agents:
 The ultimate goal is **training agents whose forecasting behaviors generalize to real-world prediction markets**.
 
 ---
+
+## How to run
+
+We have a uv environment called fsim which we are using for this project. 
+
+For the /is/cluster, to get GPU (say to debug) you will have to get an interactive job. One way to do that (A100) is:
+```
+(miniforge3)sgoel@login3:~/forecast-sim$ condor_submit_bid 25 -i -append request_gpus=1 -append "requirements=TARGET.CUDACapability == 8.0" -append request_memory=40960
+```
+Local open-weight models are stored in /fast/rolmedo/models on the /is/cluster. For debugging, its good to use qwen3-4b-it-2507. The OpenForesight dataset of forecasting questions is at /fast/sgoel/forecasting/qs/OpenForesight/data
+
+On seal-node we already have GPUs, so you can go for it directly.
 
 ## Scoring Approach
 
@@ -166,6 +178,81 @@ environment/scoring/
 | `scripts/convert_jsonl_to_parquet.py` | Streaming JSONL→Parquet conversion |
 | `mpi_scripts/organize_news/submit_job.py` | HTCondor job submission (uses htcondor2) |
 | `mpi_scripts/organize_news/run_conversion.sh` | Shell wrapper for cluster jobs |
+| `agents/basicAgent.py` | BasicAgent with DataFrame queries + XML forecasts |
+| `environment/safe_executor.py` | Query execution with eval + timeout |
+| `scripts/test_basic_agent.py` | CLI test script for BasicAgent |
+| `notes/agent-forecast-interaction.md` | Agent interaction design documentation |
+
+---
+
+## Agent-Forecast Interaction (Summary)
+
+See `notes/agent-forecast-interaction.md` for detailed design.
+
+### High-Level Flow
+```
+1. Environment calls agent.act(doc_interface, forecast_interface, current_date)
+2. Agent gets system prompt with DataFrame schema + Brier scoring explanation
+3. Query loop: Agent writes code → env executes → returns results (max N queries)
+4. Submit loop: Agent outputs <submit>...</submit> → env parses and records predictions
+5. At resolution: time-weighted Brier peer scores computed, single-agent uses baseline 0
+```
+
+### Key Components
+| Component | Purpose |
+|-----------|---------|
+| `VLLMInference.chat()` | Chat completion with messages format `[{role, content}]` |
+| `SimForecastInterface` | Exposes `execute_query()`, `get_dataframe_info()`, `submit_prediction()` |
+| `QueryExecutor` | Runs agent code with eval() + 5s timeout |
+| `BasicAgent` | Reference agent with CoT using `<reasoning>` and `<action>` tags |
+
+### Agent Response Format
+```xml
+<reasoning>
+Analysis of the questions and likely outcomes...
+</reasoning>
+<action>
+```python
+df[df['is_resolved']==False][['qid','title']].head()
+```
+</action>
+```
+Or for submission:
+```xml
+<action>
+<submit>
+  <forecast qid="12345">
+    <outcome name="Tokyo" prob="0.4"/>
+    ... allows multiple outcome prediction as long as sum of probabilities is 1 or lower.
+  </forecast>
+</submit>
+</action>
+```
+
+### Scoring
+- **Brier Skill Score**: `1 - Σ(p_i - y_i)²` over named outcomes + truth
+- **Single-agent**: `peer_score = 100 × brier_score` (vs virtual abstainer at 0)
+- **Multi-agent**: Zero-sum peer comparison
+- Scores are time-weighted by days prediction was active before resolution
+
+### DataFrame Schema (provided to agent)
+```
+qid, title, background, resolution_criteria, answer_type,
+resolution_date, is_resolved, ground_truth, market_aggregate,
+num_predictions, my_prediction, my_prediction_date
+```
+
+---
+
+## ⚠️ Known Safety Issue
+
+**Code execution in `safe_executor.py` uses `eval()`** which is NOT safe for untrusted agent code. This is acceptable for testing with controlled agents (like BasicAgent), but needs proper sandboxing for production/untrusted agents.
+
+Options to explore later:
+- RestrictedPython
+- AST whitelisting
+- Subprocess isolation
+- Docker/container execution
 
 ---
 
@@ -173,8 +260,10 @@ environment/scoring/
 
 1. **Implement SimDocInterface**: Read articles from organized parquet files
 2. **Build FAISS index**: Semantic search over articles for RAG-style agents
-3. **Real LLM agents**: Replace stub agents with actual inference
-4. **Async agent execution**: Parallel prompts for speed
-5. **Evaluation metrics**: Track Brier scores separately from peer scores
-6. **Checkpointing**: Save/resume simulation state
-7. **Deduplication across batches**: Current approach may have duplicates if same article appears in multiple JSONL files
+3. **Sandbox code execution**: Replace eval() with safe execution (see above)
+4. **Agent Memory**: Even basic agent should have access to write some memories for next days.
+5. **Async agent execution**: Parallel prompts for speed
+6. **Evaluation metrics**: Track Brier scores separately from peer scores
+7. **Checkpointing**: Save/resume simulation state
+8. **Deduplication across batches**: Current approach may have duplicates if same article appears in multiple JSONL files
+
