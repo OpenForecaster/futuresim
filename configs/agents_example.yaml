@@ -15,3 +15,7 @@ agents:
   - model: xiaomi/mimo-v2-flash:free
   
   - model: mistralai/devstral-2512:free
+
+  - model: z-ai/glm-4.5-air:free
+
+  - model: moonshotai/kimi-k2:free

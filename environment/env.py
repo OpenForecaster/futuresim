@@ -2,7 +2,9 @@ import os
 import json
 import pandas as pd
 from datetime import date, timedelta
+from threading import Lock
 from typing import List, Dict, Any, Optional, Tuple
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .interfaces import (
     AgentInterface, ForecastInterface, ArticleMeta, 
@@ -19,14 +21,35 @@ from .safe_executor import QueryExecutor
 
 
 class SimLogger:
-    """Centralized logging for simulation events."""
+    """
+    Thread-safe centralized logging for simulation events.
+    
+    Logs shared events (predictions, resolutions) to central files,
+    and model outputs to per-agent directories.
+    """
     
     def __init__(self, output_dir: str = "."):
         self.output_dir = output_dir
         os.makedirs(output_dir, exist_ok=True)
         
+        # Shared logs (thread-safe with locks)
+        self._actions_lock = Lock()
         self.actions_file = open(os.path.join(output_dir, "actions.jsonl"), "w")
-        self.outputs_file = open(os.path.join(output_dir, "model_outputs.jsonl"), "w")
+        
+        # Per-agent output files (lazy initialized)
+        self.agents_dir = os.path.join(output_dir, "agents")
+        self._agent_files: Dict[str, Any] = {}
+        self._agent_files_lock = Lock()
+        
+    def _get_agent_output_file(self, agent_id: str):
+        """Get or create the output file for an agent (thread-safe)."""
+        with self._agent_files_lock:
+            if agent_id not in self._agent_files:
+                agent_dir = os.path.join(self.agents_dir, agent_id)
+                os.makedirs(agent_dir, exist_ok=True)
+                file_path = os.path.join(agent_dir, "model_outputs.jsonl")
+                self._agent_files[agent_id] = open(file_path, "w")
+            return self._agent_files[agent_id]
         
     def log_prediction(self, sim_date: date, agent_id: str, 
                        question_id: str, outcomes: Dict[str, float]):
@@ -37,8 +60,9 @@ class SimLogger:
             "question_id": question_id,
             "outcomes": outcomes
         }
-        self.actions_file.write(json.dumps(record) + "\n")
-        self.actions_file.flush()
+        with self._actions_lock:
+            self.actions_file.write(json.dumps(record) + "\n")
+            self.actions_file.flush()
         
     def log_aggregate(self, sim_date: date, question_id: str, 
                       aggregate: Dict[str, float]):
@@ -48,8 +72,9 @@ class SimLogger:
             "question_id": question_id,
             "aggregate": aggregate
         }
-        self.actions_file.write(json.dumps(record) + "\n")
-        self.actions_file.flush()
+        with self._actions_lock:
+            self.actions_file.write(json.dumps(record) + "\n")
+            self.actions_file.flush()
         
     def log_resolution(self, sim_date: date, question_id: str, 
                        ground_truth: str, agent_scores: Dict[str, float]):
@@ -60,11 +85,13 @@ class SimLogger:
             "ground_truth": ground_truth,
             "agent_scores": agent_scores
         }
-        self.actions_file.write(json.dumps(record) + "\n")
-        self.actions_file.flush()
+        with self._actions_lock:
+            self.actions_file.write(json.dumps(record) + "\n")
+            self.actions_file.flush()
         
     def log_model_output(self, sim_date: date, agent_id: str, prompt: str, 
                          response: str, metadata: Optional[Dict[str, Any]] = None):
+        """Log model output to per-agent file (thread-safe)."""
         record = {
             "sim_date": str(sim_date),
             "agent_id": agent_id,
@@ -72,12 +99,17 @@ class SimLogger:
             "response": response,
             "metadata": metadata or {}
         }
-        self.outputs_file.write(json.dumps(record) + "\n")
-        self.outputs_file.flush()
+        output_file = self._get_agent_output_file(agent_id)
+        # Each agent file is only written by one thread, so no lock needed per-file
+        output_file.write(json.dumps(record) + "\n")
+        output_file.flush()
         
     def close(self):
         self.actions_file.close()
-        self.outputs_file.close()
+        with self._agent_files_lock:
+            for f in self._agent_files.values():
+                f.close()
+            self._agent_files.clear()
 
 
 class SimulationEnvironment:
@@ -88,6 +120,8 @@ class SimulationEnvironment:
     - Log score for accuracy
     - Peer score relative to other agents
     - Time-weighted averaging across prediction history
+    
+    Supports parallel agent execution for multi-agent simulations.
     """
     
     def __init__(self, 
@@ -98,10 +132,13 @@ class SimulationEnvironment:
                  inference_provider=None,
                  output_dir: str = ".",
                  resolution_start: date = None,
-                 resolution_end: date = None):
+                 resolution_end: date = None,
+                 parallel: bool = True):
         self.current_date = start_date
         self.end_date = end_date
         self.context_dir = context_dir
+        self.output_dir = output_dir
+        self.parallel = parallel
         
         # Components - filter questions to resolution window
         self.q_pool = QuestionPool(
@@ -113,6 +150,7 @@ class SimulationEnvironment:
         
         # Track prediction history per question
         self.prediction_histories: Dict[str, PredictionHistory] = {}
+        self._histories_lock = Lock()  # For thread-safe history updates
         
         # Current aggregate per question (updated end of each day)
         self.current_aggregates: Dict[str, Dict[str, float]] = {}
@@ -173,28 +211,31 @@ class SimulationEnvironment:
             return
         
         # Table header
-        header = f"{'Agent':<25} {'Brier':>10} {'Peer':>10} {'TW-Peer':>10} {'Correct':>8} {'Wrong':>6} {'Total':>6}"
+        header = f"{'Agent':<25} {'Avg Brier':>10} {'Peer':>10} {'TW-Peer':>10} {'Correct':>8} {'Wrong':>6} {'Total':>6}"
         print(header)
         print("-"*90)
         
         # Table rows
         for agent in sorted(self.agents, key=lambda a: a.agent_id):
             aid = agent.agent_id
-            raw_brier = self.agent_raw_brier.get(aid, 0.0)
+            raw_brier_sum = self.agent_raw_brier.get(aid, 0.0)
             snapshot_peer = self.agent_snapshot_peer.get(aid, 0.0)
             tw_peer = self.agent_scores.get(aid, 0.0)
             correct = self.agent_correct.get(aid, 0)
             wrong = self.agent_wrong.get(aid, 0)
             total = self.agent_questions.get(aid, 0)
             
+            # Average Brier per question
+            avg_brier = raw_brier_sum / total if total > 0 else 0.0
+            
             # Truncate long agent names
             display_name = aid[:24] if len(aid) > 24 else aid
             
-            row = f"{display_name:<25} {raw_brier:>+10.2f} {snapshot_peer:>+10.2f} {tw_peer:>+10.2f} {correct:>8} {wrong:>6} {total:>6}"
+            row = f"{display_name:<25} {avg_brier:>+10.3f} {snapshot_peer:>+10.2f} {tw_peer:>+10.2f} {correct:>8} {wrong:>6} {total:>6}"
             print(row)
         
         print("-"*90)
-        print("Legend: Brier=Raw Brier sum, Peer=Snapshot peer sum, TW-Peer=Time-weighted peer sum")
+        print("Legend: Avg Brier=Mean Brier score per question, Peer=Snapshot peer sum, TW-Peer=Time-weighted peer sum")
         print("="*90)
 
     def step(self):
@@ -217,6 +258,16 @@ class SimulationEnvironment:
                 )
         
         # 3. Collect predictions from all agents
+        if self.parallel and len(self.agents) > 1:
+            self._run_agents_parallel(active_questions)
+        else:
+            self._run_agents_sequential(active_questions)
+        
+        # 4. Update aggregates (end of day)
+        self._update_aggregates(active_questions)
+    
+    def _run_agents_sequential(self, active_questions: List[Question]):
+        """Run agents one at a time (original behavior)."""
         doc_interface = SimDocInterface(self.context_dir, self.current_date)
         forecast_interface = SimForecastInterface(
             active_questions, 
@@ -224,15 +275,47 @@ class SimulationEnvironment:
             self.prediction_histories,
             self.current_date,
             self.logger,
-            resolved_questions=self.resolved_questions
+            resolved_questions=self.resolved_questions,
+            histories_lock=self._histories_lock,
         )
         
         for agent in self.agents:
             forecast_interface.set_agent_context(agent.agent_id)
             agent.act(doc_interface, forecast_interface, self.current_date)
+    
+    def _run_agents_parallel(self, active_questions: List[Question]):
+        """Run agents in parallel using thread pool."""
+        doc_interface = SimDocInterface(self.context_dir, self.current_date)
         
-        # 4. Update aggregates (end of day)
-        self._update_aggregates(active_questions)
+        def run_agent(agent):
+            """Execute a single agent's turn."""
+            # Each agent gets its own forecast interface instance
+            # (they share the same underlying histories dict, but with thread-safe access)
+            forecast_interface = SimForecastInterface(
+                active_questions, 
+                self.current_aggregates,
+                self.prediction_histories,
+                self.current_date,
+                self.logger,
+                resolved_questions=self.resolved_questions,
+                histories_lock=self._histories_lock,
+            )
+            forecast_interface.set_agent_context(agent.agent_id)
+            
+            try:
+                agent.act(doc_interface, forecast_interface, self.current_date)
+                return agent.agent_id, None
+            except Exception as e:
+                return agent.agent_id, str(e)
+        
+        # Run all agents in parallel
+        with ThreadPoolExecutor(max_workers=len(self.agents)) as executor:
+            futures = {executor.submit(run_agent, agent): agent for agent in self.agents}
+            
+            for future in as_completed(futures):
+                agent_id, error = future.result()
+                if error:
+                    print(f"  [ERROR] Agent {agent_id} failed: {error}")
             
     def _resolve_question(self, q: Question):
         """Resolve a question and compute final scores."""
@@ -320,7 +403,11 @@ class SimDocInterface(AgentInterface):
 
 
 class SimForecastInterface(ForecastInterface):
-    """Agent's interface to forecasting questions."""
+    """
+    Agent's interface to forecasting questions.
+    
+    Thread-safe for parallel agent execution.
+    """
     
     def __init__(self, 
                  questions: List[Question],
@@ -328,7 +415,8 @@ class SimForecastInterface(ForecastInterface):
                  histories: Dict[str, PredictionHistory],
                  sim_date: date,
                  logger: SimLogger,
-                 resolved_questions: List[Question] = None):
+                 resolved_questions: List[Question] = None,
+                 histories_lock: Lock = None):
         self.questions = {q.qid: q for q in questions}
         self.aggregates = aggregates
         self.histories = histories
@@ -336,6 +424,7 @@ class SimForecastInterface(ForecastInterface):
         self.logger = logger
         self.current_agent_id: Optional[str] = None
         self.resolved_questions = resolved_questions or []
+        self._histories_lock = histories_lock or Lock()
         
         # Query execution
         self.query_executor = QueryExecutor(timeout_seconds=5.0)
@@ -361,7 +450,7 @@ class SimForecastInterface(ForecastInterface):
         return views
     
     def submit_prediction(self, prediction: PredictionSubmission) -> None:
-        """Record a probabilistic prediction."""
+        """Record a probabilistic prediction (thread-safe)."""
         if not self.current_agent_id:
             raise ValueError("No agent context set")
         if prediction.question_id not in self.questions:
@@ -383,12 +472,13 @@ class SimForecastInterface(ForecastInterface):
             outcomes=prediction.outcomes
         )
         
-        # Add to history
-        history = self.histories.get(prediction.question_id)
-        if history:
-            history.add_prediction(daily_pred)
+        # Add to history (thread-safe)
+        with self._histories_lock:
+            history = self.histories.get(prediction.question_id)
+            if history:
+                history.add_prediction(daily_pred)
             
-        # Log
+        # Log (already thread-safe)
         self.logger.log_prediction(
             self.sim_date, self.current_agent_id,
             prediction.question_id, prediction.outcomes
@@ -441,7 +531,7 @@ class SimForecastInterface(ForecastInterface):
         for q in self.questions.values():
             agg = self.aggregates.get(q.qid, {})
             
-            # Get agent's current prediction if any
+            # Get agent's current prediction if any (read-only, no lock needed)
             my_pred = None
             my_pred_date = None
             history = self.histories.get(q.qid)
@@ -491,4 +581,3 @@ class SimForecastInterface(ForecastInterface):
         
         self._df_cache = pd.DataFrame(rows)
         return self._df_cache
-

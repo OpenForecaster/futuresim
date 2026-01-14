@@ -290,9 +290,18 @@ Options to explore later:
 2. **Build FAISS index**: Semantic search over articles for RAG-style agents
 3. **Sandbox code execution**: Replace eval() with safe execution (see above)
 4. ~~**Agent Memory**: Even basic agent should have access to write some memories for next days.~~ ✅ **COMPLETED** - BasicAgent now has persistent memory across days via `<memory>` tags. Memory is the only context retained between days. See `agents/basicAgent.py`.
-5. **Async agent execution**: Parallel prompts for speed
+5. ~~**Async agent execution**: Parallel prompts for speed~~ ✅ **COMPLETED** - Multi-agent parallel execution via ThreadPoolExecutor. Use `--agents_config` for multi-agent runs.
 6. **Evaluation metrics**: Track Brier scores separately from peer scores
 7. **Checkpointing**: Save/resume simulation state
 8. **Deduplication across batches**: Current approach may have duplicates if same article appears in multiple JSONL files
+
+### High Priority TODO
+
+9. **vLLM Batching for Multi-Agent**: Currently vLLM is called with batch size 1 per agent. For multi-agent with shared vLLM backend, we should:
+   - Collect pending inference requests from all agents
+   - Batch them together for a single vLLM call
+   - Distribute responses back to agents
+   - This requires restructuring agent flow from synchronous chat() to async request/response pattern
+   - Complexity: HIGH - significant refactor needed
 
 

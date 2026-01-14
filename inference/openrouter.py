@@ -5,13 +5,16 @@ Drop-in replacement for VLLMInference - use chat() method with same interface.
 Features:
 - Automatic retries with exponential backoff
 - Prompt caching support (automatic for most providers)
+- Global rate limiting (shared across all instances)
+- Session reuse for connection pooling
 - Compatible sampling_params interface
 """
 
 import os
 import time
 import random
-from typing import Dict, Any, List
+from threading import Lock
+from typing import Dict, Any, List, Optional
 
 try:
     import requests
@@ -19,6 +22,79 @@ except ImportError:
     raise ImportError(
         "requests module not found. Install with: pip install requests"
     )
+
+
+class GlobalRateLimiter:
+    """
+    Thread-safe rate limiter shared across all OpenRouter instances.
+    Uses token bucket algorithm.
+    """
+    _instance: Optional['GlobalRateLimiter'] = None
+    _lock = Lock()
+    
+    def __new__(cls, requests_per_second: float = 32.0):
+        with cls._lock:
+            if cls._instance is None:
+                cls._instance = super().__new__(cls)
+                cls._instance._initialized = False
+            return cls._instance
+    
+    def __init__(self, requests_per_second: float = 32.0):
+        if self._initialized:
+            return
+        self._initialized = True
+        self.requests_per_second = requests_per_second
+        self.interval = 1.0 / requests_per_second
+        self.last_request = 0.0
+        self._acquire_lock = Lock()
+    
+    def acquire(self):
+        """Block until a request slot is available."""
+        with self._acquire_lock:
+            now = time.time()
+            wait_time = self.last_request + self.interval - now
+            if wait_time > 0:
+                time.sleep(wait_time)
+            self.last_request = time.time()
+    
+    @classmethod
+    def configure(cls, requests_per_second: float):
+        """Reconfigure the global rate limiter."""
+        with cls._lock:
+            if cls._instance is not None:
+                cls._instance.requests_per_second = requests_per_second
+                cls._instance.interval = 1.0 / requests_per_second
+            else:
+                # Create instance directly without calling __new__ again (would deadlock)
+                instance = super().__new__(cls)
+                instance._initialized = False
+                instance.requests_per_second = requests_per_second
+                instance.interval = 1.0 / requests_per_second
+                instance.last_request = 0.0
+                instance._acquire_lock = Lock()
+                instance._initialized = True
+                cls._instance = instance
+
+
+# Global session for connection pooling
+_session: Optional[requests.Session] = None
+_session_lock = Lock()
+
+
+def get_session() -> requests.Session:
+    """Get or create the shared requests session."""
+    global _session
+    with _session_lock:
+        if _session is None:
+            _session = requests.Session()
+            # Configure connection pooling
+            adapter = requests.adapters.HTTPAdapter(
+                pool_connections=10,
+                pool_maxsize=20,
+                max_retries=0  # We handle retries ourselves
+            )
+            _session.mount('https://', adapter)
+        return _session
 
 
 class OpenRouterInference:
@@ -77,6 +153,9 @@ class OpenRouterInference:
             "Content-Type": "application/json",
             "HTTP-Referer": "https://github.com/forecast-sim",  # Optional: for rankings
         }
+        
+        # Ensure rate limiter is initialized
+        GlobalRateLimiter()
     
     def chat(self, messages: List[Dict[str, str]], sampling_params: Dict[str, Any]) -> str:
         """
@@ -126,14 +205,19 @@ class OpenRouterInference:
         
         Retries on:
             - HTTP 429 (rate limit)
-            - HTTP 500, 502, 503, 504 (server errors)
+            - HTTP 500, 502, 503, 504, 524 (server errors)
             - Connection errors
         """
         last_error = None
+        rate_limiter = GlobalRateLimiter()
+        session = get_session()
         
         for attempt in range(self.max_retries + 1):
             try:
-                response = requests.post(
+                # Apply rate limiting
+                rate_limiter.acquire()
+                
+                response = session.post(
                     self.API_URL,
                     headers=self.headers,
                     json=payload,
