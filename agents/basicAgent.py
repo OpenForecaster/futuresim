@@ -11,9 +11,11 @@ Uses chain-of-thought with <reasoning> and <action> tags.
 
 import re
 import json
+import os
 from datetime import date
+from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from agents.base import BaseAgent
 from environment.interfaces import PredictionSubmission
@@ -25,6 +27,7 @@ class AgentConfig:
     max_queries: int = 3
     max_submit_retries: int = 3
     max_outcomes_per_question: int = 5
+    memory_dir: Optional[str] = None  # Directory to persist memory, None = no persistence
     sampling_params: dict = None
     
     def __post_init__(self):
@@ -55,6 +58,16 @@ class BasicAgent(BaseAgent):
         super().__init__(agent_id, inference_provider, model_name)
         self.config = config or AgentConfig()
         
+        # Memory: persisted text the agent can update between days
+        self.memory: str = ""
+        self._memory_path: Optional[Path] = None
+        
+        # Load memory from disk if configured
+        if self.config.memory_dir:
+            self._memory_path = Path(self.config.memory_dir) / f"{agent_id}_memory.txt"
+            if self._memory_path.exists():
+                self.memory = self._memory_path.read_text().strip()
+        
     def act(self, 
             doc_interface,  # AgentInterface - not used in BasicAgent
             forecast_interface,  # Has execute_query, submit_prediction, get_dataframe
@@ -64,12 +77,9 @@ class BasicAgent(BaseAgent):
         
         Returns list of submitted forecasts.
         """
-        # Build messages
-        system_prompt = self._build_system_prompt(forecast_interface, current_date)
-        messages = [{"role": "system", "content": system_prompt}]
-        
-        # Initial user message
-        messages.append({"role": "user", "content": f"Begin. You have {self.config.max_queries} queries to explore data, then you must submit forecasts."})
+        # Build the instructions (formerly "system prompt") as first user message
+        instructions = self._build_instructions(forecast_interface, current_date)
+        messages = [{"role": "user", "content": instructions}]
         
         # Query loop
         queries_remaining = self.config.max_queries
@@ -80,16 +90,14 @@ class BasicAgent(BaseAgent):
             response = self.inference.chat(messages, self.config.sampling_params)
             messages.append({"role": "assistant", "content": response})
             
-            # Log just the last exchange (not full conversation with system prompt)
-            last_user = messages[-2]["content"] if len(messages) >= 2 else ""
-            forecast_interface.log_model_output(
-                last_user, 
-                response, 
-                {"phase": "query", "queries_remaining": queries_remaining}
-            )
-            
             # Check if agent wants to submit
             if "<submit>" in response.lower():
+                # Log the submit response
+                last_user = messages[-2]["content"] if len(messages) >= 2 else ""
+                forecast_interface.log_model_output(
+                    last_user, response, 
+                    {"phase": "submit", "queries_remaining": queries_remaining}
+                )
                 break
             
             # Extract and execute code from <action> tag
@@ -98,18 +106,31 @@ class BasicAgent(BaseAgent):
                 result, error = forecast_interface.execute_query(code, current_date)
                 queries_remaining -= 1
                 
+                # Log after decrement so count is accurate
+                last_user = messages[-2]["content"] if len(messages) >= 2 else ""
+                forecast_interface.log_model_output(
+                    last_user, response, 
+                    {"phase": "query", "queries_remaining": queries_remaining}
+                )
+                
                 if error:
-                    feedback = f"QUERY ERROR: {error}\nTries remaining: {queries_remaining}"
+                    feedback = f"QUERY ERROR: {error}\n\nQueries remaining: {queries_remaining}"
                 else:
-                    feedback = f"QUERY RESULT:\n{result}\n\nTries remaining: {queries_remaining}"
-                    if queries_remaining == 0:
-                        feedback += "\n\nNo more queries. Submit your forecasts now."
+                    feedback = f"QUERY RESULT:\n{result}\n\nQueries remaining: {queries_remaining}"
+                
+                if queries_remaining == 0:
+                    feedback += "\n\nNo more queries available. You must submit your forecasts now."
                 
                 messages.append({"role": "user", "content": feedback})
             else:
                 # No action found
-                messages.append({"role": "user", "content": "I didn't find an <action> block. Please use <action>```python\n...\n```</action> for code or <action><submit>...</submit></action> for forecasts."})
                 queries_remaining -= 1
+                last_user = messages[-2]["content"] if len(messages) >= 2 else ""
+                forecast_interface.log_model_output(
+                    last_user, response, 
+                    {"phase": "invalid", "queries_remaining": queries_remaining}
+                )
+                messages.append({"role": "user", "content": "No valid <action> block found. See instructions for format."})
         
         # Submit loop
         forecasts = []
@@ -128,13 +149,17 @@ class BasicAgent(BaseAgent):
                             outcomes=f['outcomes']
                         )
                         forecast_interface.submit_prediction(pred)
+                        # Print the submission
+                        outcomes_str = ", ".join(f"{k}: {v:.2f}" for k, v in f['outcomes'].items())
+                        print(f"  [{self.agent_id}] Forecast {f['qid']}: {outcomes_str}")
                     except Exception as e:
                         print(f"  [{self.agent_id}] Failed to submit {f['qid']}: {e}")
                 break
             else:
                 retries_remaining -= 1
                 if retries_remaining > 0:
-                    messages.append({"role": "user", "content": f"PARSE ERROR: {error}\nSubmit retries remaining: {retries_remaining}. Fix and resubmit."})
+                    retry_msg = f"PARSE ERROR: {error}\n\nRetries remaining: {retries_remaining}"
+                    messages.append({"role": "user", "content": retry_msg})
                     response = self.inference.chat(messages, self.config.sampling_params)
                     messages.append({"role": "assistant", "content": response})
                     forecast_interface.log_model_output(
@@ -143,65 +168,99 @@ class BasicAgent(BaseAgent):
                         {"phase": "submit_retry", "retries_remaining": retries_remaining}
                     )
         
+        # Memory update phase (end of day)
+        self._prompt_memory_update(messages, forecast_interface, current_date)
+        
         return forecasts
     
-    def _build_system_prompt(self, forecast_interface, current_date: date) -> str:
-        """Build the system prompt with DataFrame info and rules."""
+    def _build_instructions(self, forecast_interface, current_date: date) -> str:
+        """Build the instructions for the agent including data info and rules."""
         df_info = forecast_interface.get_dataframe_info()
         
-        return f"""You are a forecasting agent. Your goal: make accurate probability predictions on questions.
+        # Memory section (if agent has memory from previous days)
+        memory_section = ""
+        if self.memory:
+            memory_section = f"""## YOUR MEMORY FROM PREVIOUS DAYS
+<memory>
+{self.memory}
+</memory>
 
-## SCORING (Brier Skill Score)
-Score = 1 - Σ(p_i - y_i)² where sum is over ALL outcomes you name PLUS the true answer.
-- y_i = 1 if outcome i is the true answer, 0 otherwise  
-- p_i = probability you assigned (0 if you didn't name it)
+"""
+        
+        return f"""You are a forecasting agent. Today is {current_date}. Your goal: make accurate probability predictions.
 
-If you don't name the true answer, you get penalized by (0-1)² = 1. Name plausible answers!
+{memory_section}## SCORING (Brier Score)
+You are scored on how well your predicted probabilities match reality.
+
+Key insight: You are ONLY rewarded for assigning probability to the ACTUAL correct answer.
+- Assigning probability to wrong answers HURTS your score (you lose points)
+- Assigning probability to placeholders like "Unknown", "TBD", "Other" is USELESS and hurts your score
+- NOT naming the correct answer = maximum penalty
+
+Strategy: Predict specific, plausible answers based on the question context. Use the question title, 
+resolution criteria, and any available data to make educated guesses about likely outcomes.
 
 ## AVAILABLE DATA
-DataFrame `df` with {df_info['n_rows']} rows ({df_info['n_active']} active, {df_info['n_resolved']} resolved).
+DataFrame `df` with {df_info['n_rows']} questions ({df_info['n_active']} active/unresolved, {df_info['n_resolved']} resolved).
 
-Columns:
+Column descriptions:
 {df_info['columns_desc']}
 
-Current date: `today` = {current_date}
+Note: `market_aggregate` and `my_prediction` columns contain Python dicts (or None). You can access them directly, e.g. `row['market_aggregate']['outcome_name']`.
+The `num_predictions` column shows how many predictions have been made on that question.
 
-## RESPONSE FORMAT (IMPORTANT!)
-Always structure your response with first reasoning, then the final action in XML tags:
+## CODE EXECUTION ENVIRONMENT
+Your Python code runs in a sandbox with these variables pre-defined:
+- `df`: the pandas DataFrame
+- `pd`: pandas module  
+- `today`: date object for {current_date}
+- `date`, `datetime`, `timedelta`: from datetime module
+
+Import statements are not available. Standard builtins (len, str, int, float, min, max, sum, sorted, range, etc.) are available.
+
+Example query:
+```python
+df[df['is_resolved'] == False][['qid', 'title', 'answer_type']].head()
+```
+
+## RESPONSE FORMAT
+Every response must have <reasoning> then <action>:
 <reasoning>
-Your reasoning here
+Your analysis
 </reasoning>
 <action>
-Your executable action here. Either:
-1. Python code: ```python
-df[...].head()
-```
-2. Forecast submission: <submit>...</submit>
+Python code in ```python ... ``` OR forecast submission in <submit>...</submit>
 </action>
 
-## QUERY PHASE ({self.config.max_queries} queries max)
-Code has access to: df, pd, today, date, datetime, timedelta
+## INTERACTION FLOW
+1. QUERY PHASE: You have {self.config.max_queries} queries. One query per turn.
+2. SUBMIT PHASE: Submit forecasts when ready.
 
-## SUBMIT PHASE  
-Outcome names must be SPECIFIC answers matching the question type:
-- "string (name)" → person names like "John Smith", "Elon Musk"
-- "string (location)" → places like "Tokyo", "California"
-- DO NOT use generic "Other" - it won't match!
-
-Format:
+## SUBMISSION FORMAT
 <action>
 <submit>
-  <forecast qid="12345">
-    <outcome name="Tokyo" prob="0.4"/>
-    <outcome name="Beijing" prob="0.3"/>
+  <forecast qid="QUESTION_ID">
+    <outcome name="Answer1" prob="0.5"/>
+    <outcome name="Answer2" prob="0.3"/>
+  </forecast>
+  ...
+  <forecast qid="QUESTION_ID">
+    ...
   </forecast>
 </submit>
 </action>
 
 Rules:
-- qid MUST be from df where is_resolved=False
-- Probabilities sum ≤ 1.0
-- Only use qids you see in query results!"""
+- qid must be from an active (is_resolved=False) question you saw in query results
+- One forecast per QID (do not submit multiple forecasts for the same question)
+- Outcome names must be REAL predicted answers (e.g., person names, locations, numbers)
+- NEVER use placeholders like "Unknown", "TBD", "Other", "N/A" - these ALWAYS hurt your score
+- Probabilities must sum to ≤ 1.0
+- You must submit at least one forecast
+
+---
+
+You have {self.config.max_queries} query turns. Begin."""
     
     def _extract_action_code(self, response: str) -> Optional[str]:
         """Extract Python code from <action> tag."""
@@ -235,6 +294,17 @@ Rules:
             return code
         
         return None
+    
+    def _print_action(self, response: str) -> None:
+        """Print the content of <action> tags for terminal visibility."""
+        action_pattern = r'<action>(.*?)</action>'
+        action_match = re.search(action_pattern, response, re.DOTALL | re.IGNORECASE)
+        if action_match:
+            action_content = action_match.group(1).strip()
+            # Truncate if too long
+            if len(action_content) > 200:
+                action_content = action_content[:200] + "..."
+            print(f"  [{self.agent_id}] {action_content}")
     
     def _parse_forecasts(self, response: str) -> Tuple[List[Dict], Optional[str]]:
         """
@@ -296,4 +366,79 @@ Rules:
             
             forecasts.append({'qid': qid, 'outcomes': outcomes})
         
-        return forecasts, None
+        # Deduplicate by QID (keep last)
+        unique_forecasts = {}
+        for f in forecasts:
+            unique_forecasts[f['qid']] = f
+        
+        return list(unique_forecasts.values()), None
+    
+    def _prompt_memory_update(self, messages: List[Dict[str, str]], 
+                               forecast_interface, current_date: date) -> None:
+        """
+        Ask the agent if it wants to update its memory at the end of the day.
+        
+        Memory is the only context retained between days, allowing the agent to
+        track insights, patterns, and strategies across simulation days.
+        """
+        memory_prompt = f"""End of day {current_date}. You can now update your memory.
+
+## MEMORY UPDATE
+Your memory is the ONLY context you will retain tomorrow. Everything else (this conversation, 
+queries, forecasts) will be forgotten. Tomorrow you'll receive a fresh system prompt with 
+your memory included.
+
+Use memory to record:
+- Insights about recurring question patterns
+- Strategies that worked well or poorly
+- Important observations about data/trends
+- Notes about specific questions you're tracking
+
+Keep it CONCISE (a few paragraphs max) as it consumes your context window.
+
+To update memory, include it after your reasoning:
+<reasoning>
+Reflect on today's forecasting session...
+</reasoning>
+<memory>
+Your updated memory content here (complete replacement, not a diff)
+</memory>
+
+If you don't want to update memory, just output <reasoning>...</reasoning> without <memory> tags.
+Current memory length: {len(self.memory)} characters"""
+        
+        messages.append({"role": "user", "content": memory_prompt})
+        response = self.inference.chat(messages, self.config.sampling_params)
+        messages.append({"role": "assistant", "content": response})
+        
+        # Log the memory update exchange
+        forecast_interface.log_model_output(
+            memory_prompt, 
+            response, 
+            {"phase": "memory_update", "current_memory_len": len(self.memory)}
+        )
+        
+        # Extract and save memory if present
+        new_memory = self._extract_memory(response)
+        if new_memory is not None:
+            self.memory = new_memory
+            self._save_memory()
+    
+    def _extract_memory(self, response: str) -> Optional[str]:
+        """
+        Extract memory content from <memory></memory> tags.
+        
+        Returns None if no memory tags found, empty string if tags are empty.
+        """
+        pattern = r'<memory>(.*?)</memory>'
+        match = re.search(pattern, response, re.DOTALL | re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+        return None
+    
+    def _save_memory(self) -> None:
+        """Persist memory to disk if configured."""
+        if self._memory_path:
+            self._memory_path.parent.mkdir(parents=True, exist_ok=True)
+            self._memory_path.write_text(self.memory)
+

@@ -12,7 +12,7 @@ sequenceDiagram
     participant Agent as BasicAgent
     
     Note over Env: Start of day
-    Env->>Agent: Initial prompt with DataFrame info + scoring rules
+    Env->>Agent: Initial prompt with DataFrame info + scoring rules (+ memory)
     
     loop Query Phase (max_queries tries)
         Agent->>Env: Python code on DataFrame
@@ -20,7 +20,7 @@ sequenceDiagram
         Env->>Agent: Result + "Tries remaining: N"
     end
     
-    Note over Agent: Agent outputs "SUBMIT:" with XML forecasts
+    Note over Agent: Agent outputs "<submit>" with XML forecasts
     
     loop Submit Phase (max_retries)
         alt Parse success
@@ -29,6 +29,11 @@ sequenceDiagram
             Env->>Agent: Error + "Retries remaining: N"
         end
     end
+    
+    Note over Env: Memory Update Phase
+    Env->>Agent: Prompt to update memory
+    Agent->>Env: Response with optional <memory>...</memory>
+    Env->>Env: Parse and persist memory
     
     Note over Env: End of day, update aggregates
 ```
@@ -117,6 +122,40 @@ Rules: probs sum ≤ 1.0, max 5 outcomes/question
   </forecast>
 </submit>
 ```
+
+---
+
+## Agent Memory
+
+Agents can maintain persistent memory across simulation days. Memory is the ONLY context retained between days - all other conversation history is discarded.
+
+### How it works:
+1. At the start of each day, memory (if any) is included in the system prompt as `<memory>...</memory>`.
+2. At the end of the day, the agent is prompted to optionally update its memory.
+3. To update, the agent outputs `<memory>New content here</memory>` after `<reasoning>...</reasoning>`.
+4. Memory is stored as a text file (`{agent_id}_memory.txt`) in the simulation output directory.
+
+### Memory Update Format:
+
+```xml
+<reasoning>
+Reflecting on today's forecasting session...
+</reasoning>
+<memory>
+## Key Insights
+- Pattern observed: many year-end questions resolve on Dec 31
+- Strategy: focus on questions with clear resolution criteria
+
+## Questions to Track
+- QID 12345: Watching for news about X
+</memory>
+```
+
+### Best Practices:
+- Keep memory concise (a few paragraphs) to avoid consuming context window.
+- Use memory for strategic insights, not raw data.
+- Record what worked well or poorly.
+- Track specific questions or patterns worth monitoring.
 
 ---
 

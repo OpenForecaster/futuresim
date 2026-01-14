@@ -29,7 +29,6 @@ class QuestionPool:
     """
     def __init__(self, dataset_name: str, split: str = "train",
                  resolution_start: date = None, resolution_end: date = None):
-        print(f"Loading dataset {dataset_name}...")
         self.ds = load_dataset(dataset_name, split=split)
         
         self.resolution_start = resolution_start
@@ -41,11 +40,7 @@ class QuestionPool:
         # Track resolved question IDs
         self._resolved: set = set()
         
-        print("Indexing questions...")
         self._build_index()
-        if resolution_start or resolution_end:
-            print(f"Filtered to questions resolving {resolution_start} to {resolution_end}")
-        print(f"Indexed {len(self._all_questions)} questions.")
         
     def _parse_date(self, date_val) -> Optional[date]:
         if date_val is None:

@@ -41,14 +41,6 @@ class VLLMInference:
             self.llm = LLM(model=model_path, max_model_len=max_model_len, **kwargs)
             _VLLM_ENGINES[cache_key] = self.llm
             
-    def generate(self, prompt: str, sampling_params: Dict[str, Any]) -> str:
-        """Generate text from a raw prompt string (no chat template)."""
-        from vllm import SamplingParams
-        
-        sp = SamplingParams(**sampling_params)
-        outputs = self.llm.generate([prompt], sp, use_tqdm=False)
-        return outputs[0].outputs[0].text
-    
     def chat(self, messages: List[Dict[str, str]], sampling_params: Dict[str, Any]) -> str:
         """
         Chat completion using messages format.

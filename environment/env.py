@@ -118,12 +118,16 @@ class SimulationEnvironment:
         self.current_aggregates: Dict[str, Dict[str, float]] = {}
         
         self.agents = []
-        self.agent_scores: Dict[str, float] = {}  # Cumulative scores
+        self.agent_scores: Dict[str, float] = {}  # Cumulative time-weighted peer scores
         
         # Track prediction outcomes for summary
         self.agent_correct: Dict[str, int] = {}  # Count of positive scores
         self.agent_wrong: Dict[str, int] = {}    # Count of negative scores
         self.agent_questions: Dict[str, int] = {}  # Total questions predicted on
+        
+        # Additional metrics for final summary
+        self.agent_raw_brier: Dict[str, float] = {}  # Sum of raw Brier scores (last pred only)
+        self.agent_snapshot_peer: Dict[str, float] = {}  # Sum of peer scores at resolution (not time-weighted)
         
         # Track resolved questions for agent learning
         self.resolved_questions: List[Question] = []
@@ -137,24 +141,61 @@ class SimulationEnvironment:
         self.agent_correct[agent.agent_id] = 0
         self.agent_wrong[agent.agent_id] = 0
         self.agent_questions[agent.agent_id] = 0
+        self.agent_raw_brier[agent.agent_id] = 0.0
+        self.agent_snapshot_peer[agent.agent_id] = 0.0
         
     def run(self):
-        print(f"Starting simulation from {self.current_date} to {self.end_date}")
-        print(f"Total questions: {self.q_pool.total_count}")
+        print(f"Simulation: {self.current_date} to {self.end_date} ({self.q_pool.total_count} questions)")
         
         while self.current_date <= self.end_date:
-            print(f"--- Day {self.current_date} (Active: {self.q_pool.active_count}) ---")
+            print(f"\n--- Day {self.current_date} ---")
             self.step()
+            self._print_daily_scores()
             self.current_date += timedelta(days=1)
         
         self.logger.close()
-        print("\nSimulation ended.")
-        print("\nFinal Scores:")
-        for agent_id, score in sorted(self.agent_scores.items()):
-            correct = self.agent_correct.get(agent_id, 0)
-            wrong = self.agent_wrong.get(agent_id, 0)
-            total = self.agent_questions.get(agent_id, 0)
-            print(f"  {agent_id}: {score:+.2f} ({correct} correct, {wrong} wrong, {total} total predictions)")
+        self._print_final_summary()
+    
+    def _print_daily_scores(self):
+        """Print current cumulative scores for all agents."""
+        if self.agent_scores:
+            scores_str = ", ".join(f"{aid}: {sc:+.2f}" for aid, sc in sorted(self.agent_scores.items()))
+            print(f"  Scores: {scores_str}")
+    
+    def _print_final_summary(self):
+        """Print formatted summary table with all scoring metrics."""
+        print("\n" + "="*90)
+        print("FINAL RESULTS")
+        print("="*90)
+        
+        if not self.agents:
+            print("  No agents participated.")
+            return
+        
+        # Table header
+        header = f"{'Agent':<25} {'Brier':>10} {'Peer':>10} {'TW-Peer':>10} {'Correct':>8} {'Wrong':>6} {'Total':>6}"
+        print(header)
+        print("-"*90)
+        
+        # Table rows
+        for agent in sorted(self.agents, key=lambda a: a.agent_id):
+            aid = agent.agent_id
+            raw_brier = self.agent_raw_brier.get(aid, 0.0)
+            snapshot_peer = self.agent_snapshot_peer.get(aid, 0.0)
+            tw_peer = self.agent_scores.get(aid, 0.0)
+            correct = self.agent_correct.get(aid, 0)
+            wrong = self.agent_wrong.get(aid, 0)
+            total = self.agent_questions.get(aid, 0)
+            
+            # Truncate long agent names
+            display_name = aid[:24] if len(aid) > 24 else aid
+            
+            row = f"{display_name:<25} {raw_brier:>+10.2f} {snapshot_peer:>+10.2f} {tw_peer:>+10.2f} {correct:>8} {wrong:>6} {total:>6}"
+            print(row)
+        
+        print("-"*90)
+        print("Legend: Brier=Raw Brier sum, Peer=Snapshot peer sum, TW-Peer=Time-weighted peer sum")
+        print("="*90)
 
     def step(self):
         # 1. Resolve questions expiring today
@@ -195,14 +236,35 @@ class SimulationEnvironment:
             
     def _resolve_question(self, q: Question):
         """Resolve a question and compute final scores."""
+        from .scoring import BrierScorer, compute_snapshot_peer_scores
+        
         history = self.prediction_histories.get(q.qid)
         if not history or not history.predictions:
             return
             
-        # Resolve and compute scores
+        # Resolve and compute time-weighted scores
         result = resolve_question(history, q.ground_truth_answer, self.matcher)
         
-        # Update cumulative scores
+        # Compute snapshot scores (last prediction only, not time-weighted)
+        final_snapshot = history.get_all_current_predictions()
+        scorer = BrierScorer()
+        
+        # Raw Brier scores (per agent, not peer)
+        for agent_id, pred in final_snapshot.items():
+            if agent_id in self.agent_raw_brier:
+                raw_brier = scorer.score_prediction(pred, q.ground_truth_answer, self.matcher)
+                self.agent_raw_brier[agent_id] += raw_brier
+        
+        # Snapshot peer scores (not time-weighted)
+        if final_snapshot:
+            snapshot_peer = compute_snapshot_peer_scores(
+                final_snapshot, q.ground_truth_answer, scorer, self.matcher
+            )
+            for agent_id, peer_score in snapshot_peer.items():
+                if agent_id in self.agent_snapshot_peer:
+                    self.agent_snapshot_peer[agent_id] += peer_score
+        
+        # Update cumulative time-weighted scores
         for agent_id, score in result.agent_scores.items():
             if agent_id in self.agent_scores:
                 self.agent_scores[agent_id] += score
@@ -358,10 +420,7 @@ class SimForecastInterface(ForecastInterface):
         columns_desc = []
         for col in df.columns:
             dtype = str(df[col].dtype)
-            sample = str(df[col].iloc[0]) if len(df) > 0 else "N/A"
-            if len(sample) > 50:
-                sample = sample[:50] + "..."
-            columns_desc.append(f"- {col} ({dtype}): e.g. {sample}")
+            columns_desc.append(f"- {col} ({dtype})")
         
         return {
             'n_rows': len(df),
@@ -407,9 +466,9 @@ class SimForecastInterface(ForecastInterface):
                 'resolution_date': q.resolution_date,
                 'is_resolved': False,
                 'ground_truth': None,
-                'market_aggregate': json.dumps(agg) if agg else None,
+                'market_aggregate': agg if agg else None,  # Store as dict, not JSON string
                 'num_predictions': num_preds,
-                'my_prediction': json.dumps(my_pred) if my_pred else None,
+                'my_prediction': my_pred if my_pred else None,  # Store as dict, not JSON string
                 'my_prediction_date': my_pred_date,
             })
         

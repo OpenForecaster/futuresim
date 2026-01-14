@@ -26,6 +26,15 @@ For the /is/cluster, to get GPU (say to debug) you will have to get an interacti
 ```
 Local open-weight models are stored in /fast/rolmedo/models on the /is/cluster. For debugging, its good to use qwen3-4b-it-2507. The OpenForesight dataset of forecasting questions is at /fast/sgoel/forecasting/qs/OpenForesight/data
 
+Test script:
+```bash
+python scripts/test_basic_agent.py \
+  --start_date 2024-12-25 \
+  --end_date 2024-12-27 \
+  --lookback_days 7 \
+  --sim_name test_run
+```
+
 On seal-node we already have GPUs, so you can go for it directly.
 
 ## Scoring Approach
@@ -185,6 +194,25 @@ environment/scoring/
 
 ---
 
+## How to Run
+
+To run the BasicAgent test for the Dec 25-27 resolution window (with a 7-day lookback):
+
+```bash
+python scripts/test_basic_agent.py \
+  --start_date 2024-12-25 \
+  --end_date 2024-12-27 \
+  --lookback_days 7 \
+  --sim_name test_run
+```
+
+Arguments:
+- `--start_date` / `--end_date`: Bounds for **resolution dates** (which questions resolve).
+- `--lookback_days`: How many days before the first resolution to start the simulation (agent starts forecasting).
+- `--sim_name`: Subdirectory name under `/is/cluster/fast/sgoel/forecasting/current_sim/`.
+
+---
+
 ## Agent-Forecast Interaction (Summary)
 
 See `notes/agent-forecast-interaction.md` for detailed design.
@@ -261,9 +289,10 @@ Options to explore later:
 1. **Implement SimDocInterface**: Read articles from organized parquet files
 2. **Build FAISS index**: Semantic search over articles for RAG-style agents
 3. **Sandbox code execution**: Replace eval() with safe execution (see above)
-4. **Agent Memory**: Even basic agent should have access to write some memories for next days.
+4. ~~**Agent Memory**: Even basic agent should have access to write some memories for next days.~~ ✅ **COMPLETED** - BasicAgent now has persistent memory across days via `<memory>` tags. Memory is the only context retained between days. See `agents/basicAgent.py`.
 5. **Async agent execution**: Parallel prompts for speed
 6. **Evaluation metrics**: Track Brier scores separately from peer scores
 7. **Checkpointing**: Save/resume simulation state
 8. **Deduplication across batches**: Current approach may have duplicates if same article appears in multiple JSONL files
+
 

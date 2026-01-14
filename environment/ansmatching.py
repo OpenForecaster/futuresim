@@ -18,7 +18,7 @@ class AnswerMatcher:
     def __init__(self, inference_provider):
         """
         Args:
-            inference_provider: Object with generate(prompt, sampling_params) method.
+            inference_provider: Object with chat(messages, sampling_params) method.
         """
         self.inference = inference_provider
         
@@ -130,10 +130,8 @@ Outcome B: "{outcome_b}"
 Are these two outcomes semantically equivalent? i.e. do they represent the exact same result?
 Answer strictly with "Yes" or "No"."""
 
-        response = self.inference.generate(
-            prompt, 
-            {"temperature": 0.0, "max_tokens": 10}
-        )
+        messages = [{"role": "user", "content": prompt}]
+        response = self.inference.chat(messages, {"temperature": 0.0, "max_tokens": 10})
         return "yes" in response.lower()
 
     def find_match(self, candidate: str, existing_outcomes: List[str]) -> Optional[str]:
@@ -180,10 +178,8 @@ If no match exists, respond with "None".
 
 Answer:"""
 
-        response = self.inference.generate(
-            prompt, 
-            {"temperature": 0.0, "max_tokens": 10}
-        ).strip()
+        messages = [{"role": "user", "content": prompt}]
+        response = self.inference.chat(messages, {"temperature": 0.0, "max_tokens": 10}).strip()
         
         if response.lower() == "none":
             return None

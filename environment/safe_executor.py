@@ -89,7 +89,15 @@ class QueryExecutor:
             # Windows or other platform without SIGALRM
             pass
         
+        # Capture stdout to prevent agent prints from polluting terminal
+        import io
+        import sys
+        captured_output = io.StringIO()
+        old_stdout = sys.stdout
+        
         try:
+            sys.stdout = captured_output
+            
             # Try as expression first
             try:
                 result = eval(code, exec_globals, {})
@@ -98,13 +106,22 @@ class QueryExecutor:
                 exec(code, exec_globals, {})
                 result = exec_globals.get('result', "Code executed (no result returned)")
             
-            return self._format_result(result), None
+            # Get any printed output
+            printed = captured_output.getvalue()
+            formatted_result = self._format_result(result)
+            
+            # Include printed output if any
+            if printed.strip():
+                formatted_result = f"{printed.strip()}\n\n{formatted_result}"
+            
+            return formatted_result, None
             
         except TimeoutError as e:
             return "", str(e)
         except Exception as e:
             return "", f"{type(e).__name__}: {e}"
         finally:
+            sys.stdout = old_stdout
             # Reset alarm
             try:
                 signal.alarm(0)
