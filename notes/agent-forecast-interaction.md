@@ -9,15 +9,19 @@ This document describes how forecasting agents interact with the simulation envi
 ```mermaid
 sequenceDiagram
     participant Env as Environment
+    participant CSV as market.csv
     participant Agent as BasicAgent
+    participant DfI as DfInterface
     
     Note over Env: Start of day
-    Env->>Agent: Initial prompt with DataFrame info + scoring rules (+ memory)
+    Env->>CSV: Write market state (questions + aggregates)
+    Env->>Agent: act(None, forecast_interface, current_date)
+    Agent->>DfI: Load market.csv + add my_prediction columns
     
     loop Query Phase (max_queries tries)
-        Agent->>Env: Python code on DataFrame
-        Env->>Env: Execute via eval() with timeout
-        Env->>Agent: Result + "Tries remaining: N"
+        Agent->>DfI: Execute Python code
+        DfI->>DfI: Run via QueryExecutor with timeout
+        DfI->>Agent: Result + "Tries remaining: N"
     end
     
     Note over Agent: Agent outputs "<submit>" with XML forecasts
@@ -51,13 +55,15 @@ Agents receive access to a pandas DataFrame `df` with all questions:
 | `background` | str | Context/background |
 | `resolution_criteria` | str | How resolved |
 | `answer_type` | str | "yes/no", "string", "numeric" |
-| `resolution_date` | date | When resolves |
+| `resolution_date` | str | When resolves (YYYY-MM-DD) |
 | `is_resolved` | bool | True if resolved |
 | `ground_truth` | str/None | Answer (only if resolved) |
-| `market_aggregate` | str (JSON) | e.g. '{"Yes": 0.6}' |
+| `market_aggregate` | str (JSON)/None | e.g. '{"Yes": 0.6}' |
 | `num_predictions` | int | Total predictions from all agents |
-| `my_prediction` | str (JSON)/None | This agent's current prediction |
-| `my_prediction_date` | date/None | When agent last predicted |
+| `my_prediction` | dict/None | This agent's current prediction (added by DfInterface) |
+| `my_prediction_date` | date/None | When agent last predicted (added by DfInterface) |
+
+**Note**: `market_aggregate` is stored as JSON string in CSV. `my_prediction` and `my_prediction_date` are populated by `DfInterface` when loading the CSV, not stored in the file.
 
 ---
 
@@ -184,9 +190,12 @@ Timeout: 5 seconds per query.
 └── {sim_name}/
     └── {YY-MM-DD-HH-MM-SS}/
         ├── config.json          # All hyperparameters
-        └── logs/
-            ├── actions.jsonl     # Predictions
-            └── model_outputs.jsonl # LLM prompts/responses
+        ├── market.csv           # Current market state (questions + aggregates)
+        ├── actions.jsonl        # Predictions
+        └── agents/
+            └── {agent_id}/
+                ├── model_outputs.jsonl  # LLM prompts/responses
+                └── {agent_id}_memory.txt # Persistent memory
 ```
 
 ---
@@ -194,14 +203,26 @@ Timeout: 5 seconds per query.
 ## Running Tests
 
 ```bash
-# Get GPU session on cluster
+# Get GPU session on cluster (for VLLM)
 condor_submit_bid 25 -i -append request_gpus=1 -append "requirements=TARGET.CUDACapability == 8.0" -append request_memory=40960
 
-# Run test (Dec 25-27, 2024)
-python scripts/test_basic_agent.py --sim_name test_run --start_date 2024-12-25 --end_date 2024-12-27
+# Run test with OpenRouter (Dec 25-27, 2024)
+python scripts/test_basic_agent.py \
+  --sim_name test_run \
+  --start_date 2024-12-25 \
+  --end_date 2024-12-27 \
+  --provider openrouter \
+  --openrouter_model "mistralai/devstral-2512:free"
 
-# Run without LLM (test setup)
-python scripts/test_basic_agent.py --no_inference
+# Multi-agent run with config file
+python scripts/test_basic_agent.py \
+  --agents_config configs/agents_example.yaml \
+  --sim_name multi_agent_test
+
+# Answer matching options
+--matching exact       # Normalized string comparison (lowercase, no spaces)
+--matching openrouter  # LLM-based semantic matching (default)
+--matcher "google/gemma-3-27b-it:free"  # Model for matching
 ```
 
 ---
@@ -211,9 +232,13 @@ python scripts/test_basic_agent.py --no_inference
 | File | Purpose |
 |------|---------|
 | `agents/basicAgent.py` | BasicAgent with query loop + XML parsing |
-| `environment/safe_executor.py` | Query execution with timeout |
-| `environment/env.py` | SimulationEnvironment + SimForecastInterface |
+| `agents/utils/df_interface.py` | DfInterface for loading market.csv + query execution |
+| `agents/utils/memory.py` | BasicMemory class for persistent memory |
+| `agents/utils/forecast_parser.py` | XML forecast parsing utilities |
+| `environment/env.py` | SimulationEnvironment + SimForecastInterface + MarketWriter |
+| `environment/safe_executor.py` | QueryExecutor with eval() + timeout |
 | `environment/scoring/__init__.py` | Scoring with single-agent baseline |
+| `environment/interfaces.py` | PredictionSubmission dataclass |
 | `scripts/test_basic_agent.py` | CLI test script |
 
 ---

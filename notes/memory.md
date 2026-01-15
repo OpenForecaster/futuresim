@@ -179,16 +179,15 @@ environment/scoring/
 |------|---------|
 | `environment/scoring/` | Modular scoring (Brier default, Log alternative) |
 | `environment/ansmatching.py` | Union-Find based answer matching with LLM |
-| `environment/interfaces.py` | QuestionView, PredictionSubmission datatypes |
-| `environment/env.py` | SimulationEnvironment orchestrating daily flow |
+| `environment/interfaces.py` | `PredictionSubmission` dataclass |
+| `environment/env.py` | SimulationEnvironment + SimForecastInterface + MarketWriter |
 | `environment/data_loader.py` | QuestionPool with heap-based resolution tracking |
 | `agents/base.py` | BaseAgent abstract class |
-| `scripts/run_sim.py` | CLI entry point with stub agents |
-| `scripts/convert_jsonl_to_parquet.py` | Streaming JSONL→Parquet conversion |
-| `mpi_scripts/organize_news/submit_job.py` | HTCondor job submission (uses htcondor2) |
-| `mpi_scripts/organize_news/run_conversion.sh` | Shell wrapper for cluster jobs |
 | `agents/basicAgent.py` | BasicAgent with DataFrame queries + XML forecasts |
-| `environment/safe_executor.py` | Query execution with eval + timeout |
+| `agents/utils/memory.py` | BasicMemory class for persistent memory |
+| `agents/utils/df_interface.py` | DfInterface for loading market.csv + query execution |
+| `agents/utils/forecast_parser.py` | XML forecast parsing utilities |
+| `environment/safe_executor.py` | QueryExecutor with eval() + timeout |
 | `scripts/test_basic_agent.py` | CLI test script for BasicAgent |
 | `notes/agent-forecast-interaction.md` | Agent interaction design documentation |
 
@@ -219,18 +218,21 @@ See `notes/agent-forecast-interaction.md` for detailed design.
 
 ### High-Level Flow
 ```
-1. Environment calls agent.act(doc_interface, forecast_interface, current_date)
-2. Agent gets system prompt with DataFrame schema + Brier scoring explanation
-3. Query loop: Agent writes code → env executes → returns results (max N queries)
-4. Submit loop: Agent outputs <submit>...</submit> → env parses and records predictions
-5. At resolution: time-weighted Brier peer scores computed, single-agent uses baseline 0
+1. Environment writes market.csv at start of day
+2. Environment calls agent.act(None, forecast_interface, current_date)
+3. Agent loads market.csv via DfInterface (adds my_prediction columns)
+4. Query loop: Agent writes code → DfInterface executes → returns results (max N queries)
+5. Submit loop: Agent outputs <submit>...</submit> → env parses and records predictions
+6. Memory update: Agent optionally updates memory via <memory> tags
+7. At resolution: time-weighted Brier peer scores computed
 ```
 
 ### Key Components
 | Component | Purpose |
 |-----------|---------|
 | `VLLMInference.chat()` | Chat completion with messages format `[{role, content}]` |
-| `SimForecastInterface` | Exposes `execute_query()`, `get_dataframe_info()`, `submit_prediction()` |
+| `SimForecastInterface` | Exposes `get_market_csv_path()`, `get_agent_predictions()`, `submit_prediction()` |
+| `DfInterface` | Loads market.csv, adds agent-specific columns, executes queries |
 | `QueryExecutor` | Runs agent code with eval() + 5s timeout |
 | `BasicAgent` | Reference agent with CoT using `<reasoning>` and `<action>` tags |
 
@@ -286,22 +288,27 @@ Options to explore later:
 
 ## Future Work
 
-1. **Implement SimDocInterface**: Read articles from organized parquet files
-2. **Build FAISS index**: Semantic search over articles for RAG-style agents
-3. **Sandbox code execution**: Replace eval() with safe execution (see above)
-4. ~~**Agent Memory**: Even basic agent should have access to write some memories for next days.~~ ✅ **COMPLETED** - BasicAgent now has persistent memory across days via `<memory>` tags. Memory is the only context retained between days. See `agents/basicAgent.py`.
-5. ~~**Async agent execution**: Parallel prompts for speed~~ ✅ **COMPLETED** - Multi-agent parallel execution via ThreadPoolExecutor. Use `--agents_config` for multi-agent runs.
-6. **Evaluation metrics**: Track Brier scores separately from peer scores
-7. **Checkpointing**: Save/resume simulation state
-8. **Deduplication across batches**: Current approach may have duplicates if same article appears in multiple JSONL files
+### In Progress / High Priority
 
-### High Priority TODO
+1. **Implement SimDocInterface**: Read articles from organized parquet files for RAG-style forecasting
+2. **Build FAISS index**: Semantic search over articles for efficient context retrieval
+3. **Sandbox code execution**: Replace eval() with safe execution (RestrictedPython, AST whitelisting, or subprocess isolation)
 
-9. **vLLM Batching for Multi-Agent**: Currently vLLM is called with batch size 1 per agent. For multi-agent with shared vLLM backend, we should:
-   - Collect pending inference requests from all agents
-   - Batch them together for a single vLLM call
-   - Distribute responses back to agents
-   - This requires restructuring agent flow from synchronous chat() to async request/response pattern
-   - Complexity: HIGH - significant refactor needed
+### Medium Priority
 
+4. **Checkpointing**: Save/resume simulation state mid-run
+5. **vLLM Batching for Multi-Agent**: Batch inference requests across agents for better throughput with local models
+6. **Evaluation dashboard**: Track Brier scores, calibration curves, and prediction accuracy over time
 
+### Low Priority / Nice-to-Have
+
+7. **Deduplication across news batches**: Current approach may have duplicates if same article appears in multiple JSONL files
+8. **Alternative agent scaffolds**: Create different agent architectures (e.g., ReAct, tree-of-thought) for comparison
+
+### ✅ Completed
+
+- ~~**Agent Memory**~~ - Persistent memory via `<memory>` tags in `BasicMemory` class
+- ~~**Async agent execution**~~ - Multi-agent parallel via ThreadPoolExecutor
+- ~~**Answer matching modes**~~ - `--matching exact|openrouter|vllm` with configurable matcher model
+- ~~**Modular agent utilities**~~ - Extracted `DfInterface`, `BasicMemory`, `forecast_parser` to `agents/utils/`
+- ~~**File-based market state**~~ - Environment writes `market.csv` for agent consumption

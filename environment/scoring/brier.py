@@ -45,11 +45,25 @@ class BrierScorer(BaseScorer):
         
         # Find which named outcome matches truth (if any)
         matched_outcome = None
+        
+        # Helper for normalized comparison (lowercase, no spaces)
+        def normalize(s: str) -> str:
+            return s.lower().replace(" ", "").strip()
+        
+        truth_norm = normalize(ground_truth)
+        
         if ground_truth in pred.outcomes:
             matched_outcome = ground_truth
         elif matcher:
+            # LLM-based semantic matching
             for outcome in pred.outcomes:
                 if matcher.is_equivalent(outcome, ground_truth):
+                    matched_outcome = outcome
+                    break
+        else:
+            # Exact matching with normalization (lowercase + no spaces)
+            for outcome in pred.outcomes:
+                if normalize(outcome) == truth_norm:
                     matched_outcome = outcome
                     break
         

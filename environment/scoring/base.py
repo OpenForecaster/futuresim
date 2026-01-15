@@ -154,16 +154,26 @@ class BaseScorer(ABC):
     ) -> float:
         """
         Get the probability the agent assigned to the ground truth outcome.
-        Uses answer matching if provided.
+        Uses answer matching if provided, otherwise normalized string comparison.
         """
+        # Helper for normalized comparison (lowercase, no spaces)
+        def normalize(s: str) -> str:
+            return s.lower().replace(" ", "").strip()
+        
         # Direct match first
         if ground_truth in pred.outcomes:
             return pred.outcomes[ground_truth]
         
-        # Try answer matching
+        # Try answer matching (LLM-based)
         if matcher:
             for outcome, prob in pred.outcomes.items():
                 if matcher.is_equivalent(outcome, ground_truth):
+                    return prob
+        else:
+            # Exact matching with normalization (lowercase + no spaces)
+            truth_norm = normalize(ground_truth)
+            for outcome, prob in pred.outcomes.items():
+                if normalize(outcome) == truth_norm:
                     return prob
         
         # No match - agent didn't predict this outcome

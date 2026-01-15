@@ -136,7 +136,7 @@ def create_agents_from_config(config: dict, args, output_dir: str) -> list:
         inference_provider = create_inference_provider(provider, model, args)
         
         # Build agent config with merged settings
-        max_queries = agent_def.get('max_queries', defaults.get('max_queries', args.max_queries))
+        max_actions = agent_def.get('max_actions', defaults.get('max_actions', args.max_actions))
         max_retries = agent_def.get('max_retries', defaults.get('max_retries', args.max_retries))
         temperature = agent_def.get('temperature', defaults.get('temperature', args.temperature))
         max_tokens = agent_def.get('max_tokens', defaults.get('max_tokens', args.max_tokens))
@@ -153,7 +153,7 @@ def create_agents_from_config(config: dict, args, output_dir: str) -> list:
         os.makedirs(agent_dir, exist_ok=True)
         
         agent_config = AgentConfig(
-            max_queries=max_queries,
+            max_actions=max_actions,
             max_submit_retries=max_retries,
             memory_dir=agent_dir,  # Per-agent memory directory
             sampling_params={
@@ -222,14 +222,20 @@ def main():
                        help="Run without LLM (for testing setup)")
     
     # Agent settings
-    parser.add_argument("--max_queries", type=int, default=3,
-                       help="Max DataFrame queries per day")
+    parser.add_argument("--max_actions", type=int, default=10,
+                       help="Max actions per day (queries + submissions)")
     parser.add_argument("--max_retries", type=int, default=3,
                        help="Max retry attempts for forecast parsing")
     parser.add_argument("--temperature", type=float, default=0.7,
                        help="Sampling temperature")
     parser.add_argument("--max_tokens", type=int, default=2048,
                        help="Max tokens to generate")
+    
+    # Answer matching settings
+    parser.add_argument("--matching", choices=["exact", "openrouter", "vllm"], default="openrouter",
+                       help="Answer matching mode: 'exact' (normalized string), 'openrouter', or 'vllm'")
+    parser.add_argument("--matcher", default="google/gemma-3-27b-it:free",
+                       help="Matcher model: OpenRouter model ID or VLLM model path")
     
     args = parser.parse_args()
     
@@ -301,7 +307,7 @@ def main():
         os.makedirs(agent_dir, exist_ok=True)
         
         agent_config = AgentConfig(
-            max_queries=args.max_queries,
+            max_actions=args.max_actions,
             max_submit_retries=args.max_retries,
             memory_dir=agent_dir,
             sampling_params={
@@ -321,6 +327,19 @@ def main():
     else:
         print("Running without LLM inference (--no_inference)")
     
+    # Create matcher inference provider
+    matcher_provider = None
+    if args.matching == "openrouter":
+        from inference.openrouter import OpenRouterInference
+        matcher_provider = OpenRouterInference(args.matcher)
+        print(f"Answer matching: OpenRouter with {args.matcher}")
+    elif args.matching == "vllm":
+        from inference.vllm import VLLMInference
+        matcher_provider = VLLMInference(args.matcher, max_model_len=args.max_model_len)
+        print(f"Answer matching: VLLM with {args.matcher}")
+    else:
+        print(f"Answer matching: exact (normalized string comparison)")
+    
     # Initialize environment with resolution date filter
     print(f"\nLoading dataset: {args.dataset}")
     env = SimulationEnvironment(
@@ -328,7 +347,7 @@ def main():
         start_date=sim_start,
         end_date=sim_end,
         context_dir=args.context_dir,
-        inference_provider=None,  # Not used with multi-agent
+        inference_provider=matcher_provider,
         output_dir=output_dir,
         resolution_start=resolution_start,
         resolution_end=resolution_end,

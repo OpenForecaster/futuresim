@@ -6,7 +6,7 @@ This agent:
 2. Writes Python code to explore the data
 3. Submits probability forecasts in XML format
 
-Uses chain-of-thought with <reasoning> and <action> tags.
+Uses chain-of-thought with <reasoning> and <action type="..."> tags.
 """
 
 import re
@@ -18,13 +18,16 @@ from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass, field
 
 from agents.base import BaseAgent
+from agents.utils.memory import BasicMemory
+from agents.utils.df_interface import DfInterface
+from agents.utils.forecast_parser import parse_action, extract_memory
 from environment.interfaces import PredictionSubmission
 
 
 @dataclass
 class AgentConfig:
     """Configuration for BasicAgent."""
-    max_queries: int = 3
+    max_actions: int = 10  # Max actions per day (queries + submits)
     max_submit_retries: int = 3
     max_outcomes_per_question: int = 5
     memory_dir: Optional[str] = None  # Directory to persist memory, None = no persistence
@@ -44,10 +47,13 @@ class BasicAgent(BaseAgent):
     
     Interaction flow per day:
     1. Receives system prompt with DataFrame schema and scoring rules
-    2. Can query the DataFrame up to max_queries times
-    3. Submits forecasts in XML format
+    2. Can take up to max_actions per day, including:
+       - query: Execute Python code to explore the DataFrame
+       - submit: Submit forecasts for one or more questions
+       - next: End the current day and proceed to next
+    3. Updates memory at end of day (always, regardless of how day ended)
     
-    Uses <reasoning> for chain-of-thought and <action> for executable content.
+    Uses <reasoning> for chain-of-thought and <action type="..."> for actions.
     """
     
     def __init__(self, 
@@ -57,132 +63,188 @@ class BasicAgent(BaseAgent):
                  model_name: str = ""):
         super().__init__(agent_id, inference_provider, model_name)
         self.config = config or AgentConfig()
-        
-        # Memory: persisted text the agent can update between days
-        self.memory: str = ""
-        self._memory_path: Optional[Path] = None
-        
-        # Load memory from disk if configured
-        if self.config.memory_dir:
-            self._memory_path = Path(self.config.memory_dir) / f"{agent_id}_memory.txt"
-            if self._memory_path.exists():
-                self.memory = self._memory_path.read_text().strip()
+        self._memory = BasicMemory(agent_id, self.config.memory_dir)
         
     def act(self, 
-            doc_interface,  # AgentInterface - not used in BasicAgent
-            forecast_interface,  # Has execute_query, submit_prediction, get_dataframe
+            doc_interface,  # Not used in BasicAgent
+            forecast_interface,  # Has get_market_csv_path, submit_prediction, next_day
             current_date: date) -> List[Dict[str, Any]]:
         """
         Execute agent logic for the day.
         
+        Flow:
+        1. Initialize DataFrame interface
+        2. Run action loop (query/submit/next)
+        3. Update memory
+        4. Signal day completion
+        
         Returns list of submitted forecasts.
         """
-        # Build the instructions (formerly "system prompt") as first user message
-        instructions = self._build_instructions(forecast_interface, current_date)
-        messages = [{"role": "user", "content": instructions}]
+        # Setup
+        self._setup_day(forecast_interface, current_date)
+        messages = [{"role": "user", "content": self._build_instructions(current_date)}]
         
-        # Query loop
-        queries_remaining = self.config.max_queries
-        response = ""
+        # Action loop
+        all_forecasts = self._run_action_loop(messages, forecast_interface)
         
-        while queries_remaining > 0:
-            # Generate response using chat
+        # End of day: memory update (always happens)
+        self._prompt_memory_update(messages, forecast_interface, current_date)
+        
+        # Signal day completion
+        forecast_interface.next_day()
+        
+        return all_forecasts
+    
+    # =========================================================================
+    # Setup
+    # =========================================================================
+    
+    def _setup_day(self, forecast_interface, current_date: date) -> None:
+        """Initialize interfaces for the day."""
+        csv_path = forecast_interface.get_market_csv_path()
+        self._df_interface = DfInterface(
+            csv_path, forecast_interface, self.agent_id, current_date
+        )
+        self._forecast_interface = forecast_interface
+    
+    # =========================================================================
+    # Action Loop
+    # =========================================================================
+    
+    def _run_action_loop(self, messages: List[Dict], forecast_interface) -> List[Dict]:
+        """
+        Main action loop: process agent responses until actions exhausted or day ended.
+        
+        Returns list of all submitted forecasts.
+        """
+        actions_remaining = self.config.max_actions
+        all_forecasts = []
+        
+        while actions_remaining > 0:
+            # Get agent response
             response = self.inference.chat(messages, self.config.sampling_params)
             messages.append({"role": "assistant", "content": response})
             
-            # Check if agent wants to submit
-            if "<submit>" in response.lower():
-                # Log the submit response
-                last_user = messages[-2]["content"] if len(messages) >= 2 else ""
-                forecast_interface.log_model_output(
-                    last_user, response, 
-                    {"phase": "submit", "queries_remaining": queries_remaining}
-                )
+            # Parse and handle the action
+            parsed = parse_action(response, self.config.max_outcomes_per_question)
+            
+            if parsed.action_type == "next":
+                self._log_action(forecast_interface, messages, response, "next_day", actions_remaining)
                 break
             
-            # Extract and execute code from <action> tag
-            code = self._extract_action_code(response)
-            if code:
-                result, error = forecast_interface.execute_query(code, current_date)
-                queries_remaining -= 1
-                
-                # Log after decrement so count is accurate
-                last_user = messages[-2]["content"] if len(messages) >= 2 else ""
-                forecast_interface.log_model_output(
-                    last_user, response, 
-                    {"phase": "query", "queries_remaining": queries_remaining}
+            elif parsed.action_type == "query":
+                actions_remaining = self._handle_query(
+                    messages, forecast_interface, response, parsed, actions_remaining
                 )
-                
-                if error:
-                    feedback = f"QUERY ERROR: {error}\n\nQueries remaining: {queries_remaining}"
-                else:
-                    feedback = f"QUERY RESULT:\n{result}\n\nQueries remaining: {queries_remaining}"
-                
-                if queries_remaining == 0:
-                    feedback += "\n\nNo more queries available. You must submit your forecasts now."
-                
-                messages.append({"role": "user", "content": feedback})
-            else:
-                # No action found
-                queries_remaining -= 1
-                last_user = messages[-2]["content"] if len(messages) >= 2 else ""
-                forecast_interface.log_model_output(
-                    last_user, response, 
-                    {"phase": "invalid", "queries_remaining": queries_remaining}
-                )
-                messages.append({"role": "user", "content": "No valid <action> block found. See instructions for format."})
-        
-        # Submit loop
-        forecasts = []
-        retries_remaining = self.config.max_submit_retries
-        
-        while retries_remaining > 0:
-            # Try to parse forecasts from last response
-            forecasts, error = self._parse_forecasts(response)
             
-            if forecasts:
-                # Successfully parsed - submit all forecasts
-                for f in forecasts:
-                    try:
-                        pred = PredictionSubmission(
-                            question_id=f['qid'],
-                            outcomes=f['outcomes']
-                        )
-                        forecast_interface.submit_prediction(pred)
-                        # Print the submission
-                        outcomes_str = ", ".join(f"{k}: {v:.2f}" for k, v in f['outcomes'].items())
-                        print(f"  [{self.agent_id}] Forecast {f['qid']}: {outcomes_str}")
-                    except Exception as e:
-                        print(f"  [{self.agent_id}] Failed to submit {f['qid']}: {e}")
-                break
+            elif parsed.action_type == "submit":
+                actions_remaining, forecasts = self._handle_submit(
+                    messages, forecast_interface, response, parsed, actions_remaining
+                )
+                all_forecasts.extend(forecasts)
+            
             else:
-                retries_remaining -= 1
-                if retries_remaining > 0:
-                    retry_msg = f"PARSE ERROR: {error}\n\nRetries remaining: {retries_remaining}"
-                    messages.append({"role": "user", "content": retry_msg})
-                    response = self.inference.chat(messages, self.config.sampling_params)
-                    messages.append({"role": "assistant", "content": response})
-                    forecast_interface.log_model_output(
-                        messages[-2]["content"], 
-                        response, 
-                        {"phase": "submit_retry", "retries_remaining": retries_remaining}
-                    )
+                actions_remaining = self._handle_invalid(
+                    messages, forecast_interface, response, parsed, actions_remaining
+                )
         
-        # Memory update phase (end of day)
-        self._prompt_memory_update(messages, forecast_interface, current_date)
-        
-        return forecasts
+        return all_forecasts
     
-    def _build_instructions(self, forecast_interface, current_date: date) -> str:
-        """Build the instructions for the agent including data info and rules."""
-        df_info = forecast_interface.get_dataframe_info()
+    # =========================================================================
+    # Action Handlers
+    # =========================================================================
+    
+    def _handle_query(self, messages, forecast_interface, response, parsed, actions_remaining) -> int:
+        """Handle query action. Returns updated actions_remaining."""
+        if parsed.code:
+            result, error = self._df_interface.execute_query(parsed.code)
+            actions_remaining -= 1
+            self._log_action(forecast_interface, messages, response, "query", actions_remaining)
+            
+            if error:
+                feedback = f"QUERY ERROR: {error}\n\nActions remaining: {actions_remaining}"
+            else:
+                feedback = f"QUERY RESULT:\n{result}\n\nActions remaining: {actions_remaining}"
+        else:
+            actions_remaining -= 1
+            self._log_action(forecast_interface, messages, response, "query_error", 
+                           actions_remaining, error=parsed.error)
+            feedback = f"ERROR: {parsed.error}\n\nActions remaining: {actions_remaining}"
         
-        # Memory section (if agent has memory from previous days)
+        feedback = self._add_exhaustion_warning(feedback, actions_remaining)
+        messages.append({"role": "user", "content": feedback})
+        return actions_remaining
+    
+    def _handle_submit(self, messages, forecast_interface, response, parsed, actions_remaining) -> Tuple[int, List]:
+        """Handle submit action. Returns (updated actions_remaining, list of submitted forecasts)."""
+        submitted = []
+        actions_remaining -= 1  # Always consume action
+        
+        if parsed.forecasts:
+            for f in parsed.forecasts:
+                try:
+                    pred = PredictionSubmission(question_id=f['qid'], outcomes=f['outcomes'])
+                    forecast_interface.submit_prediction(pred)
+                    submitted.append(f)
+                    outcomes_str = ", ".join(f"{k}: {v:.2f}" for k, v in f['outcomes'].items())
+                    print(f"  [{self.agent_id}] Forecast {f['qid']}: {outcomes_str}")
+                except Exception as e:
+                    print(f"  [{self.agent_id}] Failed to submit {f['qid']}: {e}")
+            
+            self._log_action(forecast_interface, messages, response, "submit", 
+                           actions_remaining, num_forecasts=len(submitted))
+            feedback = f"Submitted {len(submitted)} forecast(s). Actions remaining: {actions_remaining}"
+        else:
+            # Parse error - still consumed action
+            self._log_action(forecast_interface, messages, response, "submit_error",
+                           actions_remaining, error=parsed.error)
+            feedback = f"SUBMIT ERROR: {parsed.error}\n\nActions remaining: {actions_remaining}"
+        
+        feedback = self._add_exhaustion_warning(feedback, actions_remaining)
+        messages.append({"role": "user", "content": feedback})
+        return actions_remaining, submitted
+    
+    def _handle_invalid(self, messages, forecast_interface, response, parsed, actions_remaining) -> int:
+        """Handle invalid/unknown action. Returns updated actions_remaining."""
+        actions_remaining -= 1
+        self._log_action(forecast_interface, messages, response, "invalid", 
+                        actions_remaining, error=parsed.error)
+        
+        feedback = f"No valid action found. {parsed.error or 'Use <action type=\"...\"> format.'}\n\nActions remaining: {actions_remaining}"
+        feedback = self._add_exhaustion_warning(feedback, actions_remaining)
+        messages.append({"role": "user", "content": feedback})
+        return actions_remaining
+    
+    # =========================================================================
+    # Helpers
+    # =========================================================================
+    
+    def _log_action(self, forecast_interface, messages, response, phase, 
+                   actions_remaining, **extra) -> None:
+        """Log model output with metadata."""
+        last_user = messages[-2]["content"] if len(messages) >= 2 else ""
+        metadata = {"phase": phase, "actions_remaining": actions_remaining, **extra}
+        forecast_interface.log_model_output(last_user, response, metadata)
+    
+    def _add_exhaustion_warning(self, feedback: str, actions_remaining: int) -> str:
+        """Add warning if actions are exhausted."""
+        if actions_remaining == 0:
+            feedback += "\n\nNo more actions available. Your day ends now."
+        return feedback
+    
+    # =========================================================================
+    # Instructions & Memory
+    # =========================================================================
+    
+    def _build_instructions(self, current_date: date) -> str:
+        """Build the instructions for the agent including data info and rules."""
+        df_info = self._df_interface.get_info()
+        
         memory_section = ""
-        if self.memory:
+        if self._memory:
             memory_section = f"""## YOUR MEMORY FROM PREVIOUS DAYS
 <memory>
-{self.memory}
+{self._memory.get()}
 </memory>
 
 """
@@ -218,165 +280,58 @@ Your Python code runs in a sandbox with these variables pre-defined:
 
 Import statements are not available. Standard builtins (len, str, int, float, min, max, sum, sorted, range, etc.) are available.
 
-Example query:
-```python
-df[df['is_resolved'] == False][['qid', 'title', 'answer_type']].head()
-```
-
 ## RESPONSE FORMAT
-Every response must have <reasoning> then <action>:
+Every response must have <reasoning> then <action type="...">.
+
 <reasoning>
 Your analysis
 </reasoning>
-<action>
-Python code in ```python ... ``` OR forecast submission in <submit>...</submit>
+<action type="ACTION_TYPE">
+...content based on action type...
 </action>
+
+## ACTION TYPES
+
+### 1. Query Tasks (explore data)
+<action type="query">
+```python
+df[df['is_resolved'] == False][['qid', 'title', 'answer_type']].head()
+```
+</action>
+
+### 2. Submit Forecasts
+<action type="submit">
+<forecast qid="QUESTION_ID">
+  <outcome name="Answer1" prob="0.5"/>
+  <outcome name="Answer2" prob="0.3"/>
+</forecast>
+</action>
+
+### 3. End Day (proceed to next day)
+<action type="next"/>
 
 ## INTERACTION FLOW
-1. QUERY PHASE: You have {self.config.max_queries} queries. One query per turn.
-2. SUBMIT PHASE: Submit forecasts when ready.
+You have {self.config.max_actions} actions per day. Each query or submission uses 1 action.
+You can interleave queries and submissions as needed.
+When ready to move on, use <action type="next"/> to end your day.
+Note: After ending your day, you will be prompted to update your memory.
 
-## SUBMISSION FORMAT
-<action>
-<submit>
-  <forecast qid="QUESTION_ID">
-    <outcome name="Answer1" prob="0.5"/>
-    <outcome name="Answer2" prob="0.3"/>
-  </forecast>
-  ...
-  <forecast qid="QUESTION_ID">
-    ...
-  </forecast>
-</submit>
-</action>
-
-Rules:
+## SUBMISSION RULES
 - qid must be from an active (is_resolved=False) question you saw in query results
-- One forecast per QID (do not submit multiple forecasts for the same question)
+- One forecast per QID per submit action (can submit multiple times for different questions)
 - Outcome names must be REAL predicted answers (e.g., person names, locations, numbers)
 - NEVER use placeholders like "Unknown", "TBD", "Other", "N/A" - these ALWAYS hurt your score
 - Probabilities must sum to ≤ 1.0
-- You must submit at least one forecast
+- Submit at least one forecast before ending your day
 
 ---
 
-You have {self.config.max_queries} query turns. Begin."""
+You have {self.config.max_actions} actions available. Begin."""
     
-    def _extract_action_code(self, response: str) -> Optional[str]:
-        """Extract Python code from <action> tag."""
-        # Look for <action>...</action>
-        action_pattern = r'<action>(.*?)</action>'
-        action_match = re.search(action_pattern, response, re.DOTALL | re.IGNORECASE)
-        
-        if not action_match:
-            # Fallback: look for ```python blocks directly
-            code_pattern = r'```python\s*(.*?)\s*```'
-            code_matches = re.findall(code_pattern, response, re.DOTALL)
-            if code_matches:
-                return code_matches[-1]
-            return None
-        
-        action_content = action_match.group(1)
-        
-        # If it contains <submit>, return None (handled separately)
-        if '<submit>' in action_content.lower():
-            return None
-        
-        # Extract python code from action
-        code_pattern = r'```python\s*(.*?)\s*```'
-        code_matches = re.findall(code_pattern, action_content, re.DOTALL)
-        if code_matches:
-            return code_matches[-1]
-        
-        # Maybe it's just code without markdown
-        code = action_content.strip()
-        if code and ('df' in code or 'pd.' in code):
-            return code
-        
-        return None
-    
-    def _print_action(self, response: str) -> None:
-        """Print the content of <action> tags for terminal visibility."""
-        action_pattern = r'<action>(.*?)</action>'
-        action_match = re.search(action_pattern, response, re.DOTALL | re.IGNORECASE)
-        if action_match:
-            action_content = action_match.group(1).strip()
-            # Truncate if too long
-            if len(action_content) > 200:
-                action_content = action_content[:200] + "..."
-            print(f"  [{self.agent_id}] {action_content}")
-    
-    def _parse_forecasts(self, response: str) -> Tuple[List[Dict], Optional[str]]:
-        """
-        Parse XML forecasts from agent response.
-        
-        Returns (forecasts, error_message).
-        """
-        # Extract from <action> block if present
-        action_pattern = r'<action>(.*?)</action>'
-        action_match = re.search(action_pattern, response, re.DOTALL | re.IGNORECASE)
-        if action_match:
-            response = action_match.group(1)
-        
-        # Extract <submit>...</submit> block
-        pattern = r'<submit>(.*?)</submit>'
-        match = re.search(pattern, response, re.DOTALL | re.IGNORECASE)
-        if not match:
-            if '<forecast' not in response.lower():
-                return [], "No <submit> block or <forecast> tags found"
-            submit_content = response
-        else:
-            submit_content = match.group(1)
-        
-        # Parse individual forecasts
-        forecast_pattern = r'<forecast\s+qid=["\']([^"\']+)["\']>(.*?)</forecast>'
-        forecast_matches = re.findall(forecast_pattern, submit_content, re.DOTALL | re.IGNORECASE)
-        
-        if not forecast_matches:
-            return [], "No valid <forecast qid=\"...\">...</forecast> blocks found"
-        
-        forecasts = []
-        for qid, content in forecast_matches:
-            # Parse outcomes
-            outcome_pattern = r'<outcome\s+name=["\']([^"\']+)["\']\s+prob=["\']([^"\']+)["\']'
-            outcome_matches = re.findall(outcome_pattern, content, re.IGNORECASE)
-            
-            if not outcome_matches:
-                return [], f"No valid outcomes found for question {qid}"
-            
-            if len(outcome_matches) > self.config.max_outcomes_per_question:
-                return [], f"Too many outcomes for {qid}: {len(outcome_matches)} > {self.config.max_outcomes_per_question}"
-            
-            outcomes = {}
-            for name, prob_str in outcome_matches:
-                try:
-                    prob = float(prob_str)
-                except ValueError:
-                    return [], f"Invalid probability '{prob_str}' for outcome '{name}' in {qid}"
-                
-                if prob < 0 or prob > 1:
-                    return [], f"Probability {prob} out of range [0,1] for '{name}' in {qid}"
-                
-                outcomes[name] = prob
-            
-            # Check sum
-            total = sum(outcomes.values())
-            if total > 1.0 + 1e-6:
-                return [], f"Probabilities sum to {total:.3f} > 1 for question {qid}"
-            
-            forecasts.append({'qid': qid, 'outcomes': outcomes})
-        
-        # Deduplicate by QID (keep last)
-        unique_forecasts = {}
-        for f in forecasts:
-            unique_forecasts[f['qid']] = f
-        
-        return list(unique_forecasts.values()), None
-    
-    def _prompt_memory_update(self, messages: List[Dict[str, str]], 
+    def _prompt_memory_update(self, messages: List[Dict[str, str]],  
                                forecast_interface, current_date: date) -> None:
         """
-        Ask the agent if it wants to update its memory at the end of the day.
+        Ask the agent to update its memory at the end of the day.
         
         Memory is the only context retained between days, allowing the agent to
         track insights, patterns, and strategies across simulation days.
@@ -405,40 +360,17 @@ Your updated memory content here (complete replacement, not a diff)
 </memory>
 
 If you don't want to update memory, just output <reasoning>...</reasoning> without <memory> tags.
-Current memory length: {len(self.memory)} characters"""
+Current memory length: {len(self._memory)} characters"""
         
         messages.append({"role": "user", "content": memory_prompt})
         response = self.inference.chat(messages, self.config.sampling_params)
         messages.append({"role": "assistant", "content": response})
         
-        # Log the memory update exchange
         forecast_interface.log_model_output(
-            memory_prompt, 
-            response, 
-            {"phase": "memory_update", "current_memory_len": len(self.memory)}
+            memory_prompt, response, 
+            {"phase": "memory_update", "current_memory_len": len(self._memory)}
         )
         
-        # Extract and save memory if present
-        new_memory = self._extract_memory(response)
+        new_memory = extract_memory(response)
         if new_memory is not None:
-            self.memory = new_memory
-            self._save_memory()
-    
-    def _extract_memory(self, response: str) -> Optional[str]:
-        """
-        Extract memory content from <memory></memory> tags.
-        
-        Returns None if no memory tags found, empty string if tags are empty.
-        """
-        pattern = r'<memory>(.*?)</memory>'
-        match = re.search(pattern, response, re.DOTALL | re.IGNORECASE)
-        if match:
-            return match.group(1).strip()
-        return None
-    
-    def _save_memory(self) -> None:
-        """Persist memory to disk if configured."""
-        if self._memory_path:
-            self._memory_path.parent.mkdir(parents=True, exist_ok=True)
-            self._memory_path.write_text(self.memory)
-
+            self._memory.update(new_memory)

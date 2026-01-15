@@ -6,17 +6,13 @@ from threading import Lock
 from typing import List, Dict, Any, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from .interfaces import (
-    AgentInterface, ForecastInterface, ArticleMeta, 
-    QuestionView, PredictionSubmission
-)
+from .interfaces import PredictionSubmission
 from .data_loader import QuestionPool, Question
 from .scoring import (
     DailyPrediction, PredictionHistory, 
     compute_aggregate, resolve_question
 )
 from .ansmatching import AnswerMatcher
-from .safe_executor import QueryExecutor
 
 
 
@@ -112,6 +108,74 @@ class SimLogger:
             self._agent_files.clear()
 
 
+class MarketWriter:
+    """
+    Writes market state to market.csv for agent consumption.
+    
+    The CSV contains question data + aggregates but NOT agent-specific columns.
+    Agents add my_prediction columns when loading via DfInterface.
+    """
+    
+    def __init__(self, output_dir: str):
+        self.output_dir = output_dir
+        self.csv_path = os.path.join(output_dir, "market.csv")
+    
+    def write(self, 
+              questions: List['Question'],
+              resolved_questions: List['Question'],
+              aggregates: Dict[str, Dict[str, float]],
+              histories: Dict[str, 'PredictionHistory']) -> str:
+        """
+        Write current market state to CSV.
+        
+        Returns the path to the CSV file.
+        """
+        rows = []
+        
+        # Active questions
+        for q in questions:
+            agg = aggregates.get(q.qid, {})
+            
+            # Count total predictions
+            num_preds = 0
+            history = histories.get(q.qid)
+            if history:
+                for agent_preds in history.predictions.values():
+                    num_preds += len(agent_preds)
+            
+            rows.append({
+                'qid': q.qid,
+                'title': q.title,
+                'background': q.background,
+                'resolution_criteria': q.resolution_criteria,
+                'answer_type': q.answer_type,
+                'resolution_date': str(q.resolution_date),
+                'is_resolved': False,
+                'ground_truth': None,
+                'market_aggregate': json.dumps(agg) if agg else None,
+                'num_predictions': num_preds,
+            })
+        
+        # Resolved questions
+        for q in resolved_questions:
+            rows.append({
+                'qid': q.qid,
+                'title': q.title,
+                'background': q.background,
+                'resolution_criteria': q.resolution_criteria,
+                'answer_type': q.answer_type,
+                'resolution_date': str(q.resolution_date),
+                'is_resolved': True,
+                'ground_truth': q.ground_truth_answer,
+                'market_aggregate': None,
+                'num_predictions': 0,
+            })
+        
+        df = pd.DataFrame(rows)
+        df.to_csv(self.csv_path, index=False)
+        return self.csv_path
+
+
 class SimulationEnvironment:
     """
     Main simulation environment for multi-agent forecasting.
@@ -170,8 +234,10 @@ class SimulationEnvironment:
         # Track resolved questions for agent learning
         self.resolved_questions: List[Question] = []
         
-        # Logging
+        # Logging and market state
         self.logger = SimLogger(output_dir)
+        self.market_writer = MarketWriter(output_dir)
+        self.market_csv_path: Optional[str] = None
         
     def add_agent(self, agent):
         self.agents.append(agent)
@@ -211,7 +277,7 @@ class SimulationEnvironment:
             return
         
         # Table header
-        header = f"{'Agent':<25} {'Avg Brier':>10} {'Peer':>10} {'TW-Peer':>10} {'Correct':>8} {'Wrong':>6} {'Total':>6}"
+        header = f"{'Agent':<25} {'Avg Brier':>10} {'Peer':>10} {'TW-Peer':>10} {'Acc %':>8} {'Total':>6}"
         print(header)
         print("-"*90)
         
@@ -228,14 +294,19 @@ class SimulationEnvironment:
             # Average Brier per question
             avg_brier = raw_brier_sum / total if total > 0 else 0.0
             
+            # Accuracy percentage
+            accuracy = (correct / total * 100) if total > 0 else 0.0
+            
             # Truncate long agent names
             display_name = aid[:24] if len(aid) > 24 else aid
             
-            row = f"{display_name:<25} {avg_brier:>+10.3f} {snapshot_peer:>+10.2f} {tw_peer:>+10.2f} {correct:>8} {wrong:>6} {total:>6}"
+            row = f"{display_name:<25} {avg_brier:>+10.3f} {snapshot_peer:>+10.2f} {tw_peer:>+10.2f} {accuracy:>7.1f}% {total:>6}"
             print(row)
         
         print("-"*90)
         print("Legend: Avg Brier=Mean Brier score per question, Peer=Snapshot peer sum, TW-Peer=Time-weighted peer sum")
+        print("        Acc=% of questions where agent scored positive (beat peers). Peer scores sum to 0 only when")
+        print("        all agents predict on the same days; single-agent segments use baseline scoring.")
         print("="*90)
 
     def step(self):
@@ -257,18 +328,25 @@ class SimulationEnvironment:
                     resolution_date=q.resolution_date
                 )
         
-        # 3. Collect predictions from all agents
+        # 3. Write market.csv for agents to read
+        self.market_csv_path = self.market_writer.write(
+            active_questions,
+            self.resolved_questions,
+            self.current_aggregates,
+            self.prediction_histories
+        )
+        
+        # 4. Collect predictions from all agents
         if self.parallel and len(self.agents) > 1:
             self._run_agents_parallel(active_questions)
         else:
             self._run_agents_sequential(active_questions)
         
-        # 4. Update aggregates (end of day)
+        # 5. Update aggregates (end of day)
         self._update_aggregates(active_questions)
     
     def _run_agents_sequential(self, active_questions: List[Question]):
         """Run agents one at a time (original behavior)."""
-        doc_interface = SimDocInterface(self.context_dir, self.current_date)
         forecast_interface = SimForecastInterface(
             active_questions, 
             self.current_aggregates,
@@ -277,15 +355,15 @@ class SimulationEnvironment:
             self.logger,
             resolved_questions=self.resolved_questions,
             histories_lock=self._histories_lock,
+            market_csv_path=self.market_csv_path,
         )
         
         for agent in self.agents:
             forecast_interface.set_agent_context(agent.agent_id)
-            agent.act(doc_interface, forecast_interface, self.current_date)
+            agent.act(None, forecast_interface, self.current_date)
     
     def _run_agents_parallel(self, active_questions: List[Question]):
         """Run agents in parallel using thread pool."""
-        doc_interface = SimDocInterface(self.context_dir, self.current_date)
         
         def run_agent(agent):
             """Execute a single agent's turn."""
@@ -299,11 +377,12 @@ class SimulationEnvironment:
                 self.logger,
                 resolved_questions=self.resolved_questions,
                 histories_lock=self._histories_lock,
+                market_csv_path=self.market_csv_path,
             )
             forecast_interface.set_agent_context(agent.agent_id)
             
             try:
-                agent.act(doc_interface, forecast_interface, self.current_date)
+                agent.act(None, forecast_interface, self.current_date)
                 return agent.agent_id, None
             except Exception as e:
                 return agent.agent_id, str(e)
@@ -382,27 +461,8 @@ class SimulationEnvironment:
                     self.logger.log_aggregate(self.current_date, q.qid, new_aggregate)
 
 
-class SimDocInterface(AgentInterface):
-    """Agent's view of documents. Stubbed for now."""
-    
-    def __init__(self, root_dir: str, current_date: date):
-        self.root_dir = root_dir
-        self.current_date = current_date
-        
-    def list_sources(self) -> List[str]:
-        return []
-    
-    def list_dates(self, source: Optional[str] = None) -> List[date]:
-        return []
-        
-    def list_articles(self, date_obj: date, source: Optional[str] = None) -> List[ArticleMeta]:
-        return []
 
-    def read_article(self, article_id: str) -> str:
-        return ""
-
-
-class SimForecastInterface(ForecastInterface):
+class SimForecastInterface:
     """
     Agent's interface to forecasting questions.
     
@@ -416,7 +476,8 @@ class SimForecastInterface(ForecastInterface):
                  sim_date: date,
                  logger: SimLogger,
                  resolved_questions: List[Question] = None,
-                 histories_lock: Lock = None):
+                 histories_lock: Lock = None,
+                 market_csv_path: str = None):
         self.questions = {q.qid: q for q in questions}
         self.aggregates = aggregates
         self.histories = histories
@@ -425,29 +486,20 @@ class SimForecastInterface(ForecastInterface):
         self.current_agent_id: Optional[str] = None
         self.resolved_questions = resolved_questions or []
         self._histories_lock = histories_lock or Lock()
-        
-        # Query execution
-        self.query_executor = QueryExecutor(timeout_seconds=5.0)
-        self._df_cache: Optional[pd.DataFrame] = None
+        self._market_csv_path = market_csv_path
+        self._day_complete = False
         
     def set_agent_context(self, agent_id: str):
         self.current_agent_id = agent_id
-        self._df_cache = None  # Rebuild DataFrame for each agent (different my_prediction)
-
-    def list_questions(self) -> List[QuestionView]:
-        """Return questions with frozen aggregates."""
-        views = []
-        for q in self.questions.values():
-            views.append(QuestionView(
-                id=q.qid,
-                title=q.title,
-                background=q.background,
-                resolution_criteria=q.resolution_criteria,
-                answer_type=q.answer_type,
-                resolution_date=q.resolution_date,
-                aggregate=self.aggregates.get(q.qid, {})
-            ))
-        return views
+        self._day_complete = False  # Reset for new agent
+    
+    def next_day(self) -> None:
+        """Agent signals they are done with their actions for today."""
+        self._day_complete = True
+    
+    def is_day_complete(self) -> bool:
+        """Check if agent has signaled day completion."""
+        return self._day_complete
     
     def submit_prediction(self, prediction: PredictionSubmission) -> None:
         """Record a probabilistic prediction (thread-safe)."""
@@ -484,100 +536,30 @@ class SimForecastInterface(ForecastInterface):
             prediction.question_id, prediction.outcomes
         )
     
+    def get_market_csv_path(self) -> str:
+        """Get path to market.csv for agent to load."""
+        return self._market_csv_path
+    
+    def get_agent_predictions(self, agent_id: str) -> Dict[str, Dict]:
+        """
+        Get an agent's current predictions for all questions.
+        
+        Returns dict: {qid: {'outcomes': {...}, 'date': date}}
+        Used by DfInterface to populate my_prediction columns.
+        """
+        result = {}
+        for qid, history in self.histories.items():
+            pred = history.get_latest_prediction(agent_id)
+            if pred:
+                result[qid] = {
+                    'outcomes': pred.outcomes,
+                    'date': pred.day
+                }
+        return result
+    
     def log_model_output(self, prompt: str, response: str, 
                          metadata: Optional[Dict[str, Any]] = None):
         if self.current_agent_id:
             self.logger.log_model_output(
                 self.sim_date, self.current_agent_id, prompt, response, metadata
             )
-    
-    def execute_query(self, code: str, current_date: date = None) -> Tuple[str, Optional[str]]:
-        """
-        Execute agent's Python code on the questions DataFrame.
-        
-        Returns (result_string, error_message).
-        """
-        df = self._get_dataframe()
-        return self.query_executor.execute(
-            df, code, 
-            current_date=current_date or self.sim_date
-        )
-    
-    def get_dataframe_info(self) -> Dict[str, Any]:
-        """Get DataFrame schema info for agent prompting."""
-        df = self._get_dataframe()
-        
-        columns_desc = []
-        for col in df.columns:
-            dtype = str(df[col].dtype)
-            columns_desc.append(f"- {col} ({dtype})")
-        
-        return {
-            'n_rows': len(df),
-            'n_active': len([q for q in self.questions.values()]),
-            'n_resolved': len(self.resolved_questions),
-            'columns': list(df.columns),
-            'columns_desc': "\n".join(columns_desc),
-        }
-    
-    def _get_dataframe(self) -> pd.DataFrame:
-        """Build or return cached DataFrame for current agent."""
-        if self._df_cache is not None:
-            return self._df_cache
-        
-        rows = []
-        
-        # Active questions
-        for q in self.questions.values():
-            agg = self.aggregates.get(q.qid, {})
-            
-            # Get agent's current prediction if any (read-only, no lock needed)
-            my_pred = None
-            my_pred_date = None
-            history = self.histories.get(q.qid)
-            if history and self.current_agent_id:
-                pred = history.get_latest_prediction(self.current_agent_id)
-                if pred:
-                    my_pred = pred.outcomes
-                    my_pred_date = pred.day
-            
-            # Count total predictions
-            num_preds = 0
-            if history:
-                for agent_preds in history.predictions.values():
-                    num_preds += len(agent_preds)
-            
-            rows.append({
-                'qid': q.qid,
-                'title': q.title,
-                'background': q.background,
-                'resolution_criteria': q.resolution_criteria,
-                'answer_type': q.answer_type,
-                'resolution_date': q.resolution_date,
-                'is_resolved': False,
-                'ground_truth': None,
-                'market_aggregate': agg if agg else None,  # Store as dict, not JSON string
-                'num_predictions': num_preds,
-                'my_prediction': my_pred if my_pred else None,  # Store as dict, not JSON string
-                'my_prediction_date': my_pred_date,
-            })
-        
-        # Resolved questions
-        for q in self.resolved_questions:
-            rows.append({
-                'qid': q.qid,
-                'title': q.title,
-                'background': q.background,
-                'resolution_criteria': q.resolution_criteria,
-                'answer_type': q.answer_type,
-                'resolution_date': q.resolution_date,
-                'is_resolved': True,
-                'ground_truth': q.ground_truth_answer,
-                'market_aggregate': None,
-                'num_predictions': 0,
-                'my_prediction': None,
-                'my_prediction_date': None,
-            })
-        
-        self._df_cache = pd.DataFrame(rows)
-        return self._df_cache

@@ -1,0 +1,241 @@
+"""
+Forecast parsing utilities for typed action-based agent responses.
+
+Supports three action types:
+- <action type="query">: Execute Python code on DataFrame
+- <action type="submit">: Submit forecast predictions
+- <action type="next"/>: End the current day
+
+Extracted from BasicAgent for reuse by other agents.
+"""
+
+import re
+from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass
+
+
+@dataclass
+class ParsedAction:
+    """Result of parsing an action from agent response."""
+    action_type: Optional[str]  # "query", "submit", "next", or None
+    code: Optional[str]  # For query: the Python code
+    forecasts: Optional[List[Dict]]  # For submit: list of {qid, outcomes}
+    error: Optional[str]  # Error message if parsing failed
+
+
+def parse_action(response: str, max_outcomes: int = 5) -> ParsedAction:
+    """
+    Parse a typed action from agent response.
+    
+    Expected formats:
+    
+    <action type="query">
+    ```python
+    df[df['is_resolved'] == False].head()
+    ```
+    </action>
+    
+    <action type="submit">
+    <forecast qid="Q123">
+      <outcome name="Answer1" prob="0.6"/>
+    </forecast>
+    </action>
+    
+    <action type="next"/>
+    
+    Returns:
+        ParsedAction with action_type, content, and optional error
+    """
+    # Check for self-closing <action type="next"/>
+    next_pattern = r'<action\s+type=["\']next["\']\s*/>'
+    if re.search(next_pattern, response, re.IGNORECASE):
+        return ParsedAction(action_type="next", code=None, forecasts=None, error=None)
+    
+    # Look for <action type="...">...</action>
+    action_pattern = r'<action\s+type=["\']([^"\']+)["\']\s*>(.*?)</action>'
+    action_match = re.search(action_pattern, response, re.DOTALL | re.IGNORECASE)
+    
+    if not action_match:
+        # Fallback: check for legacy formats
+        return _parse_legacy_format(response, max_outcomes)
+    
+    action_type = action_match.group(1).lower().strip()
+    content = action_match.group(2).strip()
+    
+    if action_type == "query":
+        code = _extract_code(content)
+        if code:
+            return ParsedAction(action_type="query", code=code, forecasts=None, error=None)
+        else:
+            return ParsedAction(action_type="query", code=None, forecasts=None, 
+                               error="No Python code found in query action")
+    
+    elif action_type == "submit":
+        forecasts, error = _parse_forecasts(content, max_outcomes)
+        if error:
+            return ParsedAction(action_type="submit", code=None, forecasts=None, error=error)
+        return ParsedAction(action_type="submit", code=None, forecasts=forecasts, error=None)
+    
+    elif action_type == "next":
+        return ParsedAction(action_type="next", code=None, forecasts=None, error=None)
+    
+    else:
+        return ParsedAction(action_type=None, code=None, forecasts=None,
+                           error=f"Unknown action type: '{action_type}'. Valid types: query, submit, next")
+
+
+def _parse_legacy_format(response: str, max_outcomes: int = 5) -> ParsedAction:
+    """
+    Handle legacy <action>...</action> format for backward compatibility.
+    
+    Detects intent from content: if has <submit>, parse forecasts; else try code.
+    """
+    # Check for <action>...</action> without type
+    action_pattern = r'<action>(.*?)</action>'
+    action_match = re.search(action_pattern, response, re.DOTALL | re.IGNORECASE)
+    
+    if not action_match:
+        # No action found
+        return ParsedAction(action_type=None, code=None, forecasts=None, 
+                           error="No valid <action type=\"...\"> block found")
+    
+    content = action_match.group(1).strip()
+    
+    # Check if it's a submit action (has <submit> or <forecast> tags)
+    if '<submit>' in content.lower() or '<forecast' in content.lower():
+        forecasts, error = _parse_forecasts(content, max_outcomes)
+        if error:
+            return ParsedAction(action_type="submit", code=None, forecasts=None, error=error)
+        return ParsedAction(action_type="submit", code=None, forecasts=forecasts, error=None)
+    
+    # Try to extract code
+    code = _extract_code(content)
+    if code:
+        return ParsedAction(action_type="query", code=code, forecasts=None, error=None)
+    
+    return ParsedAction(action_type=None, code=None, forecasts=None,
+                       error="Could not determine action type from content")
+
+
+def _extract_code(content: str) -> Optional[str]:
+    """Extract Python code from content."""
+    # Look for ```python blocks
+    code_pattern = r'```python\s*(.*?)\s*```'
+    code_matches = re.findall(code_pattern, content, re.DOTALL)
+    if code_matches:
+        return code_matches[-1].strip()
+    
+    # Fallback: if content looks like code (has df or pd references)
+    content = content.strip()
+    if content and ('df' in content or 'pd.' in content):
+        return content
+    
+    return None
+
+
+def _parse_forecasts(content: str, max_outcomes: int = 5) -> Tuple[List[Dict], Optional[str]]:
+    """
+    Parse forecast XML from content.
+    
+    Expected format:
+    <forecast qid="QUESTION_ID">
+      <outcome name="Answer1" prob="0.5"/>
+      <outcome name="Answer2" prob="0.3"/>
+    </forecast>
+    
+    Returns:
+        (forecasts, error_message)
+    """
+    # Extract <submit>...</submit> block if present
+    submit_pattern = r'<submit>(.*?)</submit>'
+    submit_match = re.search(submit_pattern, content, re.DOTALL | re.IGNORECASE)
+    if submit_match:
+        content = submit_match.group(1)
+    
+    # Parse individual forecasts
+    forecast_pattern = r'<forecast\s+qid=["\']([^"\']+)["\']>(.*?)</forecast>'
+    forecast_matches = re.findall(forecast_pattern, content, re.DOTALL | re.IGNORECASE)
+    
+    if not forecast_matches:
+        return [], "No valid <forecast qid=\"...\">...</forecast> blocks found"
+    
+    forecasts = []
+    for qid, forecast_content in forecast_matches:
+        # Parse outcomes
+        outcome_pattern = r'<outcome\s+name=["\']([^"\']+)["\']\s+prob=["\']([^"\']+)["\']'
+        outcome_matches = re.findall(outcome_pattern, forecast_content, re.IGNORECASE)
+        
+        if not outcome_matches:
+            return [], f"No valid outcomes found for question {qid}"
+        
+        if len(outcome_matches) > max_outcomes:
+            return [], f"Too many outcomes for {qid}: {len(outcome_matches)} > {max_outcomes}"
+        
+        outcomes = {}
+        for name, prob_str in outcome_matches:
+            try:
+                prob = float(prob_str)
+            except ValueError:
+                return [], f"Invalid probability '{prob_str}' for outcome '{name}' in {qid}"
+            
+            if prob < 0 or prob > 1:
+                return [], f"Probability {prob} out of range [0,1] for '{name}' in {qid}"
+            
+            outcomes[name] = prob
+        
+        # Check sum
+        total = sum(outcomes.values())
+        if total > 1.0 + 1e-6:
+            return [], f"Probabilities sum to {total:.3f} > 1 for question {qid}"
+        
+        forecasts.append({'qid': qid, 'outcomes': outcomes})
+    
+    # Deduplicate by QID (keep last)
+    unique_forecasts = {}
+    for f in forecasts:
+        unique_forecasts[f['qid']] = f
+    
+    return list(unique_forecasts.values()), None
+
+
+def extract_memory(response: str) -> Optional[str]:
+    """
+    Extract memory content from <memory></memory> tags.
+    
+    Returns None if no memory tags found, the content otherwise.
+    """
+    pattern = r'<memory>(.*?)</memory>'
+    match = re.search(pattern, response, re.DOTALL | re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    return None
+
+
+# Legacy exports for backward compatibility (deprecated)
+def extract_action_code(response: str) -> Optional[str]:
+    """
+    DEPRECATED: Use parse_action() instead.
+    
+    Extract Python code from <action> tag in agent response.
+    """
+    result = parse_action(response)
+    if result.action_type == "query" and result.code:
+        return result.code
+    return None
+
+
+def parse_forecasts(response: str, 
+                    max_outcomes: int = 5) -> Tuple[List[Dict], Optional[str]]:
+    """
+    DEPRECATED: Use parse_action() instead.
+    
+    Parse XML forecasts from agent response.
+    """
+    result = parse_action(response, max_outcomes)
+    if result.action_type == "submit":
+        if result.error:
+            return [], result.error
+        return result.forecasts or [], None
+    elif result.forecasts:
+        return result.forecasts, None
+    return [], result.error or "No forecasts found"
