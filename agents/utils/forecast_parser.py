@@ -17,10 +17,15 @@ from dataclasses import dataclass
 @dataclass
 class ParsedAction:
     """Result of parsing an action from agent response."""
-    action_type: Optional[str]  # "query", "submit", "next", or None
+    action_type: Optional[str]  # "query", "submit", "search", "next", or None
     code: Optional[str]  # For query: the Python code
     forecasts: Optional[List[Dict]]  # For submit: list of {qid, outcomes}
-    error: Optional[str]  # Error message if parsing failed
+    query: Optional[str]  # For search: the search query
+    search_from: Optional[str] = None  # For search: min date (YYYY-MM-DD)
+    search_to: Optional[str] = None  # For search: max date (YYYY-MM-DD)
+    error: Optional[str] = None  # Error message if parsing failed
+
+
 
 
 def parse_action(response: str, max_outcomes: int = 5) -> ParsedAction:
@@ -49,39 +54,80 @@ def parse_action(response: str, max_outcomes: int = 5) -> ParsedAction:
     # Check for self-closing <action type="next"/>
     next_pattern = r'<action\s+type=["\']next["\']\s*/>'
     if re.search(next_pattern, response, re.IGNORECASE):
-        return ParsedAction(action_type="next", code=None, forecasts=None, error=None)
+        return ParsedAction(action_type="next", code=None, forecasts=None, 
+                           query=None, error=None)
+
     
-    # Look for <action type="...">...</action>
-    action_pattern = r'<action\s+type=["\']([^"\']+)["\']\s*>(.*?)</action>'
+    # Look for <action type="...">...</action> (allowing additional attributes after type)
+    action_pattern = r'<action\s+type=["\']([^"\']+)["\']([^>]*?)>(.*?)</action>'
     action_match = re.search(action_pattern, response, re.DOTALL | re.IGNORECASE)
+    
+    if not action_match:
+        # Fallback: try to find unclosed action tag (model forgot </action>)
+        # Match <action type="...">...until end of response or next tag
+        unclosed_pattern = r'<action\s+type=["\']([^"\']+)["\']([^>]*)>(.*?)(?=<(?:action|reasoning|forecast)|$)'
+        unclosed_match = re.search(unclosed_pattern, response, re.DOTALL | re.IGNORECASE)
+        if unclosed_match:
+            action_match = unclosed_match
     
     if not action_match:
         # Fallback: check for legacy formats
         return _parse_legacy_format(response, max_outcomes)
     
     action_type = action_match.group(1).lower().strip()
-    content = action_match.group(2).strip()
+    extra_attrs = action_match.group(2)  # Additional attributes like from="..." to="..."
+    content = action_match.group(3).strip()
     
     if action_type == "query":
         code = _extract_code(content)
         if code:
-            return ParsedAction(action_type="query", code=code, forecasts=None, error=None)
+            return ParsedAction(action_type="query", code=code, forecasts=None, 
+                               query=None, error=None)
         else:
             return ParsedAction(action_type="query", code=None, forecasts=None, 
+                               query=None,
                                error="No Python code found in query action")
     
     elif action_type == "submit":
         forecasts, error = _parse_forecasts(content, max_outcomes)
         if error:
-            return ParsedAction(action_type="submit", code=None, forecasts=None, error=error)
-        return ParsedAction(action_type="submit", code=None, forecasts=forecasts, error=None)
+            return ParsedAction(action_type="submit", code=None, forecasts=None, 
+                               query=None, error=error)
+        return ParsedAction(action_type="submit", code=None, forecasts=forecasts, 
+                           query=None, error=None)
+    
+    elif action_type == "search":
+        # Extract optional from/to date range from extra attributes
+        search_from = None
+        search_to = None
+        if extra_attrs:
+            from_match = re.search(r'from=["\']([^"\']+)["\']', extra_attrs)
+            to_match = re.search(r'to=["\']([^"\']+)["\']', extra_attrs)
+            if from_match:
+                search_from = from_match.group(1)
+            if to_match:
+                search_to = to_match.group(1)
+        
+        # Content is the search query
+        search_query = content.strip()
+        if search_query:
+            return ParsedAction(action_type="search", code=None, forecasts=None,
+                               query=search_query, search_from=search_from, 
+                               search_to=search_to, error=None)
+        else:
+            return ParsedAction(action_type="search", code=None, forecasts=None,
+                               query=None, 
+                               error="No search query provided")
     
     elif action_type == "next":
-        return ParsedAction(action_type="next", code=None, forecasts=None, error=None)
+        return ParsedAction(action_type="next", code=None, forecasts=None, 
+                           query=None, error=None)
     
     else:
         return ParsedAction(action_type=None, code=None, forecasts=None,
-                           error=f"Unknown action type: '{action_type}'. Valid types: query, submit, next")
+                           query=None,
+                           error=f"Unknown action type: '{action_type}'. Valid types: query, submit, search, next")
+
 
 
 def _parse_legacy_format(response: str, max_outcomes: int = 5) -> ParsedAction:
@@ -95,9 +141,17 @@ def _parse_legacy_format(response: str, max_outcomes: int = 5) -> ParsedAction:
     action_match = re.search(action_pattern, response, re.DOTALL | re.IGNORECASE)
     
     if not action_match:
-        # No action found
+        # Check if there's an opening tag without closing - give helpful error
+        opening_only = re.search(r'<action\s+type=["\'][^"\']+["\']', response, re.IGNORECASE)
+        if opening_only:
+            return ParsedAction(action_type=None, code=None, forecasts=None, 
+                               query=None,
+                               error="Found <action> opening tag but no </action> closing tag. Make sure to close your action with </action>.")
+        # No action found at all
         return ParsedAction(action_type=None, code=None, forecasts=None, 
-                           error="No valid <action type=\"...\"> block found")
+                           query=None,
+                           error="No valid <action type=\"...\">...</action> block found")
+
     
     content = action_match.group(1).strip()
     
@@ -105,16 +159,21 @@ def _parse_legacy_format(response: str, max_outcomes: int = 5) -> ParsedAction:
     if '<submit>' in content.lower() or '<forecast' in content.lower():
         forecasts, error = _parse_forecasts(content, max_outcomes)
         if error:
-            return ParsedAction(action_type="submit", code=None, forecasts=None, error=error)
-        return ParsedAction(action_type="submit", code=None, forecasts=forecasts, error=None)
+            return ParsedAction(action_type="submit", code=None, forecasts=None, 
+                               query=None, error=error)
+        return ParsedAction(action_type="submit", code=None, forecasts=forecasts, 
+                           query=None, error=None)
     
     # Try to extract code
     code = _extract_code(content)
     if code:
-        return ParsedAction(action_type="query", code=code, forecasts=None, error=None)
+        return ParsedAction(action_type="query", code=code, forecasts=None, 
+                           query=None, error=None)
     
     return ParsedAction(action_type=None, code=None, forecasts=None,
+                       query=None,
                        error="Could not determine action type from content")
+
 
 
 def _extract_code(content: str) -> Optional[str]:

@@ -2,18 +2,31 @@
 """
 Test script for BasicAgent forecasting.
 
-Usage (Single agent - VLLM):
-    python scripts/test_basic_agent.py --sim_name debug_run --start_date 2024-12-25 --end_date 2024-12-27
+Usage (Search agent with OpenRouter + vLLM matcher):
+    python scripts/test_basic_agent.py \\
+        --sim_name search_agent_run \\
+        --provider openrouter \\
+        --openrouter_model xiaomi/mimo-v2-flash:free \\
+        --matching vllm \\
+        --matcher /fast/rolmedo/models/qwen3-4b-it-2507 \\
+        --search_db /is/cluster/fast/sgoel/forecasting/news/deduped_articles/lance/Qwen3-Embedding-8B \\
+        --embedding_model /is/cluster/fast/sgoel/models/Qwen3-Embedding-8B \\
+        --embedding_gpu_mem 0.4 \\
+        --matcher_gpu_mem 0.3 \\
+        --start_date 2024-12-25 --end_date 2024-12-27
 
-Usage (Single agent - OpenRouter):
-    export OPENROUTER_API_KEY="your-key-here"
-    python scripts/test_basic_agent.py --provider openrouter --openrouter_model xiaomi/mimo-v2-flash:free --sim_name debug_run --start_date 2024-12-25 --end_date 2024-12-27
+Usage (No-search baseline):
+    python scripts/test_basic_agent.py \\
+        --sim_name no_search_baseline \\
+        --provider openrouter \\
+        --openrouter_model xiaomi/mimo-v2-flash:free \\
+        --matching vllm \\
+        --matcher /fast/rolmedo/models/qwen3-4b-it-2507 \\
+        --matcher_gpu_mem 0.5 \\
+        --start_date 2024-12-25 --end_date 2024-12-27
 
 Usage (Multi-agent - config file):
-    python scripts/test_basic_agent.py --agents_config configs/agents_example.yaml --sim_name multi_agent_run --start_date 2024-12-25 --end_date 2024-12-27
-
-For interactive GPU session on cluster (VLLM only):
-    condor_submit_bid 25 -i -append request_gpus=1 -append "requirements=TARGET.CUDACapability == 8.0" -append request_memory=40960
+    python scripts/test_basic_agent.py --agents_config configs/agents_example.yaml --sim_name multi_agent_run
 """
 
 import argparse
@@ -102,7 +115,7 @@ def get_model_short_name(model: str) -> str:
     return name
 
 
-def create_agents_from_config(config: dict, args, output_dir: str) -> list:
+def create_agents_from_config(config: dict, args, output_dir: str, search_tool=None) -> list:
     """Create agent instances from config dict."""
     from inference.openrouter import GlobalRateLimiter
     
@@ -170,7 +183,8 @@ def create_agents_from_config(config: dict, args, output_dir: str) -> list:
             agent_id=agent_id,
             inference_provider=inference_provider,
             config=agent_config,
-            model_name=model
+            model_name=model,
+            search_tool=search_tool
         )
         agents.append(agent)
         print(f"  Created agent: {agent_id} ({provider}:{model})")
@@ -210,7 +224,7 @@ def main():
                        help="Disable parallel agent execution")
     
     # Single-agent settings (used when no config file)
-    parser.add_argument("--provider", choices=["vllm", "openrouter"], default="vllm",
+    parser.add_argument("--provider", choices=["vllm", "openrouter"], default="openrouter",
                        help="Inference provider: 'vllm' (local) or 'openrouter' (API)")
     parser.add_argument("--model_path", default=MODEL_PATH,
                        help="Path to model for VLLM inference")
@@ -236,6 +250,16 @@ def main():
                        help="Answer matching mode: 'exact' (normalized string), 'openrouter', or 'vllm'")
     parser.add_argument("--matcher", default="google/gemma-3-27b-it:free",
                        help="Matcher model: OpenRouter model ID or VLLM model path")
+    
+    # Search settings
+    parser.add_argument("--search_db", default="",
+                       help="Path to LanceDB directory for article search (optional)")
+    parser.add_argument("--embedding_model", default="/is/cluster/fast/sgoel/models/Qwen3-Embedding-8B",
+                       help="Path to embedding model for semantic search")
+    parser.add_argument("--embedding_gpu_mem", type=float, default=0.4,
+                       help="GPU memory fraction for embedding model (0.0-1.0, default 0.4)")
+    parser.add_argument("--matcher_gpu_mem", type=float, default=0.3,
+                       help="GPU memory fraction for matcher model (0.0-1.0, default 0.3)")
     
     args = parser.parse_args()
     
@@ -266,6 +290,32 @@ def main():
     # Save config
     save_config(output_dir, args)
     
+    # Setup search tool if specified (preload embedding model)
+    search_tool = None
+    if args.search_db:
+        print(f"\nSetting up search tool...", flush=True)
+        from agents.search_tools.lancedb import LanceDBSearchTool
+        
+        # Preload embedding model for zero-latency searches
+        embedding_model = None
+        if args.embedding_model and os.path.exists(args.embedding_model):
+            print(f"  Loading embedding model: {args.embedding_model} (GPU: {args.embedding_gpu_mem:.0%})")
+            try:
+                from vllm import LLM
+                embedding_model = LLM(model=args.embedding_model, convert="embed", 
+                                      gpu_memory_utilization=args.embedding_gpu_mem)
+                print("  Embedding model loaded (queries will use semantic/hybrid search)")
+            except Exception as e:
+                print(f"  Warning: Failed to load embedding model: {e}")
+                print("  Falling back to keyword-only search")
+        
+        search_tool = LanceDBSearchTool(args.search_db, embedding_model=embedding_model)
+        if search_tool.is_available:
+            print(f"  LanceDB connected: {args.search_db}")
+        else:
+            print(f"  Warning: LanceDB not available at {args.search_db}")
+            search_tool = None
+    
     # Determine agents to create
     agents = []
     
@@ -274,7 +324,7 @@ def main():
         print(f"\nLoading agents from config: {args.agents_config}", flush=True)
         config = load_agents_config(args.agents_config)
         print(f"  Config loaded successfully", flush=True)
-        agents = create_agents_from_config(config, args, output_dir)
+        agents = create_agents_from_config(config, args, output_dir, search_tool)
         
         # Save agent config copy
         import shutil
@@ -320,7 +370,8 @@ def main():
             agent_id=agent_id,
             inference_provider=inference_provider,
             config=agent_config,
-            model_name=model_name
+            model_name=model_name,
+            search_tool=search_tool
         )
         agents.append(agent)
         print(f"  Created agent: {agent_id}")
@@ -335,8 +386,9 @@ def main():
         print(f"Answer matching: OpenRouter with {args.matcher}")
     elif args.matching == "vllm":
         from inference.vllm import VLLMInference
-        matcher_provider = VLLMInference(args.matcher, max_model_len=args.max_model_len)
-        print(f"Answer matching: VLLM with {args.matcher}")
+        matcher_provider = VLLMInference(args.matcher, max_model_len=args.max_model_len, 
+                                          gpu_memory_utilization=args.matcher_gpu_mem)
+        print(f"Answer matching: VLLM with {args.matcher} (GPU: {args.matcher_gpu_mem:.0%})")
     else:
         print(f"Answer matching: exact (normalized string comparison)")
     

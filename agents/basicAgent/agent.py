@@ -1,44 +1,21 @@
 """
-BasicAgent: A simple LLM-based forecasting agent.
-
-This agent:
-1. Receives a DataFrame of active/resolved questions
-2. Writes Python code to explore the data
-3. Submits probability forecasts in XML format
+BasicAgent: Main agent class for LLM-based forecasting.
 
 Uses chain-of-thought with <reasoning> and <action type="..."> tags.
 """
 
-import re
-import json
-import os
 from datetime import date
-from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
-from dataclasses import dataclass, field
 
 from agents.base import BaseAgent
-from agents.utils.memory import BasicMemory
-from agents.utils.df_interface import DfInterface
 from agents.utils.forecast_parser import parse_action, extract_memory
+from agents.utils.timing import AgentTimer
 from environment.interfaces import PredictionSubmission
 
-
-@dataclass
-class AgentConfig:
-    """Configuration for BasicAgent."""
-    max_actions: int = 10  # Max actions per day (queries + submits)
-    max_submit_retries: int = 3
-    max_outcomes_per_question: int = 5
-    memory_dir: Optional[str] = None  # Directory to persist memory, None = no persistence
-    sampling_params: dict = None
-    
-    def __post_init__(self):
-        if self.sampling_params is None:
-            self.sampling_params = {
-                'temperature': 0.7,
-                'max_tokens': 2048,
-            }
+from .config import AgentConfig
+from .memory import BasicMemory
+from .query import QueryHandler
+from .search import SearchHandler
 
 
 class BasicAgent(BaseAgent):
@@ -49,6 +26,8 @@ class BasicAgent(BaseAgent):
     1. Receives system prompt with DataFrame schema and scoring rules
     2. Can take up to max_actions per day, including:
        - query: Execute Python code to explore the DataFrame
+       - search: Search news articles for context (if enabled)
+       - get_article: Retrieve full article content
        - submit: Submit forecasts for one or more questions
        - next: End the current day and proceed to next
     3. Updates memory at end of day (always, regardless of how day ended)
@@ -60,10 +39,22 @@ class BasicAgent(BaseAgent):
                  agent_id: str,
                  inference_provider,
                  config: AgentConfig = None,
-                 model_name: str = ""):
+                 model_name: str = "",
+                 search_tool=None):
         super().__init__(agent_id, inference_provider, model_name)
         self.config = config or AgentConfig()
+        
+        # Handlers
         self._memory = BasicMemory(agent_id, self.config.memory_dir)
+        self._query_handler = QueryHandler()
+        self._search_handler = SearchHandler(
+            search_tool,
+            snippet_max_chars=self.config.snippet_max_chars,
+            article_max_chars=self.config.article_max_chars
+        )
+        
+        # Timing utilities for performance analysis
+        self._timer = AgentTimer()
         
     def act(self, 
             doc_interface,  # Not used in BasicAgent
@@ -73,15 +64,21 @@ class BasicAgent(BaseAgent):
         Execute agent logic for the day.
         
         Flow:
-        1. Initialize DataFrame interface
-        2. Run action loop (query/submit/next)
+        1. Initialize handlers
+        2. Run action loop (query/search/submit/next)
         3. Update memory
         4. Signal day completion
         
         Returns list of submitted forecasts.
         """
-        # Setup
+        # Start timing for the day
+        self._timer.reset()
+        self._timer.start_day()
+        
+        # Setup handlers
         self._setup_day(forecast_interface, current_date)
+        
+        # Build initial prompt
         messages = [{"role": "user", "content": self._build_instructions(current_date)}]
         
         # Action loop
@@ -89,6 +86,11 @@ class BasicAgent(BaseAgent):
         
         # End of day: memory update (always happens)
         self._prompt_memory_update(messages, forecast_interface, current_date)
+        
+        # End timing and save stats
+        self._timer.end_day()
+        if self.config.memory_dir:
+            self._timer.save_day_stats(self.config.memory_dir, current_date)
         
         # Signal day completion
         forecast_interface.next_day()
@@ -100,11 +102,12 @@ class BasicAgent(BaseAgent):
     # =========================================================================
     
     def _setup_day(self, forecast_interface, current_date: date) -> None:
-        """Initialize interfaces for the day."""
+        """Initialize handlers for the day."""
         csv_path = forecast_interface.get_market_csv_path()
-        self._df_interface = DfInterface(
+        self._query_handler.setup(
             csv_path, forecast_interface, self.agent_id, current_date
         )
+        self._search_handler.set_date(current_date)
         self._forecast_interface = forecast_interface
     
     # =========================================================================
@@ -121,8 +124,9 @@ class BasicAgent(BaseAgent):
         all_forecasts = []
         
         while actions_remaining > 0:
-            # Get agent response
-            response = self.inference.chat(messages, self.config.sampling_params)
+            # Get agent response (track LLM time)
+            with self._timer.track("llm"):
+                response = self.inference.chat(messages, self.config.sampling_params)
             messages.append({"role": "assistant", "content": response})
             
             # Parse and handle the action
@@ -134,6 +138,11 @@ class BasicAgent(BaseAgent):
             
             elif parsed.action_type == "query":
                 actions_remaining = self._handle_query(
+                    messages, forecast_interface, response, parsed, actions_remaining
+                )
+            
+            elif parsed.action_type == "search":
+                actions_remaining = self._handle_search(
                     messages, forecast_interface, response, parsed, actions_remaining
                 )
             
@@ -156,9 +165,11 @@ class BasicAgent(BaseAgent):
     
     def _handle_query(self, messages, forecast_interface, response, parsed, actions_remaining) -> int:
         """Handle query action. Returns updated actions_remaining."""
+        actions_remaining -= 1
+        
         if parsed.code:
-            result, error = self._df_interface.execute_query(parsed.code)
-            actions_remaining -= 1
+            with self._timer.track("df_query"):
+                result, error = self._query_handler.execute(parsed.code)
             self._log_action(forecast_interface, messages, response, "query", actions_remaining)
             
             if error:
@@ -166,10 +177,54 @@ class BasicAgent(BaseAgent):
             else:
                 feedback = f"QUERY RESULT:\n{result}\n\nActions remaining: {actions_remaining}"
         else:
-            actions_remaining -= 1
             self._log_action(forecast_interface, messages, response, "query_error", 
                            actions_remaining, error=parsed.error)
             feedback = f"ERROR: {parsed.error}\n\nActions remaining: {actions_remaining}"
+        
+        feedback = self._add_exhaustion_warning(feedback, actions_remaining)
+        messages.append({"role": "user", "content": feedback})
+        return actions_remaining
+    
+    def _handle_search(self, messages, forecast_interface, response, parsed, actions_remaining) -> int:
+        """Handle search action. Returns full chunk content directly."""
+        actions_remaining -= 1
+        
+        if not self._search_handler.is_available:
+            self._log_action(forecast_interface, messages, response, "search_unavailable", actions_remaining)
+            feedback = f"SEARCH ERROR: Search is not available.\n\nActions remaining: {actions_remaining}"
+        elif parsed.query:
+            # Parse date range if provided
+            min_date = None
+            max_date = None
+            if parsed.search_from:
+                try:
+                    from datetime import datetime
+                    min_date = datetime.strptime(parsed.search_from, "%Y-%m-%d").date()
+                except ValueError:
+                    pass
+            if parsed.search_to:
+                try:
+                    from datetime import datetime
+                    max_date = datetime.strptime(parsed.search_to, "%Y-%m-%d").date()
+                except ValueError:
+                    pass
+            
+            with self._timer.track("search"):
+                result, error = self._search_handler.search(
+                    parsed.query, 
+                    max_results=self.config.max_search_results,
+                    min_date=min_date
+                )
+            self._log_action(forecast_interface, messages, response, "search", actions_remaining)
+            
+            if error:
+                feedback = f"SEARCH ERROR: {error}\n\nActions remaining: {actions_remaining}"
+            else:
+                feedback = f"SEARCH RESULTS:\n{result}\n\nActions remaining: {actions_remaining}"
+        else:
+            self._log_action(forecast_interface, messages, response, "search_error", 
+                           actions_remaining, error=parsed.error)
+            feedback = f"SEARCH ERROR: No query provided.\n\nActions remaining: {actions_remaining}"
         
         feedback = self._add_exhaustion_warning(feedback, actions_remaining)
         messages.append({"role": "user", "content": feedback})
@@ -210,7 +265,7 @@ class BasicAgent(BaseAgent):
         self._log_action(forecast_interface, messages, response, "invalid", 
                         actions_remaining, error=parsed.error)
         
-        feedback = f"No valid action found. {parsed.error or 'Use <action type=\"...\"> format.'}\n\nActions remaining: {actions_remaining}"
+        feedback = f"No valid action found. {parsed.error or 'Use <action type=\"...\">...</action> format.'}\n\nActions remaining: {actions_remaining}"
         feedback = self._add_exhaustion_warning(feedback, actions_remaining)
         messages.append({"role": "user", "content": feedback})
         return actions_remaining
@@ -238,7 +293,7 @@ class BasicAgent(BaseAgent):
     
     def _build_instructions(self, current_date: date) -> str:
         """Build the instructions for the agent including data info and rules."""
-        df_info = self._df_interface.get_info()
+        df_info = self._query_handler.get_info()
         
         memory_section = ""
         if self._memory:
@@ -248,6 +303,32 @@ class BasicAgent(BaseAgent):
 </memory>
 
 """
+        
+        # Search section (only if enabled)
+        search_section = ""
+        search_advice = ""
+        end_day_num = 3  # Default without search
+        submit_num = 2   # Default without search
+        if self._search_handler.is_available:
+            end_day_num = 4  # Shift to 4 when search is enabled
+            submit_num = 3
+            search_section = """
+### 2. Search News Articles
+<action type="search">
+your search query here
+</action>
+
+Optional: Specify date range (YYYY-MM-DD format):
+<action type="search" from="2024-12-01" to="2024-12-15">
+your search query here
+</action>
+
+Note: "to" date is capped at today's date (no future leakage).
+You can use search to gather evidence before submitting forecasts.
+"""
+            search_advice = """
+
+You have access to a news article database. You can search it to gather information before making predictions."""
         
         return f"""You are a forecasting agent. Today is {current_date}. Your goal: make accurate probability predictions.
 
@@ -261,7 +342,7 @@ Key insight: You are ONLY rewarded for assigning probability to the ACTUAL corre
 
 Strategy: Predict specific, plausible answers based on the question context. Use the question title, 
 resolution criteria, and any available data to make educated guesses about likely outcomes.
-
+{search_advice}
 ## AVAILABLE DATA
 DataFrame `df` with {df_info['n_rows']} questions ({df_info['n_active']} active/unresolved, {df_info['n_resolved']} resolved).
 
@@ -292,14 +373,14 @@ Your analysis
 
 ## ACTION TYPES
 
-### 1. Query Tasks (explore data)
+### 1. Query Questions (explore data)
 <action type="query">
 ```python
 df[df['is_resolved'] == False][['qid', 'title', 'answer_type']].head()
 ```
 </action>
-
-### 2. Submit Forecasts
+{search_section}
+### {submit_num}. Submit Forecasts
 <action type="submit">
 <forecast qid="QUESTION_ID">
   <outcome name="Answer1" prob="0.5"/>
@@ -307,12 +388,12 @@ df[df['is_resolved'] == False][['qid', 'title', 'answer_type']].head()
 </forecast>
 </action>
 
-### 3. End Day (proceed to next day)
+### {end_day_num}. End Day (proceed to next day)
 <action type="next"/>
 
 ## INTERACTION FLOW
-You have {self.config.max_actions} actions per day. Each query or submission uses 1 action.
-You can interleave queries and submissions as needed.
+You have {self.config.max_actions} actions per day. Each query, search, or submission uses 1 action.
+You can interleave queries, searches, and submissions as needed.
 When ready to move on, use <action type="next"/> to end your day.
 Note: After ending your day, you will be prompted to update your memory.
 

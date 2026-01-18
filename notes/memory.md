@@ -22,7 +22,9 @@ We have a uv environment called fsim which we are using for this project.
 
 For the /is/cluster, to get GPU (say to debug) you will have to get an interactive job. One way to do that (A100) is:
 ```
-(miniforge3)sgoel@login3:~/forecast-sim$ condor_submit_bid 25 -i -append request_gpus=1 -append "requirements=TARGET.CUDACapability == 8.0" -append request_memory=40960
+condor_submit_bid 25 -i -append request_gpus=1 -append "requirements=TARGET.CUDACapability >= 8.0" -append request_memory=80960
+cd ~/forecast-sim
+source fsim/bin/activate
 ```
 Local open-weight models are stored in /fast/rolmedo/models on the /is/cluster. For debugging, its good to use qwen3-4b-it-2507. The OpenForesight dataset of forecasting questions is at /fast/sgoel/forecasting/qs/OpenForesight/data
 
@@ -290,20 +292,18 @@ Options to explore later:
 
 ### In Progress / High Priority
 
-1. **Implement SimDocInterface**: Read articles from organized parquet files for RAG-style forecasting
-2. **Build FAISS index**: Semantic search over articles for efficient context retrieval
-3. **Sandbox code execution**: Replace eval() with safe execution (RestrictedPython, AST whitelisting, or subprocess isolation)
+1. **Sandbox code execution**: Replace eval() with safe execution (RestrictedPython, AST whitelisting, or subprocess isolation)
 
 ### Medium Priority
 
-4. **Checkpointing**: Save/resume simulation state mid-run
-5. **vLLM Batching for Multi-Agent**: Batch inference requests across agents for better throughput with local models
-6. **Evaluation dashboard**: Track Brier scores, calibration curves, and prediction accuracy over time
+2. **Checkpointing**: Save/resume simulation state mid-run
+3. **vLLM Batching for Multi-Agent**: Batch inference requests across agents for better throughput with local models
+4. **Evaluation dashboard**: Track Brier scores, calibration curves, and prediction accuracy over time
 
 ### Low Priority / Nice-to-Have
 
-7. **Deduplication across news batches**: Current approach may have duplicates if same article appears in multiple JSONL files
-8. **Alternative agent scaffolds**: Create different agent architectures (e.g., ReAct, tree-of-thought) for comparison
+5. **Deduplication across news batches**: Current approach may have duplicates if same article appears in multiple JSONL files
+6. **Alternative agent scaffolds**: Create different agent architectures (e.g., ReAct, tree-of-thought) for comparison
 
 ### ✅ Completed
 
@@ -312,3 +312,86 @@ Options to explore later:
 - ~~**Answer matching modes**~~ - `--matching exact|openrouter|vllm` with configurable matcher model
 - ~~**Modular agent utilities**~~ - Extracted `DfInterface`, `BasicMemory`, `forecast_parser` to `agents/utils/`
 - ~~**File-based market state**~~ - Environment writes `market.csv` for agent consumption
+- ~~**LanceDB Search**~~ - Semantic/hybrid article search via `--search_db` flag
+
+---
+
+## Search Infrastructure
+
+### Overview
+
+LanceDB-based article search allows agents to query 14.7M+ news article chunks using hybrid (vector + keyword) search.
+
+**Key locations:**
+- Articles: `/is/cluster/fast/sgoel/forecasting/news/deduped_articles/data/YYYY/MM/DD/`
+- Embeddings: `/is/cluster/fast/sgoel/forecasting/news/embeddings/Qwen3-Embedding-8B/`
+- LanceDB: `/is/cluster/fast/sgoel/forecasting/news/deduped_articles/lance/Qwen3-Embedding-8B/`
+- Embedding model: `/is/cluster/fast/sgoel/models/Qwen3-Embedding-8B`
+
+### Key Scripts
+
+| Script | Purpose |
+|--------|---------|
+| `mpi_scripts/embed/submit_job.py` | Submit embedding jobs to cluster |
+| `scripts/build_lancedb.py` | Build LanceDB from articles + embeddings |
+| `scripts/build_lancedb_index.py` | Create IVF vector index (CRITICAL for performance) |
+
+### Performance
+
+| Index State | Query Time |
+|-------------|-----------|
+| No vector index | ~300 sec/query ❌ |
+| With IVF index | ~10-25 sec/query ✅ |
+
+**IVF Index Parameters:**
+- `num_partitions=256`
+- `num_sub_vectors=64` (must divide vector dim 4096 evenly)
+- `metric=cosine`
+
+### GPU Memory Allocation
+
+When using both embedding model and matcher model on same GPU:
+- `--embedding_gpu_mem 0.4` (40% for Qwen3-Embedding-8B)
+- `--matcher_gpu_mem 0.3` (30% for qwen3-4b-it matcher)
+
+### Agent Search Action Format
+
+```xml
+<!-- Basic search -->
+<action type="search">
+query text here
+</action>
+
+<!-- With date range (YYYY-MM-DD format) -->
+<action type="search" from="2024-12-01" to="2024-12-15">
+query text here
+</action>
+```
+
+- `to` date is capped at simulation date (no future leakage)
+- Parser in `agents/utils/forecast_parser.py` handles the from/to attributes
+
+### Search Result Format
+
+```
+═══ [1] ═══════════════════════════════════════
+HEADLINE: Article Title Here
+SOURCE: example.com
+PUBLISHED: 2024-12-15 | DOWNLOADED: 2024-12-20
+URL: https://...
+
+Full chunk content (512 tokens max, not truncated)
+```
+
+### Timing Metrics
+
+Agent timing stats saved to `<agent_dir>/timing_stats.jsonl`:
+
+```json
+{"date": "2024-12-18", "day_total_seconds": 45.2, "llm_count": 5, "llm_avg_seconds": 3.2, "search_count": 2, "search_avg_seconds": 12.5, "df_query_count": 3, "df_query_avg_seconds": 0.01}
+```
+
+### Full Setup
+
+See `agents/search_tools/README.md` for complete setup instructions.
+
