@@ -37,7 +37,7 @@ from datetime import date
 DEFAULT_SCORER = BrierScorer()
 
 
-def _get_change_points(history: PredictionHistory) -> List[date]:
+def _get_change_points(history: PredictionHistory, end_date: date) -> List[date]:
     """
     Get all dates where any agent's prediction changes.
     Returns sorted list of dates including start and resolution.
@@ -45,11 +45,11 @@ def _get_change_points(history: PredictionHistory) -> List[date]:
     Optimization: Instead of iterating every day, we only need to
     evaluate at points where the snapshot changes.
     """
-    change_dates = {history.start_date, history.resolution_date}
+    change_dates = {history.start_date, end_date}
     
     for agent_preds in history.predictions.values():
         for pred in agent_preds:
-            if history.start_date <= pred.day <= history.resolution_date:
+            if history.start_date <= pred.day <= end_date:
                 change_dates.add(pred.day)
     
     return sorted(change_dates)
@@ -116,7 +116,8 @@ def resolve_question(
     history: PredictionHistory,
     ground_truth: str,
     matcher=None,
-    scorer: Optional[BaseScorer] = None
+    scorer: Optional[BaseScorer] = None,
+    evaluation_date: Optional[date] = None
 ) -> QuestionResult:
     """
     Resolve a question and compute final scores for all agents.
@@ -135,6 +136,7 @@ def resolve_question(
         ground_truth: The actual outcome
         matcher: Optional AnswerMatcher for semantic matching
         scorer: Scoring function to use (default: BrierScorer)
+        evaluation_date: Optional date to stop evaluation at (for partial scoring)
         
     Returns:
         QuestionResult with final time-weighted peer scores
@@ -142,8 +144,16 @@ def resolve_question(
     if scorer is None:
         scorer = DEFAULT_SCORER
     
-    # Get all agents who participated
-    all_agents = set(history.predictions.keys())
+    # Determine evaluation window
+    end_date = evaluation_date if evaluation_date else history.resolution_date
+    
+    # Get all agents who participated before end_date
+    all_agents = set()
+    for agent_id, preds in history.predictions.items():
+        # Check if agent made any prediction on or before end_date
+        if any(p.day <= end_date for p in preds):
+            all_agents.add(agent_id)
+            
     if not all_agents:
         return QuestionResult(
             question_id=history.question_id,
@@ -153,45 +163,67 @@ def resolve_question(
         )
     
     # Find change points for efficient computation
-    change_points = _get_change_points(history)
+    change_points = _get_change_points(history, end_date)
     
-    total_days = history.total_days()
+    # Total duration is from start to end_date
+    total_days = (end_date - history.start_date).days
     if total_days <= 0:
-        total_days = 1
+        total_days = 0 # Will effectively be 1 in division if we treat single snapshot as full weight
     
     # Accumulate weighted peer scores
     weighted_scores: Dict[str, float] = {agent: 0.0 for agent in all_agents}
     
-    # Process each segment
-    for i in range(len(change_points) - 1):
-        segment_start = change_points[i]
-        segment_end = change_points[i + 1]
-        segment_days = (segment_end - segment_start).days
-        
-        if segment_days <= 0:
-            continue
-        
-        # Get snapshot at start of segment (carries forward through segment)
-        snapshot = _get_snapshot_at(history, segment_start)
-        
-        if snapshot:  # Changed from len(snapshot) >= 2 - single agent now gets scored
-            # Compute peer scores for this snapshot
-            segment_peer_scores = compute_snapshot_peer_scores(
+    # Special case: Start equals End (Single day / Snapshot evaluation)
+    if len(change_points) < 2:
+        snapshot = _get_snapshot_at(history, change_points[0])
+        if snapshot:
+            snapshot_scores = compute_snapshot_peer_scores(
                 snapshot, ground_truth, scorer, matcher
             )
+            for agent_id, score in snapshot_scores.items():
+                weighted_scores[agent_id] = score # Weight 1.0 effectively
+        
+        # Determine denominator
+        denominator = 1
+    else:
+        # Standard segment processing
+        for i in range(len(change_points) - 1):
+            segment_start = change_points[i]
+            segment_end = change_points[i + 1]
+            segment_days = (segment_end - segment_start).days
             
-            # Weight by segment duration
-            for agent_id, score in segment_peer_scores.items():
-                weighted_scores[agent_id] += score * segment_days
+            if segment_days <= 0:
+                continue
+            
+            # Get snapshot at start of segment (carries forward through segment)
+            snapshot = _get_snapshot_at(history, segment_start)
+            
+            if snapshot:
+                # Compute peer scores for this snapshot
+                segment_peer_scores = compute_snapshot_peer_scores(
+                    snapshot, ground_truth, scorer, matcher
+                )
+                
+                # Weight by segment duration
+                for agent_id, score in segment_peer_scores.items():
+                    weighted_scores[agent_id] += score * segment_days
+                    
+        denominator = total_days if total_days > 0 else 1
     
     # Normalize by total days
     agent_scores = {
-        agent: weighted_scores[agent] / total_days 
+        agent: weighted_scores[agent] / denominator
         for agent in all_agents
     }
     
     # Final aggregate
-    current_preds = list(history.get_all_current_predictions().values())
+    # Use helper but check evaluation date
+    current_preds = []
+    for agent_id in all_agents:
+         pred = history.get_prediction_as_of(agent_id, end_date)
+         if pred:
+             current_preds.append(pred)
+             
     aggregate = compute_aggregate(current_preds)
     
     return QuestionResult(

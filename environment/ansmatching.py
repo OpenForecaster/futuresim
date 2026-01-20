@@ -15,12 +15,14 @@ class AnswerMatcher:
     Tracks inconsistencies when LLM contradicts transitivity.
     """
     
-    def __init__(self, inference_provider):
+    def __init__(self, inference_provider, logger=None):
         """
         Args:
             inference_provider: Object with chat(messages, sampling_params) method.
+            logger: Optional SimLogger for logging matcher decisions.
         """
         self.inference = inference_provider
+        self.logger = logger
         
         # Union-Find: normalized outcome -> parent
         self._parent: Dict[str, str] = {}
@@ -131,8 +133,17 @@ Are these two outcomes semantically equivalent? i.e. do they represent the exact
 Answer strictly with "Yes" or "No"."""
 
         messages = [{"role": "user", "content": prompt}]
-        response = self.inference.chat(messages, {"temperature": 0.0, "max_tokens": 10})
-        return "yes" in response.lower()
+        response, _ = self.inference.chat(messages, {"temperature": 0.0, "max_tokens": 10})
+        
+        is_equiv = "yes" in response.lower()
+        
+        if self.logger:
+            self.logger.log_matcher(
+                input_data={"type": "is_equivalent", "outcome_a": outcome_a, "outcome_b": outcome_b},
+                output_data={"response": response, "is_equivalent": is_equiv}
+            )
+            
+        return is_equiv
 
     def find_match(self, candidate: str, existing_outcomes: List[str]) -> Optional[str]:
         """
@@ -179,7 +190,25 @@ If no match exists, respond with "None".
 Answer:"""
 
         messages = [{"role": "user", "content": prompt}]
-        response = self.inference.chat(messages, {"temperature": 0.0, "max_tokens": 10}).strip()
+        response_text, _ = self.inference.chat(messages, {"temperature": 0.0, "max_tokens": 10})
+        response = response_text.strip()
+        
+        match_result = None
+        if response.lower() != "none":
+            try:
+                numbers = re.findall(r'\d+', response)
+                if numbers:
+                    idx = int(numbers[0]) - 1
+                    if 0 <= idx < len(existing_outcomes):
+                        match_result = existing_outcomes[idx]
+            except Exception:
+                pass
+        
+        if self.logger:
+            self.logger.log_matcher(
+                input_data={"type": "find_match", "candidate": candidate, "existing": existing_outcomes},
+                output_data={"response": response_text, "matched": match_result}
+            )
         
         if response.lower() == "none":
             return None

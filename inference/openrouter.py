@@ -14,7 +14,7 @@ import os
 import time
 import random
 from threading import Lock
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 
 try:
     import requests
@@ -157,7 +157,7 @@ class OpenRouterInference:
         # Ensure rate limiter is initialized
         GlobalRateLimiter()
     
-    def chat(self, messages: List[Dict[str, str]], sampling_params: Dict[str, Any]) -> str:
+    def chat(self, messages: List[Dict[str, str]], sampling_params: Dict[str, Any]) -> Tuple[str, Dict]:
         """
         Chat completion using messages format.
         
@@ -174,6 +174,7 @@ class OpenRouterInference:
         payload = {
             "model": self.model,
             "messages": messages,
+            "usage": {"include": True},
         }
         
         # Map sampling_params to OpenRouter parameters
@@ -199,7 +200,7 @@ class OpenRouterInference:
         # Make request with retries
         return self._request_with_retry(payload)
     
-    def _request_with_retry(self, payload: Dict[str, Any]) -> str:
+    def _request_with_retry(self, payload: Dict[str, Any]) -> Tuple[str, Dict]:
         """
         Make API request with exponential backoff retry logic.
         
@@ -248,7 +249,16 @@ class OpenRouterInference:
                     if "choices" not in data:
                         error_detail = data.get("error", data)
                         raise RuntimeError(f"OpenRouter returned invalid response: {error_detail}")
-                    return data["choices"][0]["message"]["content"]
+                    
+                    content = data["choices"][0]["message"]["content"]
+                    usage = data.get("usage", {})
+                    
+                    # Extract reasoning if available
+                    reasoning = data["choices"][0]["message"].get("reasoning")
+                    if reasoning:
+                        usage["_reasoning_content"] = reasoning
+                        
+                    return content, usage
                 
                 # Rate limit or server error - retry (including 524 Cloudflare timeout)
                 if response.status_code in (429, 500, 502, 503, 504, 524):

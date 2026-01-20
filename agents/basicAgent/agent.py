@@ -4,7 +4,7 @@ BasicAgent: Main agent class for LLM-based forecasting.
 Uses chain-of-thought with <reasoning> and <action type="..."> tags.
 """
 
-from datetime import date
+from datetime import date, timedelta
 from typing import List, Dict, Any, Optional, Tuple
 
 from agents.base import BaseAgent
@@ -50,7 +50,8 @@ class BasicAgent(BaseAgent):
         self._search_handler = SearchHandler(
             search_tool,
             snippet_max_chars=self.config.snippet_max_chars,
-            article_max_chars=self.config.article_max_chars
+            article_max_chars=self.config.article_max_chars,
+            search_cutoff_days=self.config.search_cutoff_days
         )
         
         # Timing utilities for performance analysis
@@ -125,36 +126,44 @@ class BasicAgent(BaseAgent):
         
         while actions_remaining > 0:
             # Get agent response (track LLM time)
+            # Get agent response (track LLM time)
             with self._timer.track("llm"):
-                response = self.inference.chat(messages, self.config.sampling_params)
+                response, usage = self.inference.chat(messages, self.config.sampling_params)
+            
+            # Extract reasoning
+            reasoning = usage.get("_reasoning_content") if usage else None
+
+            # Record token usage
+            self._timer.record_tokens(usage)
+            
             messages.append({"role": "assistant", "content": response})
             
             # Parse and handle the action
             parsed = parse_action(response, self.config.max_outcomes_per_question)
             
             if parsed.action_type == "next":
-                self._log_action(forecast_interface, messages, response, "next_day", actions_remaining)
+                self._log_action(forecast_interface, messages, response, "next_day", actions_remaining, reasoning=reasoning)
                 break
             
             elif parsed.action_type == "query":
                 actions_remaining = self._handle_query(
-                    messages, forecast_interface, response, parsed, actions_remaining
+                    messages, forecast_interface, response, parsed, actions_remaining, reasoning=reasoning
                 )
             
             elif parsed.action_type == "search":
                 actions_remaining = self._handle_search(
-                    messages, forecast_interface, response, parsed, actions_remaining
+                    messages, forecast_interface, response, parsed, actions_remaining, reasoning=reasoning
                 )
             
             elif parsed.action_type == "submit":
                 actions_remaining, forecasts = self._handle_submit(
-                    messages, forecast_interface, response, parsed, actions_remaining
+                    messages, forecast_interface, response, parsed, actions_remaining, reasoning=reasoning
                 )
                 all_forecasts.extend(forecasts)
             
             else:
                 actions_remaining = self._handle_invalid(
-                    messages, forecast_interface, response, parsed, actions_remaining
+                    messages, forecast_interface, response, parsed, actions_remaining, reasoning=reasoning
                 )
         
         return all_forecasts
@@ -163,14 +172,14 @@ class BasicAgent(BaseAgent):
     # Action Handlers
     # =========================================================================
     
-    def _handle_query(self, messages, forecast_interface, response, parsed, actions_remaining) -> int:
+    def _handle_query(self, messages, forecast_interface, response, parsed, actions_remaining, reasoning=None) -> int:
         """Handle query action. Returns updated actions_remaining."""
         actions_remaining -= 1
         
         if parsed.code:
             with self._timer.track("df_query"):
                 result, error = self._query_handler.execute(parsed.code)
-            self._log_action(forecast_interface, messages, response, "query", actions_remaining)
+            self._log_action(forecast_interface, messages, response, "query", actions_remaining, reasoning=reasoning)
             
             if error:
                 feedback = f"QUERY ERROR: {error}\n\nActions remaining: {actions_remaining}"
@@ -178,19 +187,19 @@ class BasicAgent(BaseAgent):
                 feedback = f"QUERY RESULT:\n{result}\n\nActions remaining: {actions_remaining}"
         else:
             self._log_action(forecast_interface, messages, response, "query_error", 
-                           actions_remaining, error=parsed.error)
+                           actions_remaining, error=parsed.error, reasoning=reasoning)
             feedback = f"ERROR: {parsed.error}\n\nActions remaining: {actions_remaining}"
         
         feedback = self._add_exhaustion_warning(feedback, actions_remaining)
         messages.append({"role": "user", "content": feedback})
         return actions_remaining
     
-    def _handle_search(self, messages, forecast_interface, response, parsed, actions_remaining) -> int:
+    def _handle_search(self, messages, forecast_interface, response, parsed, actions_remaining, reasoning=None) -> int:
         """Handle search action. Returns full chunk content directly."""
         actions_remaining -= 1
         
         if not self._search_handler.is_available:
-            self._log_action(forecast_interface, messages, response, "search_unavailable", actions_remaining)
+            self._log_action(forecast_interface, messages, response, "search_unavailable", actions_remaining, reasoning=reasoning)
             feedback = f"SEARCH ERROR: Search is not available.\n\nActions remaining: {actions_remaining}"
         elif parsed.query:
             # Parse date range if provided
@@ -215,7 +224,7 @@ class BasicAgent(BaseAgent):
                     max_results=self.config.max_search_results,
                     min_date=min_date
                 )
-            self._log_action(forecast_interface, messages, response, "search", actions_remaining)
+            self._log_action(forecast_interface, messages, response, "search", actions_remaining, reasoning=reasoning)
             
             if error:
                 feedback = f"SEARCH ERROR: {error}\n\nActions remaining: {actions_remaining}"
@@ -223,14 +232,14 @@ class BasicAgent(BaseAgent):
                 feedback = f"SEARCH RESULTS:\n{result}\n\nActions remaining: {actions_remaining}"
         else:
             self._log_action(forecast_interface, messages, response, "search_error", 
-                           actions_remaining, error=parsed.error)
+                           actions_remaining, error=parsed.error, reasoning=reasoning)
             feedback = f"SEARCH ERROR: No query provided.\n\nActions remaining: {actions_remaining}"
         
         feedback = self._add_exhaustion_warning(feedback, actions_remaining)
         messages.append({"role": "user", "content": feedback})
         return actions_remaining
     
-    def _handle_submit(self, messages, forecast_interface, response, parsed, actions_remaining) -> Tuple[int, List]:
+    def _handle_submit(self, messages, forecast_interface, response, parsed, actions_remaining, reasoning=None) -> Tuple[int, List]:
         """Handle submit action. Returns (updated actions_remaining, list of submitted forecasts)."""
         submitted = []
         actions_remaining -= 1  # Always consume action
@@ -247,23 +256,23 @@ class BasicAgent(BaseAgent):
                     print(f"  [{self.agent_id}] Failed to submit {f['qid']}: {e}")
             
             self._log_action(forecast_interface, messages, response, "submit", 
-                           actions_remaining, num_forecasts=len(submitted))
+                           actions_remaining, num_forecasts=len(submitted), reasoning=reasoning)
             feedback = f"Submitted {len(submitted)} forecast(s). Actions remaining: {actions_remaining}"
         else:
             # Parse error - still consumed action
             self._log_action(forecast_interface, messages, response, "submit_error",
-                           actions_remaining, error=parsed.error)
+                           actions_remaining, error=parsed.error, reasoning=reasoning)
             feedback = f"SUBMIT ERROR: {parsed.error}\n\nActions remaining: {actions_remaining}"
         
         feedback = self._add_exhaustion_warning(feedback, actions_remaining)
         messages.append({"role": "user", "content": feedback})
         return actions_remaining, submitted
     
-    def _handle_invalid(self, messages, forecast_interface, response, parsed, actions_remaining) -> int:
+    def _handle_invalid(self, messages, forecast_interface, response, parsed, actions_remaining, reasoning=None) -> int:
         """Handle invalid/unknown action. Returns updated actions_remaining."""
         actions_remaining -= 1
         self._log_action(forecast_interface, messages, response, "invalid", 
-                        actions_remaining, error=parsed.error)
+                        actions_remaining, error=parsed.error, reasoning=reasoning)
         
         feedback = f"No valid action found. {parsed.error or 'Use <action type=\"...\">...</action> format.'}\n\nActions remaining: {actions_remaining}"
         feedback = self._add_exhaustion_warning(feedback, actions_remaining)
@@ -312,7 +321,13 @@ class BasicAgent(BaseAgent):
         if self._search_handler.is_available:
             end_day_num = 4  # Shift to 4 when search is enabled
             submit_num = 3
-            search_section = """
+            
+            cutoff_desc = "today's date"
+            if self.config.search_cutoff_days > 0:
+                cutoff_date = current_date - timedelta(days=self.config.search_cutoff_days)
+                cutoff_desc = f"{cutoff_date} (today - {self.config.search_cutoff_days} days)"
+
+            search_section = f"""
 ### 2. Search News Articles
 <action type="search">
 your search query here
@@ -323,7 +338,7 @@ Optional: Specify date range (YYYY-MM-DD format):
 your search query here
 </action>
 
-Note: "to" date is capped at today's date (no future leakage).
+Note: "to" date is capped at {cutoff_desc} (no future leakage).
 You can use search to gather evidence before submitting forecasts.
 """
             search_advice = """
@@ -332,16 +347,19 @@ You have access to a news article database. You can search it to gather informat
         
         return f"""You are a forecasting agent. Today is {current_date}. Your goal: make accurate probability predictions.
 
-{memory_section}## SCORING (Brier Score)
-You are scored on how well your predicted probabilities match reality.
+{memory_section}## SCORING (Time-Weighted Peer Score)
+You are evaluated on your **Time-Weighted Peer Score**.
+- **Peer Score**: How much better your forecast is compared to the crowd (average of other agents). 
+  - If you are the only predictor, you are compared against a baseline of 0.
+- **Time-Weighted**: Your score is accumulated over time.
+  - **Incentive**: Predict **early** and **accurately**, and on **more** questions. If you hold a prediction better than the crowd on D days, your improvement multiples D times!
 
-Key insight: You are ONLY rewarded for assigning probability to the ACTUAL correct answer.
-- Assigning probability to wrong answers HURTS your score (you lose points)
-- Assigning probability to placeholders like "Unknown", "TBD", "Other" is USELESS and hurts your score
-- NOT naming the correct answer = maximum penalty
-
-Strategy: Predict specific, plausible answers based on the question context. Use the question title, 
-resolution criteria, and any available data to make educated guesses about likely outcomes.
+Key Mechanics:
+1. **Accuracy**: Brier score (squared error). Assign probability to the TRUE outcome.
+2. **Relative Performance**: You gain points by being more accurate than the market average.
+3. **Speed**: Establish a good position early to maximize the duration of your high score.
+4. **Number of predictions**: Your score is accumulated (summed, not averaged!) across all questions you predict on
+5. **No Placeholders**: "Unknown", "TBD", "Other" are detrimental. Predict specific outcomes.
 {search_advice}
 ## AVAILABLE DATA
 DataFrame `df` with {df_info['n_rows']} questions ({df_info['n_active']} active/unresolved, {df_info['n_resolved']} resolved).
@@ -362,7 +380,7 @@ Your Python code runs in a sandbox with these variables pre-defined:
 Import statements are not available. Standard builtins (len, str, int, float, min, max, sum, sorted, range, etc.) are available.
 
 ## RESPONSE FORMAT
-Every response must have <reasoning> then <action type="...">.
+Every response must have <reasoning> followed by exactly ONE <action> block.
 
 <reasoning>
 Your analysis
@@ -370,6 +388,12 @@ Your analysis
 <action type="ACTION_TYPE">
 ...content based on action type...
 </action>
+
+IMPORTANT:
+- Only ONE <action> block allowed per turn.
+- For "search", this means only 1 search query per turn.
+- For "query", you can write complex multi-step Python code in one block.
+- For "submit", you can include multiple <forecast> items in one block.
 
 ## ACTION TYPES
 
@@ -444,12 +468,15 @@ If you don't want to update memory, just output <reasoning>...</reasoning> witho
 Current memory length: {len(self._memory)} characters"""
         
         messages.append({"role": "user", "content": memory_prompt})
-        response = self.inference.chat(messages, self.config.sampling_params)
+        response, usage = self.inference.chat(messages, self.config.sampling_params)
+        self._timer.record_tokens(usage)
         messages.append({"role": "assistant", "content": response})
         
+        reasoning = usage.get("_reasoning_content") if usage else None
+
         forecast_interface.log_model_output(
             memory_prompt, response, 
-            {"phase": "memory_update", "current_memory_len": len(self._memory)}
+            {"phase": "memory_update", "current_memory_len": len(self._memory), "reasoning": reasoning}
         )
         
         new_memory = extract_memory(response)

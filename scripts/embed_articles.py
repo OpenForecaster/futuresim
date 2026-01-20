@@ -29,11 +29,7 @@ from pathlib import Path
 from typing import List, Dict, Tuple, Optional
 import json
 
-# Fix for /is/cluster/fast which doesn't support file locking
-if os.environ.get('SOFT_FILELOCK'):
-    from filelock import SoftFileLock
-    import filelock
-    filelock.FileLock = SoftFileLock
+
 
 import numpy as np
 import pyarrow.parquet as pq

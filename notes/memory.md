@@ -37,6 +37,15 @@ python scripts/test_basic_agent.py \
   --sim_name test_run
 ```
 
+With search:
+```bash
+python scripts/test_basic_agent.py \
+    --sim_name search_xiaomi_test \
+    --provider openrouter \
+    --openrouter_model xiaomi/mimo-v2-flash:free \
+    --search_db /is/cluster/fast/sgoel/forecasting/news/deduped_articles/lance/Qwen3-Embedding-8B
+```
+
 On seal-node we already have GPUs, so you can go for it directly.
 
 ## Scoring Approach
@@ -297,24 +306,13 @@ Options to explore later:
 ### Medium Priority
 
 2. **Checkpointing**: Save/resume simulation state mid-run
-3. **vLLM Batching for Multi-Agent**: Batch inference requests across agents for better throughput with local models
-4. **Evaluation dashboard**: Track Brier scores, calibration curves, and prediction accuracy over time
+3. **vLLM Batching for Multi-Agent**: Batch inference requests across agents for better throughput with local modelse
 
 ### Low Priority / Nice-to-Have
 
+4. **standard agent action format**: should i switch to openai harmony format for example?
 5. **Deduplication across news batches**: Current approach may have duplicates if same article appears in multiple JSONL files
 6. **Alternative agent scaffolds**: Create different agent architectures (e.g., ReAct, tree-of-thought) for comparison
-
-### ✅ Completed
-
-- ~~**Agent Memory**~~ - Persistent memory via `<memory>` tags in `BasicMemory` class
-- ~~**Async agent execution**~~ - Multi-agent parallel via ThreadPoolExecutor
-- ~~**Answer matching modes**~~ - `--matching exact|openrouter|vllm` with configurable matcher model
-- ~~**Modular agent utilities**~~ - Extracted `DfInterface`, `BasicMemory`, `forecast_parser` to `agents/utils/`
-- ~~**File-based market state**~~ - Environment writes `market.csv` for agent consumption
-- ~~**LanceDB Search**~~ - Semantic/hybrid article search via `--search_db` flag
-
----
 
 ## Search Infrastructure
 
@@ -385,11 +383,7 @@ Full chunk content (512 tokens max, not truncated)
 
 ### Timing Metrics
 
-Agent timing stats saved to `<agent_dir>/timing_stats.jsonl`:
-
-```json
-{"date": "2024-12-18", "day_total_seconds": 45.2, "llm_count": 5, "llm_avg_seconds": 3.2, "search_count": 2, "search_avg_seconds": 12.5, "df_query_count": 3, "df_query_avg_seconds": 0.01}
-```
+Agent timing stats saved to `<agent_dir>/timing_stats.jsonl`.
 
 ### Full Setup
 

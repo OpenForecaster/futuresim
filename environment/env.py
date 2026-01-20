@@ -10,7 +10,8 @@ from .interfaces import PredictionSubmission
 from .data_loader import QuestionPool, Question
 from .scoring import (
     DailyPrediction, PredictionHistory, 
-    compute_aggregate, resolve_question
+    compute_aggregate, resolve_question,
+    DEFAULT_SCORER
 )
 from .ansmatching import AnswerMatcher
 
@@ -32,19 +33,27 @@ class SimLogger:
         self._actions_lock = Lock()
         self.actions_file = open(os.path.join(output_dir, "actions.jsonl"), "w")
         
+        self._metrics_lock = Lock()
+        self.metrics_file = open(os.path.join(output_dir, "daily_metrics.csv"), "w")
+        self.metrics_file.write("date,agent_id,avg_brier,peer_score,tw_peer_score,accuracy,total_predictions\n")
+        
+        self._matcher_lock = Lock()
+        self.matcher_file = open(os.path.join(output_dir, "matcher.jsonl"), "w")
+        
         # Per-agent output files (lazy initialized)
         self.agents_dir = os.path.join(output_dir, "agents")
         self._agent_files: Dict[str, Any] = {}
         self._agent_files_lock = Lock()
         
-    def _get_agent_output_file(self, agent_id: str):
-        """Get or create the output file for an agent (thread-safe)."""
+    def _get_agent_output_files(self, agent_id: str):
+        """Get or create the output files for an agent (thread-safe). Returns (output_file, raw_file)."""
         with self._agent_files_lock:
             if agent_id not in self._agent_files:
                 agent_dir = os.path.join(self.agents_dir, agent_id)
                 os.makedirs(agent_dir, exist_ok=True)
-                file_path = os.path.join(agent_dir, "model_outputs.jsonl")
-                self._agent_files[agent_id] = open(file_path, "w")
+                out_path = os.path.join(agent_dir, "model_outputs.jsonl")
+                raw_path = os.path.join(agent_dir, "model_raw.jsonl")
+                self._agent_files[agent_id] = (open(out_path, "w"), open(raw_path, "w"))
             return self._agent_files[agent_id]
         
     def log_prediction(self, sim_date: date, agent_id: str, 
@@ -62,15 +71,8 @@ class SimLogger:
         
     def log_aggregate(self, sim_date: date, question_id: str, 
                       aggregate: Dict[str, float]):
-        record = {
-            "sim_date": str(sim_date),
-            "type": "aggregate",
-            "question_id": question_id,
-            "aggregate": aggregate
-        }
-        with self._actions_lock:
-            self.actions_file.write(json.dumps(record) + "\n")
-            self.actions_file.flush()
+        # We no longer log aggregates to actions.jsonl to reduce noise
+        pass
         
     def log_resolution(self, sim_date: date, question_id: str, 
                        ground_truth: str, agent_scores: Dict[str, float]):
@@ -84,27 +86,69 @@ class SimLogger:
         with self._actions_lock:
             self.actions_file.write(json.dumps(record) + "\n")
             self.actions_file.flush()
+
+    def log_daily_metrics(self, sim_date: date, metrics_list: List[Dict[str, Any]]):
+        with self._metrics_lock:
+            for m in metrics_list:
+                row = f"{sim_date},{m['agent_id']},{m['avg_brier']:.4f},{m['peer_score']:.4f},{m['tw_peer_score']:.4f},{m['accuracy']:.2f},{m['total_predictions']}\n"
+                self.metrics_file.write(row)
+            self.metrics_file.flush()
         
     def log_model_output(self, sim_date: date, agent_id: str, prompt: str, 
                          response: str, metadata: Optional[Dict[str, Any]] = None):
-        """Log model output to per-agent file (thread-safe)."""
-        record = {
+        """Log model output to per-agent files (thread-safe)."""
+        metadata = metadata or {}
+        
+        # Raw record: includes input prompt and reasoning
+        raw_record = {
             "sim_date": str(sim_date),
             "agent_id": agent_id,
             "prompt": prompt,
             "response": response,
+            "metadata": metadata
+        }
+        
+        # Clean record: only final response, no prompt
+        # We also filter out bulky reasoning from the clean log
+        clean_metadata = metadata.copy()
+        if "reasoning" in clean_metadata:
+            del clean_metadata["reasoning"]
+
+        clean_record = {
+            "sim_date": str(sim_date),
+            "agent_id": agent_id,
+            "response": response,
+            "metadata": clean_metadata
+        }
+        
+        out_file, raw_file = self._get_agent_output_files(agent_id)
+        # Each agent file is only written by one thread, so no lock needed per-file
+        out_file.write(json.dumps(clean_record) + "\n")
+        out_file.flush()
+        
+        raw_file.write(json.dumps(raw_record) + "\n")
+        raw_file.flush()
+        
+    def log_matcher(self, input_data: Any, output_data: Any, metadata: Optional[Dict] = None):
+        """Log matcher decisions."""
+        record = {
+            "timestamp": pd.Timestamp.now().isoformat(),
+            "input": input_data,
+            "output": output_data,
             "metadata": metadata or {}
         }
-        output_file = self._get_agent_output_file(agent_id)
-        # Each agent file is only written by one thread, so no lock needed per-file
-        output_file.write(json.dumps(record) + "\n")
-        output_file.flush()
+        with self._matcher_lock:
+            self.matcher_file.write(json.dumps(record) + "\n")
+            self.matcher_file.flush()
         
     def close(self):
         self.actions_file.close()
+        self.metrics_file.close()
+        self.matcher_file.close()
         with self._agent_files_lock:
-            for f in self._agent_files.values():
-                f.close()
+            for f_out, f_raw in self._agent_files.values():
+                f_out.close()
+                f_raw.close()
             self._agent_files.clear()
 
 
@@ -192,25 +236,31 @@ class SimulationEnvironment:
                  dataset_name: str, 
                  start_date: date,
                  end_date: date,
-                 context_dir: str,
                  inference_provider=None,
                  output_dir: str = ".",
                  resolution_start: date = None,
                  resolution_end: date = None,
-                 parallel: bool = True):
+                 parallel: bool = True,
+                 split: str = "train"):
         self.current_date = start_date
         self.end_date = end_date
-        self.context_dir = context_dir
         self.output_dir = output_dir
         self.parallel = parallel
+        self.split = split
+        
+        # Logging and market state
+        self.logger = SimLogger(output_dir)
+        self.market_writer = MarketWriter(output_dir)
         
         # Components - filter questions to resolution window
         self.q_pool = QuestionPool(
             dataset_name,
+            split=split,
             resolution_start=resolution_start,
             resolution_end=resolution_end
         )
-        self.matcher = AnswerMatcher(inference_provider) if inference_provider else None
+        self.matcher = AnswerMatcher(inference_provider, logger=self.logger) if inference_provider else None
+        self.scorer = DEFAULT_SCORER
         
         # Track prediction history per question
         self.prediction_histories: Dict[str, PredictionHistory] = {}
@@ -234,9 +284,6 @@ class SimulationEnvironment:
         # Track resolved questions for agent learning
         self.resolved_questions: List[Question] = []
         
-        # Logging and market state
-        self.logger = SimLogger(output_dir)
-        self.market_writer = MarketWriter(output_dir)
         self.market_csv_path: Optional[str] = None
         
     def add_agent(self, agent):
@@ -276,6 +323,10 @@ class SimulationEnvironment:
             print("  No agents participated.")
             return
         
+        # Compute scores for ACTIVE questions (using hidden truth)
+        active_questions = self.q_pool.get_active()
+        active_stats = self._compute_daily_active_scores(active_questions)
+        
         # Table header
         header = f"{'Agent':<25} {'Avg Brier':>10} {'Peer':>10} {'TW-Peer':>10} {'Acc %':>8} {'Total':>6}"
         print(header)
@@ -284,29 +335,43 @@ class SimulationEnvironment:
         # Table rows
         for agent in sorted(self.agents, key=lambda a: a.agent_id):
             aid = agent.agent_id
-            raw_brier_sum = self.agent_raw_brier.get(aid, 0.0)
-            snapshot_peer = self.agent_snapshot_peer.get(aid, 0.0)
-            tw_peer = self.agent_scores.get(aid, 0.0)
-            correct = self.agent_correct.get(aid, 0)
-            wrong = self.agent_wrong.get(aid, 0)
-            total = self.agent_questions.get(aid, 0)
             
-            # Average Brier per question
-            avg_brier = raw_brier_sum / total if total > 0 else 0.0
+            # Resolved stats
+            resolved_brier_sum = self.agent_raw_brier.get(aid, 0.0)
+            resolved_snapshot_peer = self.agent_snapshot_peer.get(aid, 0.0)
+            resolved_tw_peer = self.agent_scores.get(aid, 0.0)
+            resolved_correct = self.agent_correct.get(aid, 0)
+            resolved_count = self.agent_questions.get(aid, 0)
             
-            # Accuracy percentage
-            accuracy = (correct / total * 100) if total > 0 else 0.0
+            # Active stats
+            agent_active = active_stats.get(aid, {
+                'raw_brier': 0.0, 
+                'peer_sum': 0.0, 
+                'tw_peer_sum': 0.0, 
+                'correct_count': 0,
+                'count': 0
+            })
+            
+            # Combined stats for Avg Brier
+            total_brier_sum = resolved_brier_sum + agent_active['raw_brier']
+            total_peer_sum = resolved_snapshot_peer + agent_active['peer_sum']
+            total_tw_peer_sum = resolved_tw_peer + agent_active['tw_peer_sum']
+            total_correct = resolved_correct + agent_active['correct_count']
+            total_count = resolved_count + agent_active['count']
+            
+            avg_brier = total_brier_sum / total_count if total_count > 0 else 0.0
+            accuracy = (total_correct / total_count * 100) if total_count > 0 else 0.0
             
             # Truncate long agent names
             display_name = aid[:24] if len(aid) > 24 else aid
             
-            row = f"{display_name:<25} {avg_brier:>+10.3f} {snapshot_peer:>+10.2f} {tw_peer:>+10.2f} {accuracy:>7.1f}% {total:>6}"
+            row = f"{display_name:<25} {avg_brier:>+10.3f} {total_peer_sum:>+10.2f} {total_tw_peer_sum:>+10.2f} {accuracy:>7.1f}% {total_count:>6}"
             print(row)
         
         print("-"*90)
-        print("Legend: Avg Brier=Mean Brier score per question, Peer=Snapshot peer sum, TW-Peer=Time-weighted peer sum")
-        print("        Acc=% of questions where agent scored positive (beat peers). Peer scores sum to 0 only when")
-        print("        all agents predict on the same days; single-agent segments use baseline scoring.")
+        print("Legend: Avg Brier=Mean Brier score per question (Active + Resolved)")
+        print("        Peer=Snapshot peer sum, TW-Peer=Time-weighted peer sum")
+        print("        Acc=% of questions where agent's top choice matched truth.")
         print("="*90)
 
     def step(self):
@@ -344,11 +409,166 @@ class SimulationEnvironment:
         
         # 5. Update aggregates (end of day)
         self._update_aggregates(active_questions)
+        
+        # 6. Save daily metrics
+        self._save_daily_metrics()
     
+    def _compute_daily_active_scores(self, active_questions: List[Question]):
+        """
+        Compute daily scores only for the currently active questions.
+        Uses FUTURE ground truth to assess current performance.
+        Includes Brier score, Peer score, TW-Peer score, and Accuracy.
+        """
+        active_stats = {}
+        
+        # Helper normalization for accuracy check
+        def normalize(s: str) -> str:
+            return s.lower().replace(" ", "").strip()
+        
+        from environment.scoring import resolve_question, compute_snapshot_peer_scores
+            
+        for q in active_questions:
+            # We strictly need ground truth here
+            if not q.ground_truth_answer:
+                continue
+                
+            history = self.prediction_histories.get(q.qid)
+            if not history or not history.predictions:
+                continue
+                
+            # Get latest predictions as of today (Snapshot)
+            # Use explicit loop since get_all_current_predictions doesn't accept date
+            snapshot = {}
+            for aid in history.predictions.keys():
+                pred = history.get_prediction_as_of(aid, self.current_date)
+                if pred:
+                    snapshot[aid] = pred
+            
+            # 1. Compute Active Snapshot Peer Scores
+            snapshot_peers = {}
+            if snapshot:
+                snapshot_peers = compute_snapshot_peer_scores(
+                    snapshot, q.ground_truth_answer, self.scorer, self.matcher
+                )
+
+            # 2. Compute Active TW-Peer Scores (Partial Resolution)
+            # Use resolve_question with evaluation_date=today
+            partial_result = resolve_question(
+                history, 
+                q.ground_truth_answer, 
+                self.matcher, 
+                self.scorer, 
+                evaluation_date=self.current_date
+            )
+            tw_peers = partial_result.agent_scores
+
+            # Process per-agent stats for this question
+            for agent in self.agents:
+                aid = agent.agent_id
+                
+                # Check if agent has a prediction in snapshot
+                pred = snapshot.get(aid)
+                
+                if pred:
+                    # Brier Score
+                    brier = self.scorer.score_prediction(pred, q.ground_truth_answer, self.matcher)
+                    
+                    # Accuracy: Highest probability guess matches truth (ties broken arbitrarily)
+                    # Find outcome with max probability
+                    max_prob = -1.0
+                    best_outcome = None
+                    for outcome, prob in pred.outcomes.items():
+                        if prob > max_prob:
+                            max_prob = prob
+                            best_outcome = outcome
+                    
+                    # Check match
+                    is_accurate = False
+                    if best_outcome:
+                        if self.matcher:
+                            if self.matcher.is_equivalent(best_outcome, q.ground_truth_answer):
+                                is_accurate = True
+                        else:
+                            if normalize(best_outcome) == normalize(q.ground_truth_answer):
+                                is_accurate = True
+                    
+                    # Aggregate stats
+                    if aid not in active_stats:
+                        active_stats[aid] = {
+                            'raw_brier': 0.0, 
+                            'peer_sum': 0.0,
+                            'tw_peer_sum': 0.0,
+                            'correct_count': 0,
+                            'count': 0
+                        }
+                    
+                    active_stats[aid]['raw_brier'] += brier
+                    active_stats[aid]['peer_sum'] += snapshot_peers.get(aid, 0.0)
+                    active_stats[aid]['tw_peer_sum'] += tw_peers.get(aid, 0.0)
+                    active_stats[aid]['correct_count'] += 1 if is_accurate else 0
+                    active_stats[aid]['count'] += 1
+                    
+        return active_stats
+    
+    def _save_daily_metrics(self):
+        """Save current cumulative metrics for all agents to CSV."""
+        # 1. Compute scores for ACTIVE questions (using hidden truth)
+        active_questions = self.q_pool.get_active()
+        active_stats = self._compute_daily_active_scores(active_questions)
+        
+        metrics_list = []
+        for agent in self.agents:
+            aid = agent.agent_id
+            
+            # Resolved stats
+            resolved_brier_sum = self.agent_raw_brier.get(aid, 0.0)
+            resolved_snapshot_peer = self.agent_snapshot_peer.get(aid, 0.0)
+            resolved_tw_peer = self.agent_scores.get(aid, 0.0)
+            resolved_correct = self.agent_correct.get(aid, 0)
+            resolved_count = self.agent_questions.get(aid, 0)
+            
+            # Active stats
+            agent_active = active_stats.get(aid, {
+                'raw_brier': 0.0, 
+                'peer_sum': 0.0, 
+                'tw_peer_sum': 0.0, 
+                'correct_count': 0,
+                'count': 0
+            })
+            
+            # Combined stats
+            total_brier_sum = resolved_brier_sum + agent_active['raw_brier']
+            total_peer_sum = resolved_snapshot_peer + agent_active['peer_sum']
+            total_tw_peer_sum = resolved_tw_peer + agent_active['tw_peer_sum']
+            total_correct = resolved_correct + agent_active['correct_count']
+            total_count = resolved_count + agent_active['count']
+            
+            avg_brier = total_brier_sum / total_count if total_count > 0 else 0.0
+            accuracy = (total_correct / total_count * 100) if total_count > 0 else 0.0
+            
+            metrics_list.append({
+                'agent_id': aid,
+                'avg_brier': avg_brier,
+                'peer_score': total_peer_sum,
+                'tw_peer_score': total_tw_peer_sum,
+                'accuracy': accuracy,
+                'total_predictions': total_count
+            })
+            
+        self.logger.log_daily_metrics(self.current_date, metrics_list)
+
+    def _get_safe_active_questions(self, active_questions: List[Question]) -> List[Question]:
+        """Return a copy of active questions with ground truth hidden."""
+        from dataclasses import replace
+        return [replace(q, ground_truth_answer="") for q in active_questions]
+
     def _run_agents_sequential(self, active_questions: List[Question]):
         """Run agents one at a time (original behavior)."""
+        # Hide ground truth from agents
+        safe_questions = self._get_safe_active_questions(active_questions)
+        
         forecast_interface = SimForecastInterface(
-            active_questions, 
+            safe_questions, 
             self.current_aggregates,
             self.prediction_histories,
             self.current_date,
@@ -365,12 +585,15 @@ class SimulationEnvironment:
     def _run_agents_parallel(self, active_questions: List[Question]):
         """Run agents in parallel using thread pool."""
         
+        # Hide ground truth from agents
+        safe_questions = self._get_safe_active_questions(active_questions)
+        
         def run_agent(agent):
             """Execute a single agent's turn."""
             # Each agent gets its own forecast interface instance
             # (they share the same underlying histories dict, but with thread-safe access)
             forecast_interface = SimForecastInterface(
-                active_questions, 
+                safe_questions, 
                 self.current_aggregates,
                 self.prediction_histories,
                 self.current_date,

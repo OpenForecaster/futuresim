@@ -1,0 +1,13 @@
+# 4 mimo-v2-flash agents for selfplay variance testing
+defaults:
+  provider: openrouter
+  scaffold: basic
+  max_actions: 10
+  temperature: 0.7
+  max_tokens: 2048
+
+agents:
+  - model: xiaomi/mimo-v2-flash:free
+  - model: xiaomi/mimo-v2-flash:free
+  - model: xiaomi/mimo-v2-flash:free
+  - model: xiaomi/mimo-v2-flash:free

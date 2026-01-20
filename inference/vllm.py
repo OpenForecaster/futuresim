@@ -1,4 +1,4 @@
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 import os
 
 # Global singleton storage to keep models loaded across agent instances
@@ -32,8 +32,6 @@ class VLLMInference:
             except ImportError:
                 raise ImportError("vllm module not found. Please install vllm.")
                 
-            print(f"Loading VLLM model: {model_path} (max_model_len={max_model_len})")
-            
             if "trust_remote_code" not in kwargs:
                 kwargs["trust_remote_code"] = True
             
@@ -41,7 +39,7 @@ class VLLMInference:
             self.llm = LLM(model=model_path, max_model_len=max_model_len, **kwargs)
             _VLLM_ENGINES[cache_key] = self.llm
             
-    def chat(self, messages: List[Dict[str, str]], sampling_params: Dict[str, Any]) -> str:
+    def chat(self, messages: List[Dict[str, str]], sampling_params: Dict[str, Any]) -> Tuple[str, Dict]:
         """
         Chat completion using messages format.
         
@@ -58,5 +56,14 @@ class VLLMInference:
         
         # vLLM's chat() expects a list of conversations (batch of 1 here)
         outputs = self.llm.chat([messages], sp, use_tqdm=False)
-        return outputs[0].outputs[0].text
+        output = outputs[0]
+        generated_text = output.outputs[0].text
+        
+        usage = {
+            "prompt_tokens": len(output.prompt_token_ids),
+            "completion_tokens": len(output.outputs[0].token_ids),
+            "total_tokens": len(output.prompt_token_ids) + len(output.outputs[0].token_ids)
+        }
+        
+        return generated_text, usage
 

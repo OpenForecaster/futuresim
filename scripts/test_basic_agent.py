@@ -153,6 +153,7 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
         max_retries = agent_def.get('max_retries', defaults.get('max_retries', args.max_retries))
         temperature = agent_def.get('temperature', defaults.get('temperature', args.temperature))
         max_tokens = agent_def.get('max_tokens', defaults.get('max_tokens', args.max_tokens))
+        search_cutoff_days = agent_def.get('search_cutoff_days', defaults.get('search_cutoff_days', getattr(args, 'search_cutoff_days', 0)))
         
         # Generate unique agent ID: scaffold_modelname_NNN
         model_short = get_model_short_name(model)
@@ -172,7 +173,8 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
             sampling_params={
                 'temperature': temperature,
                 'max_tokens': max_tokens,
-            }
+            },
+            search_cutoff_days=search_cutoff_days
         )
         
         # Currently only support BasicAgent scaffold
@@ -208,10 +210,10 @@ def main():
     # Data paths
     parser.add_argument("--dataset", default=DATASET_PATH,
                        help="Path to OpenForesight dataset")
-    parser.add_argument("--context_dir", default="",
-                       help="Path to context/news directory (optional)")
     parser.add_argument("--output_base", default=CURRENT_SIM_DIR,
                        help="Base directory for simulation outputs")
+    parser.add_argument("--split", choices=["train", "test", "validation"], default="train",
+                       help="Dataset split to use (default: train)")
     
     # Multi-agent config
     parser.add_argument("--agents_config", default=None,
@@ -260,8 +262,30 @@ def main():
                        help="GPU memory fraction for embedding model (0.0-1.0, default 0.4)")
     parser.add_argument("--matcher_gpu_mem", type=float, default=0.3,
                        help="GPU memory fraction for matcher model (0.0-1.0, default 0.3)")
+    parser.add_argument("--search_cutoff_days", type=int, default=0,
+                       help="Days before current date to cutoff search results (default 0)")
     
-    args = parser.parse_args()
+    # Config file
+    parser.add_argument("--config", help="Path to YAML configuration file to load arguments from")
+    
+    # Parse CLI args first to get config path if provided
+    args, remaining_argv = parser.parse_known_args()
+    
+    # Load config if provided
+    if args.config:
+        print(f"Loading configuration from {args.config}")
+        with open(args.config, 'r') as f:
+            import yaml
+            config = yaml.safe_load(f)
+            
+        # Set defaults from config
+        parser.set_defaults(**config)
+        
+        # Override with any explicitly provided CLI args
+        # This requires re-parsing to ensure CLI args take precedence over config defaults
+        args = parser.parse_args(args=remaining_argv + sys.argv[1:])
+    else:
+        args = parser.parse_args()
     
     # Handle parallel flag
     if args.no_parallel:
@@ -302,8 +326,10 @@ def main():
             print(f"  Loading embedding model: {args.embedding_model} (GPU: {args.embedding_gpu_mem:.0%})")
             try:
                 from vllm import LLM
+                # Embedding model should fit comfortably on 80GB GPU with 0.4 utilization
                 embedding_model = LLM(model=args.embedding_model, convert="embed", 
-                                      gpu_memory_utilization=args.embedding_gpu_mem)
+                                      gpu_memory_utilization=args.embedding_gpu_mem,
+                                      max_model_len=args.max_model_len)
                 print("  Embedding model loaded (queries will use semantic/hybrid search)")
             except Exception as e:
                 print(f"  Warning: Failed to load embedding model: {e}")
@@ -319,17 +345,24 @@ def main():
     # Determine agents to create
     agents = []
     
-    if args.agents_config:
+    if args.agents_config or (args.config and 'agents' in config):
         # Multi-agent mode from config file
-        print(f"\nLoading agents from config: {args.agents_config}", flush=True)
-        config = load_agents_config(args.agents_config)
+        if args.agents_config:
+            print(f"\nLoading agents from config: {args.agents_config}", flush=True)
+            config_agents = load_agents_config(args.agents_config)
+        else:
+            # Use the main config which already has agents
+            config_agents = config
+            print(f"\nUsing agents defined in main config", flush=True)
+            
         print(f"  Config loaded successfully", flush=True)
-        agents = create_agents_from_config(config, args, output_dir, search_tool)
+        agents = create_agents_from_config(config_agents, args, output_dir, search_tool)
         
-        # Save agent config copy
-        import shutil
-        config_copy = os.path.join(output_dir, "agents_config.yaml")
-        shutil.copy(args.agents_config, config_copy)
+        # Save agent config copy if it was a separate file
+        if args.agents_config:
+            import shutil
+            config_copy = os.path.join(output_dir, "agents_config.yaml")
+            shutil.copy(args.agents_config, config_copy)
         
     elif not args.no_inference:
         # Single agent mode (legacy)
@@ -363,7 +396,8 @@ def main():
             sampling_params={
                 'temperature': args.temperature,
                 'max_tokens': args.max_tokens,
-            }
+            },
+            search_cutoff_days=args.search_cutoff_days
         )
         
         agent = BasicAgent(
@@ -384,6 +418,10 @@ def main():
         from inference.openrouter import OpenRouterInference
         matcher_provider = OpenRouterInference(args.matcher)
         print(f"Answer matching: OpenRouter with {args.matcher}")
+    if args.matching == "openrouter":
+        from inference.openrouter import OpenRouterInference
+        matcher_provider = OpenRouterInference(args.matcher)
+        print(f"Answer matching: OpenRouter with {args.matcher}")
     elif args.matching == "vllm":
         from inference.vllm import VLLMInference
         matcher_provider = VLLMInference(args.matcher, max_model_len=args.max_model_len, 
@@ -398,12 +436,12 @@ def main():
         dataset_name=args.dataset,
         start_date=sim_start,
         end_date=sim_end,
-        context_dir=args.context_dir,
         inference_provider=matcher_provider,
         output_dir=output_dir,
         resolution_start=resolution_start,
         resolution_end=resolution_end,
         parallel=args.parallel,
+        split=args.split,
     )
     
     # Add all agents

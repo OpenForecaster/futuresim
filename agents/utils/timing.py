@@ -64,6 +64,52 @@ class TimingStats:
         }
 
 
+@dataclass
+class TokenStats:
+    """Statistics for token usage."""
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    reasoning_tokens: int = 0
+    cached_tokens: int = 0
+    total_tokens: int = 0
+    
+    def add(self, usage: Dict) -> None:
+        """Add usage stats from an API response."""
+        if not usage:
+            return
+            
+        p_tokens = usage.get('prompt_tokens', 0)
+        c_tokens = usage.get('completion_tokens', 0)
+        t_tokens = usage.get('total_tokens', 0)
+        
+        self.prompt_tokens += p_tokens
+        self.completion_tokens += c_tokens
+        self.total_tokens += t_tokens
+        
+        # Handle details if present
+        c_details = usage.get('completion_tokens_details')
+        if c_details and isinstance(c_details, dict):
+            self.reasoning_tokens += c_details.get('reasoning_tokens', 0)
+        elif 'reasoning_tokens' in usage:
+            self.reasoning_tokens += usage.get('reasoning_tokens', 0)
+            
+        p_details = usage.get('prompt_tokens_details')
+        if p_details and isinstance(p_details, dict):
+            self.cached_tokens += p_details.get('cached_tokens', 0)
+        elif 'cached_tokens' in usage:
+             self.cached_tokens += usage.get('cached_tokens', 0)
+
+    def reset(self) -> None:
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+        self.reasoning_tokens = 0
+        self.cached_tokens = 0
+        self.total_tokens = 0
+    
+    def to_dict(self) -> Dict:
+        return asdict(self)
+
+
 class AgentTimer:
     """
     Tracks timing metrics for agent operations.
@@ -80,6 +126,7 @@ class AgentTimer:
         self._stats: Dict[str, TimingStats] = {
             cat: TimingStats() for cat in self.CATEGORIES
         }
+        self._tokens = TokenStats()
         self._day_start: Optional[float] = None
         self._day_total: float = 0.0
     
@@ -116,6 +163,10 @@ class AgentTimer:
         if category not in self._stats:
             self._stats[category] = TimingStats()
         self._stats[category].add(duration)
+
+    def record_tokens(self, usage: Dict) -> None:
+        """Record token usage stats."""
+        self._tokens.add(usage)
     
     def get_stats(self) -> Dict:
         """Get all timing statistics."""
@@ -135,6 +186,12 @@ class AgentTimer:
             summary[f"{cat}_count"] = timing.count
             summary[f"{cat}_total_seconds"] = round(timing.total_seconds, 3)
             summary[f"{cat}_avg_seconds"] = round(timing.avg_seconds, 3)
+        
+        # Add token stats
+        token_stats = self._tokens.to_dict()
+        for k, v in token_stats.items():
+            summary[k] = v
+            
         return summary
     
     def save_day_stats(self, output_dir: str, current_date: date) -> None:
@@ -154,6 +211,7 @@ class AgentTimer:
         """Reset all stats for next day."""
         for timing in self._stats.values():
             timing.reset()
+        self._tokens.reset()
         self._day_start = None
         self._day_total = 0.0
     

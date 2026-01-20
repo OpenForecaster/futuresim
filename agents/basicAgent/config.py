@@ -17,6 +17,7 @@ class AgentConfig:
     max_search_results: int = 5
     snippet_max_chars: int = 2000
     article_max_chars: int = 4000
+    search_cutoff_days: int = 0
     
     def __post_init__(self):
         if self.sampling_params is None:
