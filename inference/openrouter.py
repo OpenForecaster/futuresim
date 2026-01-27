@@ -115,8 +115,8 @@ class OpenRouterInference:
                  model: str,
                  api_key: str = None,
                  max_retries: int = 3,
-                 base_delay: float = 1.0,
-                 max_delay: float = 30.0,
+                 base_delay: float = 10.0,
+                 max_delay: float = 60.0,
                  enable_caching: bool = True,
                  **kwargs):
         """
@@ -297,8 +297,9 @@ class OpenRouterInference:
                     time.sleep(delay)
                     continue
         
-        # All retries exhausted
-        raise RuntimeError(f"OpenRouter request failed after {self.max_retries} retries: {last_error}")
+        # All retries exhausted - return empty output to allow simulation to continue
+        print(f"  [OpenRouter] Request failed after {self.max_retries} retries: {last_error}. Returning empty output.")
+        return "", {}
     
     def _calculate_backoff(self, attempt: int) -> float:
         """

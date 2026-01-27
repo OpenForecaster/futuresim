@@ -19,7 +19,7 @@ Usage:
 import argparse
 import os
 import sys
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, time
 from pathlib import Path
 from typing import List, Dict, Optional
 import json
@@ -193,14 +193,24 @@ def create_chunks_with_embeddings(
         )
         
         for chunk_idx, (chunk_id, chunk_text) in enumerate(chunks):
+            # Convert date to datetime for LanceDB compatibility
+            # (LanceDB bug #1636: date type doesn't work with hybrid/FTS search filters)
+            article_date = article['date']
+            if article_date and isinstance(article_date, date) and not isinstance(article_date, datetime):
+                article_date = datetime.combine(article_date, time.min)
+            
+            article_date_publish = article.get('date_publish')
+            if article_date_publish and isinstance(article_date_publish, date) and not isinstance(article_date_publish, datetime):
+                article_date_publish = datetime.combine(article_date_publish, time.min)
+            
             record = {
                 'chunk_id': chunk_id,
                 'article_id': article['id'],
                 'chunk_index': chunk_idx,
                 'title': article['title'],
                 'source': article['source'],
-                'date': article['date'],  # Download date (for filtering)
-                'date_publish': article.get('date_publish'),  # Publish date
+                'date': article_date,  # Download date (for filtering) - stored as timestamp
+                'date_publish': article_date_publish,  # Publish date - stored as timestamp
                 'content': chunk_text,  # Full chunk content for FTS
                 'url': article['url'],
             }
@@ -306,10 +316,16 @@ def main():
         print("Creating full-text search index...")
         table = db.open_table(table_name)
         try:
-            table.create_fts_index("content")
-            print("FTS index created successfully")
+            # Enable position indexing to support phrase queries (e.g. "quoted text")
+            table.create_fts_index("content", with_position=True, replace=True)
+            print("FTS index created successfully (with positions)")
+            
+            # Create scalar index on date for pre-filtering in vector search
+            print("Creating scalar index on 'date' column...")
+            table.create_scalar_index("date", replace=True)
+            print("Scalar index on 'date' created successfully")
         except Exception as e:
-            print(f"Warning: Could not create FTS index: {e}")
+            print(f"Warning: Could not create indices: {e}")
     
     # Save config for LanceDB store
     config = {

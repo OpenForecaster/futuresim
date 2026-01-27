@@ -16,6 +16,7 @@ from .config import AgentConfig
 from .memory import BasicMemory
 from .query import QueryHandler
 from .search import SearchHandler
+from .feedback import FeedbackHandler
 
 
 class BasicAgent(BaseAgent):
@@ -53,6 +54,7 @@ class BasicAgent(BaseAgent):
             article_max_chars=self.config.article_max_chars,
             search_cutoff_days=self.config.search_cutoff_days
         )
+        self._feedback_handler = FeedbackHandler(agent_id)
         
         # Timing utilities for performance analysis
         self._timer = AgentTimer()
@@ -126,9 +128,14 @@ class BasicAgent(BaseAgent):
         
         while actions_remaining > 0:
             # Get agent response (track LLM time)
-            # Get agent response (track LLM time)
             with self._timer.track("llm"):
                 response, usage = self.inference.chat(messages, self.config.sampling_params)
+            
+            # Handle empty response (API failure with graceful fallback)
+            if not response or not response.strip():
+                print(f"  [{self.agent_id}] Empty LLM response (API failure?), ending turn")
+                self._log_action(forecast_interface, messages, response or "", "api_failure", actions_remaining)
+                break
             
             # Extract reasoning
             reasoning = usage.get("_reasoning_content") if usage else None
@@ -347,6 +354,8 @@ You have access to a news article database. You can search it to gather informat
         
         return f"""You are a forecasting agent. Today is {current_date}. Your goal: make accurate probability predictions.
 
+{self._feedback_handler.format_feedback(self._feedback_handler.generate_feedback(self._forecast_interface, current_date, self.inference))}
+
 {memory_section}## SCORING (Time-Weighted Peer Score)
 You are evaluated on your **Time-Weighted Peer Score**.
 - **Peer Score**: How much better your forecast is compared to the crowd (average of other agents). 
@@ -400,9 +409,10 @@ IMPORTANT:
 ### 1. Query Questions (explore data)
 <action type="query">
 ```python
-df[df['is_resolved'] == False][['qid', 'title', 'answer_type']].head()
+print(df[df['is_resolved'] == False][['qid', 'title', 'answer_type']].head())
 ```
 </action>
+Use `print()` to ensure you see output. We are not executing in a jupyter notebook, so .head() preview alone can be unreliable.
 {search_section}
 ### {submit_num}. Submit Forecasts
 <action type="submit">

@@ -59,6 +59,19 @@ MODEL_PATH = "/is/cluster/fast/rolmedo/models/qwen3-4b-it-2507"
 CURRENT_SIM_DIR = "/is/cluster/fast/sgoel/forecasting/current_sim"
 
 
+class ThreadSafeLLM:
+    """Wrapper for vLLM model to make it thread-safe for embedding."""
+    from threading import Lock
+    
+    def __init__(self, model):
+        self.model = model
+        self.lock = self.Lock()
+    
+    def embed(self, *args, **kwargs):
+        with self.lock:
+            return self.model.embed(*args, **kwargs)
+
+
 def create_output_dir(sim_name: str, base_dir: str = CURRENT_SIM_DIR) -> str:
     """Create timestamped output directory."""
     timestamp = datetime.now().strftime("%y-%m-%d-%H-%M-%S")
@@ -248,9 +261,9 @@ def main():
                        help="Max tokens to generate")
     
     # Answer matching settings
-    parser.add_argument("--matching", choices=["exact", "openrouter", "vllm"], default="openrouter",
-                       help="Answer matching mode: 'exact' (normalized string), 'openrouter', or 'vllm'")
-    parser.add_argument("--matcher", default="google/gemma-3-27b-it:free",
+    parser.add_argument("--matching", choices=["exact", "openrouter", "vllm"], default="vllm",
+                       help="Answer matching mode: 'exact', 'openrouter', or 'vllm'")
+    parser.add_argument("--matcher", default="/fast/rolmedo/models/qwen3-4b-it-2507",
                        help="Matcher model: OpenRouter model ID or VLLM model path")
     
     # Search settings
@@ -268,6 +281,9 @@ def main():
     # Config file
     parser.add_argument("--config", help="Path to YAML configuration file to load arguments from")
     
+    # Resume
+    parser.add_argument("--resume", help="Directory of a previous run to resume")
+    
     # Parse CLI args first to get config path if provided
     args, remaining_argv = parser.parse_known_args()
     
@@ -283,6 +299,24 @@ def main():
         
         # Override with any explicitly provided CLI args
         # This requires re-parsing to ensure CLI args take precedence over config defaults
+        args = parser.parse_args(args=remaining_argv + sys.argv[1:])
+    elif args.resume:
+        # Resume mode: Load config from the resume directory
+        config_path = os.path.join(args.resume, 'config.json')
+        if not os.path.exists(config_path):
+            print(f"Error: Config file not found in resume directory: {config_path}")
+            sys.exit(1)
+            
+        print(f"Resuming simulation from: {args.resume}")
+        print(f"Loading configuration from {config_path}")
+        
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+            
+        # Set defaults from config
+        parser.set_defaults(**config)
+        
+        # Override with any explicitly provided CLI args
         args = parser.parse_args(args=remaining_argv + sys.argv[1:])
     else:
         args = parser.parse_args()
@@ -304,17 +338,52 @@ def main():
     print(f"Simulation window: {sim_start} to {sim_end} (lookback={args.lookback_days} days)")
     
     # Create output directory
-    output_dir = create_output_dir(args.sim_name, args.output_base)
-    print(f"Output directory: {output_dir}")
+    if args.resume:
+        output_dir = args.resume
+        print(f"Resuming in directory: {output_dir}")
+        # Validate agents dir exists
+        agents_dir = os.path.join(output_dir, "agents")
+        if not os.path.exists(agents_dir):
+             print(f"Warning: agents directory not found in {output_dir}")
+             os.makedirs(agents_dir, exist_ok=True)
+    else:
+        output_dir = create_output_dir(args.sim_name, args.output_base)
+        print(f"Output directory: {output_dir}")
+        
+        # Create agents directory
+        agents_dir = os.path.join(output_dir, "agents")
+        os.makedirs(agents_dir, exist_ok=True)
+        
+        # Save config
+        save_config(output_dir, args)
     
-    # Create agents directory
-    agents_dir = os.path.join(output_dir, "agents")
-    os.makedirs(agents_dir, exist_ok=True)
+    # IMPORTANT: Initialize matcher server BEFORE embedding model
+    # The matcher runs as a subprocess and needs GPU allocation first.
+    # If embedding model loads first (in-process), the subprocess can't share GPU.
+    # Set output dir for matcher logs
+    os.environ['SIM_OUTPUT_DIR'] = output_dir
     
-    # Save config
-    save_config(output_dir, args)
+    matcher_provider = None
+    if args.matching == "vllm":
+        print(f"\nInitializing VLLM matcher server (must start before embedding model)...")
+        from inference.vllm import VLLMInference
+        matcher_provider = VLLMInference(args.matcher, max_model_len=args.max_model_len, 
+                                          gpu_memory_utilization=args.matcher_gpu_mem)
+        # Force server startup by making a warmup call - fail job if this fails
+        print(f"  Warming up matcher ({args.matcher}, GPU: {args.matcher_gpu_mem:.0%})...")
+        matcher_provider.chat([{"role": "user", "content": "test"}], {"temperature": 0, "max_tokens": 1})
+        print(f"  Matcher server ready!")
+    elif args.matching == "openrouter":
+        from inference.openrouter import OpenRouterInference
+        matcher_provider = OpenRouterInference(args.matcher)
+        print(f"Answer matching: OpenRouter with {args.matcher}")
+    elif args.matching == "exact":
+        print(f"Answer matching: exact (normalized string comparison)")
+    else:
+        raise ValueError(f"Unknown matching mode: {args.matching}")
     
     # Setup search tool if specified (preload embedding model)
+    # Note: This comes AFTER matcher server is initialized
     search_tool = None
     if args.search_db:
         print(f"\nSetting up search tool...", flush=True)
@@ -327,9 +396,11 @@ def main():
             try:
                 from vllm import LLM
                 # Embedding model should fit comfortably on 80GB GPU with 0.4 utilization
-                embedding_model = LLM(model=args.embedding_model, convert="embed", 
+                raw_model = LLM(model=args.embedding_model, convert="embed", 
                                       gpu_memory_utilization=args.embedding_gpu_mem,
                                       max_model_len=args.max_model_len)
+                # Wrap in thread-safe wrapper to prevent deadlocks when called from multiple agents
+                embedding_model = ThreadSafeLLM(raw_model)
                 print("  Embedding model loaded (queries will use semantic/hybrid search)")
             except Exception as e:
                 print(f"  Warning: Failed to load embedding model: {e}")
@@ -412,23 +483,7 @@ def main():
     else:
         print("Running without LLM inference (--no_inference)")
     
-    # Create matcher inference provider
-    matcher_provider = None
-    if args.matching == "openrouter":
-        from inference.openrouter import OpenRouterInference
-        matcher_provider = OpenRouterInference(args.matcher)
-        print(f"Answer matching: OpenRouter with {args.matcher}")
-    if args.matching == "openrouter":
-        from inference.openrouter import OpenRouterInference
-        matcher_provider = OpenRouterInference(args.matcher)
-        print(f"Answer matching: OpenRouter with {args.matcher}")
-    elif args.matching == "vllm":
-        from inference.vllm import VLLMInference
-        matcher_provider = VLLMInference(args.matcher, max_model_len=args.max_model_len, 
-                                          gpu_memory_utilization=args.matcher_gpu_mem)
-        print(f"Answer matching: VLLM with {args.matcher} (GPU: {args.matcher_gpu_mem:.0%})")
-    else:
-        print(f"Answer matching: exact (normalized string comparison)")
+    # Note: matcher_provider was already initialized before embedding model (see above)
     
     # Initialize environment with resolution date filter
     print(f"\nLoading dataset: {args.dataset}")
@@ -442,6 +497,7 @@ def main():
         resolution_end=resolution_end,
         parallel=args.parallel,
         split=args.split,
+        resume_dir=args.resume if args.resume else None
     )
     
     # Add all agents

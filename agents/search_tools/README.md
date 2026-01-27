@@ -17,9 +17,13 @@ LanceDB-based article search for forecasting agents.
 python mpi_scripts/embed/submit_job.py --start_date 2023-01-01 --end_date 2025-12-31
 ```
 
-Embeddings saved to: `/is/cluster/fast/sgoel/forecasting/news/embeddings/Qwen3-Embedding-8B/`
+**Output**: `/is/cluster/fast/sgoel/forecasting/news/embeddings/Qwen3-Embedding-8B/`
 
-### 2. Build LanceDB Index
+### 2. Build LanceDB Index (CPU-heavy)
+
+This step compiles articles and embeddings into a LanceDB table and **automatically builds**:
+1. **Full-Text Search (FTS) index** with phrase query support.
+2. **Scalar Index on `date`** column to enable correct pre-filtering for vector search.
 
 ```bash
 # Build LanceDB from articles + embeddings
@@ -28,10 +32,9 @@ python scripts/build_lancedb.py --start_date 2023-01-01 --end_date 2025-12-31
 # Output: /is/cluster/fast/sgoel/forecasting/news/deduped_articles/lance/Qwen3-Embedding-8B/
 ```
 
-### 3. Create Vector Index (CRITICAL for performance)
+### 3. Build Vector Index (GPU-heavy)
 
-Without IVF index: ~300 sec/query
-With IVF index: ~5 sec/query
+**CRITICAL**: Required for fast semantic search (~50x speedup).
 
 ```bash
 # Run on GPU node with 80GB+ RAM

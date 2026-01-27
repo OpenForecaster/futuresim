@@ -34,7 +34,9 @@ class BrierScorer(BaseScorer):
         self, 
         pred: DailyPrediction, 
         ground_truth: str, 
-        matcher=None
+        matcher=None,
+        question_id: str = None,
+        question_title: str = None
     ) -> float:
         """
         Compute Brier Skill Score.
@@ -57,7 +59,9 @@ class BrierScorer(BaseScorer):
         elif matcher:
             # LLM-based semantic matching
             for outcome in pred.outcomes:
-                if matcher.is_equivalent(outcome, ground_truth):
+                if matcher.is_equivalent(outcome, ground_truth,
+                                         question_id=question_id, question_title=question_title,
+                                         match_type="check_guess"):
                     matched_outcome = outcome
                     break
         else:
@@ -80,3 +84,4 @@ class BrierScorer(BaseScorer):
 
 
 default_scorer = BrierScorer()
+

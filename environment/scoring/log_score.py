@@ -43,7 +43,8 @@ class LogScorer(BaseScorer):
         self, 
         pred: DailyPrediction, 
         ground_truth: str, 
-        matcher=None
+        matcher=None,
+        **kwargs
     ) -> float:
         """
         Compute log score for a prediction.
@@ -52,7 +53,7 @@ class LogScorer(BaseScorer):
         
         If ground_truth doesn't match any outcome, P = 0 (clamped to min_prob).
         """
-        prob = self._get_matched_prob(pred, ground_truth, matcher)
+        prob = self._get_matched_prob(pred, ground_truth, matcher, **kwargs)
         clamped = max(self.min_prob, min(self.max_prob, prob))
         return math.log(clamped)
 

@@ -27,6 +27,14 @@ python mpi_scripts/run_sim/submit_sim.py --config configs/default_sim.yaml --nam
 python mpi_scripts/run_sim/submit_sim.py --config configs/default_sim.yaml --dry-run
 ```
 
+## Resuming a Simulation
+
+Continue a simulation that was stopped earlier. This restores the state from `actions.jsonl` and fast-forwards to the last recorded day:
+
+```bash
+python scripts/test_basic_agent.py --resume /path/to/past/output_dir
+```
+
 ## Arguments
 
 | Argument | Default | Description |

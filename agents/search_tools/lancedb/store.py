@@ -92,11 +92,12 @@ class LanceDBSearchTool(BaseSearchTool):
             return []
         
         # Build date filter - max_date prevents future leakage, min_date narrows scope
+        # Use timestamp literals (not date) to work with hybrid/FTS search (LanceDB bug #1636)
         where_clauses = []
         if max_date:
-            where_clauses.append(f"date <= date '{max_date.isoformat()}'")
+            where_clauses.append(f"date <= timestamp '{max_date.isoformat()}T23:59:59'")
         if min_date:
-            where_clauses.append(f"date >= date '{min_date.isoformat()}'")
+            where_clauses.append(f"date >= timestamp '{min_date.isoformat()}T00:00:00'")
         where = " AND ".join(where_clauses) if where_clauses else None
         
         try:
@@ -108,14 +109,19 @@ class LanceDBSearchTool(BaseSearchTool):
                 
                 if not self._embedding_model:
                     # Fall back to keyword search if no model
+                    print("[LanceDB] No embedding model available, falling back to keyword search")
                     results = self._table.search(query, query_type="fts")
                 else:
-                    # Encode query with instruction prefix (per Qwen3-Embedding docs)
-                    query_embedding = self._encode_query(query)
-                    if search_type == "semantic":
-                        results = self._table.search(query_embedding)
-                    else:  # hybrid - use separate vector() and text()
-                        results = self._table.search(query_type="hybrid").vector(query_embedding).text(query)
+                    try:
+                        # Encode query with instruction prefix (per Qwen3-Embedding docs)
+                        query_embedding = self._encode_query(query)
+                        if search_type == "semantic":
+                            results = self._table.search(query_embedding)
+                        else:  # hybrid - use separate vector() and text()
+                            results = self._table.search(query_type="hybrid").vector(query_embedding).text(query)
+                    except Exception as e:
+                        print(f"[LanceDB] Embedding/Hybrid search failed: {e}. Falling back to keyword search.")
+                        results = self._table.search(query, query_type="fts")
             
             if where:
                 results = results.where(where)

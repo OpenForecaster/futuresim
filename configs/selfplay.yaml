@@ -2,7 +2,7 @@
 # Usage: python mpi_scripts/run_sim/submit_sim.py --config configs/default_sim.yaml --runs 1
 
 # --- Simulation Meta ---
-sim_name: "deepseek_sim"
+sim_name: "deepseekv32_selfplay"
 start_date: "2025-05-01" # Resolution window start
 end_date: "2025-08-23"   # Resolution window end
 lookback_days: 7         # Days before first resolution to start simulation
@@ -43,5 +43,8 @@ agents:
   - model: "deepseek/deepseek-v3.2"
   # - model: "x-ai/grok-3-mini"
     provider: "openrouter"
+  - model: "deepseek/deepseek-v3.2"
+  - model: "deepseek/deepseek-v3.2"
+  - model: "deepseek/deepseek-v3.2"
     # You can override defaults here:
     # temperature: 0.1

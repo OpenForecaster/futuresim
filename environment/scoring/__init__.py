@@ -30,7 +30,7 @@ from .brier import BrierScorer
 from .log_score import LogScorer
 
 from typing import Dict, List, Optional
-from datetime import date
+from datetime import date, timedelta
 
 
 # Default scorer for free-form prediction
@@ -75,7 +75,9 @@ def compute_snapshot_peer_scores(
     predictions: Dict[str, DailyPrediction],
     ground_truth: str,
     scorer: BaseScorer,
-    matcher=None
+    matcher=None,
+    question_id: str = None,
+    question_title: str = None
 ) -> Dict[str, float]:
     """
     Compute peer scores for a snapshot of current predictions.
@@ -94,14 +96,18 @@ def compute_snapshot_peer_scores(
         # This is equivalent to having a virtual abstainer as a peer
         # peer_score = 100 × (agent_score - 0) = 100 × agent_score
         return {
-            agent_id: 100 * scorer.score_prediction(pred, ground_truth, matcher)
+            agent_id: 100 * scorer.score_prediction(pred, ground_truth, matcher, 
+                                                    question_id=question_id, 
+                                                    question_title=question_title)
             for agent_id, pred in predictions.items()
         }
     
     # Compute raw score for each agent
     raw_scores = {}
     for agent_id, pred in predictions.items():
-        raw_scores[agent_id] = scorer.score_prediction(pred, ground_truth, matcher)
+        raw_scores[agent_id] = scorer.score_prediction(pred, ground_truth, matcher,
+                                                       question_id=question_id,
+                                                       question_title=question_title)
     
     # Compute peer scores
     peer_scores = {}
@@ -117,7 +123,8 @@ def resolve_question(
     ground_truth: str,
     matcher=None,
     scorer: Optional[BaseScorer] = None,
-    evaluation_date: Optional[date] = None
+    evaluation_date: Optional[date] = None,
+    question_title: str = None
 ) -> QuestionResult:
     """
     Resolve a question and compute final scores for all agents.
@@ -145,7 +152,13 @@ def resolve_question(
         scorer = DEFAULT_SCORER
     
     # Determine evaluation window
-    end_date = evaluation_date if evaluation_date else history.resolution_date
+    # If evaluation_date is provided (snapshot/active scoring), we treat it as "end of day",
+    # so we extend to the next day to count the current day's duration.
+    # If using resolution_date, it's typically "start of day" (market close), so we use it as is.
+    if evaluation_date:
+        end_date = evaluation_date + timedelta(days=1)
+    else:
+        end_date = history.resolution_date
     
     # Get all agents who participated before end_date
     all_agents = set()
@@ -178,7 +191,9 @@ def resolve_question(
         snapshot = _get_snapshot_at(history, change_points[0])
         if snapshot:
             snapshot_scores = compute_snapshot_peer_scores(
-                snapshot, ground_truth, scorer, matcher
+                snapshot, ground_truth, scorer, matcher,
+                question_id=history.question_id,
+                question_title=question_title
             )
             for agent_id, score in snapshot_scores.items():
                 weighted_scores[agent_id] = score # Weight 1.0 effectively
@@ -201,7 +216,9 @@ def resolve_question(
             if snapshot:
                 # Compute peer scores for this snapshot
                 segment_peer_scores = compute_snapshot_peer_scores(
-                    snapshot, ground_truth, scorer, matcher
+                    snapshot, ground_truth, scorer, matcher,
+                    question_id=history.question_id,
+                    question_title=question_title
                 )
                 
                 # Weight by segment duration

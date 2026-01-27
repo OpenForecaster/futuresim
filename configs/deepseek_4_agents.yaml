@@ -1,33 +1,31 @@
-# Default Simulation Configuration
-# Usage: python mpi_scripts/run_sim/submit_sim.py --config configs/default_sim.yaml --runs 1
+# DeepSeek 4-Agent Simulation Configuration
+# Usage: python mpi_scripts/run_sim/submit_sim.py --config configs/deepseek_4_agents.yaml
 
 # --- Simulation Meta ---
-sim_name: "deepseek_sim"
-start_date: "2025-05-01" # Resolution window start
-end_date: "2025-08-23"   # Resolution window end
-lookback_days: 7         # Days before first resolution to start simulation
-search_cutoff_days: 0    # Cap on search date based on current date in sim
-split: "test"            # Dataset split: train, test, or validation
+sim_name: "deepseekv32_selfplay"
+start_date: "2025-05-01" 
+end_date: "2025-08-23"   
+lookback_days: 7         
+search_cutoff_days: 0    
+split: "test"            
 
 # --- Data Paths ---
 dataset: "/is/cluster/fast/sgoel/forecasting/qs/OpenForesight/data/"
 output_base: "/is/cluster/fast/sgoel/forecasting/current_sim"
 
-
 # --- Search Settings ---
-# Leave search_db empty to disable search
 search_db: "/is/cluster/fast/sgoel/forecasting/news/deduped_articles/lance/Qwen3-Embedding-8B"
 embedding_model: "/is/cluster/fast/sgoel/models/Qwen3-Embedding-8B"
 embedding_gpu_mem: 0.4
 
 # --- Answer Matching ---
-matching: "vllm" # Options: "exact", "openrouter", "vllm"
+matching: "vllm" 
 matcher: "/fast/rolmedo/models/qwen3-4b-it-2507"
 matcher_gpu_mem: 0.3
 max_model_len: 8192
 
 # --- Inference Defaults ---
-rate_limit: 32.0         # OpenRouter requests/second
+rate_limit: 32.0         
 parallel: true
 
 # --- Agents Configuration ---
@@ -41,7 +39,6 @@ defaults:
 
 agents:
   - model: "deepseek/deepseek-v3.2"
-  # - model: "x-ai/grok-3-mini"
-    provider: "openrouter"
-    # You can override defaults here:
-    # temperature: 0.1
+  - model: "deepseek/deepseek-v3.2"
+  - model: "deepseek/deepseek-v3.2"
+  - model: "deepseek/deepseek-v3.2"

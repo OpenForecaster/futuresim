@@ -299,20 +299,38 @@ Options to explore later:
 
 ## Future Work
 
-### In Progress / High Priority
+### Directions
 
-1. **Sandbox code execution**: Replace eval() with safe execution (RestrictedPython, AST whitelisting, or subprocess isolation)
+#### agent scaffold design
 
-### Medium Priority
+- decouple q choosing: e.g. always let all agents predict on all qs on day 1 based on past data, and then only “update” predictions based on the news they explore (should we only limit to that days news?)
+- agent skills (in memory) but you learn from resolved questions
+- context tools compare, incl. diff. retrieval models / techniques, rlm
+- run sth like “hyperagents” (gepa on the agent scaffold)
 
-2. **Checkpointing**: Save/resume simulation state mid-run
-3. **vLLM Batching for Multi-Agent**: Batch inference requests across agents for better throughput with local modelse
+#### training
 
-### Low Priority / Nice-to-Have
+- train (grpo?) each day based on projected brier score update for that day
+- test-time / continual training on each day with same recipe as above?
+- how to reward the memory which is carried forward to future days?
 
-4. **standard agent action format**: should i switch to openai harmony format for example?
-5. **Deduplication across news batches**: Current approach may have duplicates if same article appears in multiple JSONL files
-6. **Alternative agent scaffolds**: Create different agent architectures (e.g., ReAct, tree-of-thought) for comparison
+#### agent benchmark
+
+- run claude code / codex / agy / opencode etc. and different frontier models
+- launch as an env for people to do all sorts of research on
+- studying different “behaviours” of different models
+
+#### continual learning
+
+- icl compaction / agent skills writing in memory
+- test-time training
+- just search agent
+
+#### multi agent
+
+- is relative ranking maintained between N different agents in a multi-agent sim vs single agent? or do separate “MA effects” kick in?
+- the agents could be different scaffold/training techniques we expt with
+- could also be copies of the same agent model+scaffold. “selfplay”
 
 ## Search Infrastructure
 
@@ -389,3 +407,25 @@ Agent timing stats saved to `<agent_dir>/timing_stats.jsonl`.
 
 See `agents/search_tools/README.md` for complete setup instructions.
 
+### In Progress / High Priority
+
+Q: why does search yield no results sometimes? it should still pull the most relevant articles instead of outright wasting queries
+
+Verify each line of env code
+
+
+
+### Medium Priority
+
+**Checkpointing**: Test Save/resume simulation state mid-run
+**vLLM Batching for Multi-Agent**: Batch inference requests across agents for better throughput with local modelse
+
+### Low Priority / Nice-to-Have
+
+**standard agent action format**: should i switch to openai harmony format for example?
+
+**Deduplication across news batches**: Current approach may have duplicates if same article appears in multiple JSONL files
+
+Q: in trying to make many submissions models eg grok dont get to use cot/reasoning. what to do about this?
+
+1. **Sandbox code execution**: Replace eval() with safe execution (RestrictedPython, AST whitelisting, or subprocess isolation)

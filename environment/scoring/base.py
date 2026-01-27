@@ -113,7 +113,8 @@ class BaseScorer(ABC):
         self, 
         pred: DailyPrediction, 
         ground_truth: str, 
-        matcher=None
+        matcher=None,
+        **kwargs
     ) -> float:
         """
         Score a prediction against the ground truth.
@@ -150,7 +151,9 @@ class BaseScorer(ABC):
         self, 
         pred: DailyPrediction, 
         ground_truth: str, 
-        matcher=None
+        matcher=None,
+        question_id: str = None,
+        question_title: str = None
     ) -> float:
         """
         Get the probability the agent assigned to the ground truth outcome.
@@ -167,7 +170,9 @@ class BaseScorer(ABC):
         # Try answer matching (LLM-based)
         if matcher:
             for outcome, prob in pred.outcomes.items():
-                if matcher.is_equivalent(outcome, ground_truth):
+                if matcher.is_equivalent(outcome, ground_truth,
+                                         question_id=question_id, question_title=question_title,
+                                         match_type="check_guess"):
                     return prob
         else:
             # Exact matching with normalization (lowercase + no spaces)

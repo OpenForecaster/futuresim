@@ -1,6 +1,6 @@
 #!/bin/bash
 # Run simulation job on HTCondor GPU node
-# Arguments: $1 = model, $2 = sim_name, $3 = num_agents
+# Arguments: $1 = config path
 
 set -e
 
@@ -11,6 +11,10 @@ cd /home/sgoel/forecast-sim
 source fsim/bin/activate
 
 module load cuda/12.1
+
+# Force vLLM to use the legacy V0 engine to avoid instability and socket errors
+# associated with the experimental V1 engine (EngineCoreRequestType error).
+export VLLM_USE_V1=0
 
 # Split HF Cache:
 # 1. Datasets go to HOME (supports locking, avoids 'flock' errors)
