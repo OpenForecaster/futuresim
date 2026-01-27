@@ -1,0 +1,16 @@
+# HTCondor submit file for building LanceDB vector index on GPU
+# Run with: condor_submit_bid 25 build_index.sub
+
+executable = /home/sgoel/forecast-sim/mpi_scripts/build_lancedb/build_index.sh
+
+output = /is/cluster/fast/sgoel/logs/forecasting-sim/build_lancedb/index_$(Cluster).out
+error = /is/cluster/fast/sgoel/logs/forecasting-sim/build_lancedb/index_$(Cluster).err
+log = /is/cluster/fast/sgoel/logs/forecasting-sim/build_lancedb/index_$(Cluster).log
+
+request_cpus = 8
+request_memory = 64GB
+request_disk = 50GB
+request_gpus = 1
+requirements = TARGET.CUDACapability >= 8.0
+
+queue

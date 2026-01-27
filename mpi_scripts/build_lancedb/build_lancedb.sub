@@ -1,0 +1,18 @@
+# HTCondor submit file for building LanceDB index
+# Run with: condor_submit_bid 15 build_lancedb.sub
+
+executable = /home/sgoel/forecast-sim/mpi_scripts/build_lancedb/build_lancedb.sh
+
+output = /is/cluster/fast/sgoel/logs/forecasting-sim/build_lancedb/$(Cluster).out
+error = /is/cluster/fast/sgoel/logs/forecasting-sim/build_lancedb/$(Cluster).err
+log = /is/cluster/fast/sgoel/logs/forecasting-sim/build_lancedb/$(Cluster).log
+
+# CPU-only job, but needs lots of memory for loading embeddings
+request_cpus = 8
+request_memory = 128GB
+request_disk = 50GB
+
+# No GPU needed for index building
+request_gpus = 0
+
+queue
