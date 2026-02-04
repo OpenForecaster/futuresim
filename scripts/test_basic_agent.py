@@ -49,8 +49,9 @@ if os.path.exists(env_path):
                 key, value = line.split('=', 1)
                 os.environ[key.strip()] = value.strip().strip('"').strip("'")
 
-from environment.env import SimulationEnvironment
+from environment.env import SimulationEnvironment, SimForecastInterface
 from agents.basicAgent import BasicAgent, AgentConfig
+from agents.allQAgent import AllQAgent
 
 
 # Default paths
@@ -163,6 +164,8 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
         
         # Build agent config with merged settings
         max_actions = agent_def.get('max_actions', defaults.get('max_actions', args.max_actions))
+        warmup_max_actions = agent_def.get('warmup_max_actions', defaults.get('warmup_max_actions', getattr(args, 'warmup_max_actions', 10)))
+        warmup_parallelism = agent_def.get('warmup_parallelism', defaults.get('warmup_parallelism', getattr(args, 'warmup_parallelism', 20)))
         max_retries = agent_def.get('max_retries', defaults.get('max_retries', args.max_retries))
         temperature = agent_def.get('temperature', defaults.get('temperature', args.temperature))
         max_tokens = agent_def.get('max_tokens', defaults.get('max_tokens', args.max_tokens))
@@ -181,6 +184,8 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
         
         agent_config = AgentConfig(
             max_actions=max_actions,
+            warmup_max_actions=warmup_max_actions,
+            warmup_parallelism=warmup_parallelism,
             max_submit_retries=max_retries,
             memory_dir=agent_dir,  # Per-agent memory directory
             sampling_params={
@@ -190,19 +195,28 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
             search_cutoff_days=search_cutoff_days
         )
         
-        # Currently only support BasicAgent scaffold
-        if scaffold != 'basic':
-            raise ValueError(f"Unknown scaffold: {scaffold}. Only 'basic' is supported.")
+        if scaffold == 'basic':
+            agent = BasicAgent(
+                agent_id=agent_id,
+                inference_provider=inference_provider,
+                config=agent_config,
+                model_name=model,
+                search_tool=search_tool
+            )
+        elif scaffold == 'allQ' or scaffold == 'allq':
+            agent = AllQAgent(
+                agent_id=agent_id,
+                inference_provider=inference_provider,
+                config=agent_config,
+                model_name=model,
+                search_tool=search_tool,
+                start_date=args.sim_start_date  # Passed from create_agents call
+            )
+        else:
+            raise ValueError(f"Unknown scaffold: {scaffold}. Only 'basic' and 'allQ' are supported.")
         
-        agent = BasicAgent(
-            agent_id=agent_id,
-            inference_provider=inference_provider,
-            config=agent_config,
-            model_name=model,
-            search_tool=search_tool
-        )
         agents.append(agent)
-        print(f"  Created agent: {agent_id} ({provider}:{model})")
+        print(f"  Created agent: {agent_id} ({provider}:{model}) [Scaffold: {scaffold}]")
     
     return agents
 
@@ -221,8 +235,15 @@ def main():
                        help="Days before first resolution to start simulation (default 7)")
     
     # Data paths
-    parser.add_argument("--dataset", default=DATASET_PATH,
-                       help="Path to OpenForesight dataset")
+    # Data paths
+    parser.add_argument("--dataset", default="openforesight",
+                       choices=["openforesight", "metaculus_binary", "metaculus_mcq"],
+                       help="Dataset source to use")
+    parser.add_argument("--dataset_path", default=DATASET_PATH,
+                       help="Path to local dataset (for openforesight)")
+    parser.add_argument("--dataset_cache", 
+                       default="/is/cluster/fast/sgoel/forecasting/qs/cache",
+                       help="Cache directory for fetched datasets")
     parser.add_argument("--output_base", default=CURRENT_SIM_DIR,
                        help="Base directory for simulation outputs")
     parser.add_argument("--split", choices=["train", "test", "validation"], default="train",
@@ -239,6 +260,8 @@ def main():
                        help="Disable parallel agent execution")
     
     # Single-agent settings (used when no config file)
+    parser.add_argument("--scaffold", choices=["basic", "allQ", "allq"], default="basic",
+                       help="Agent scaffold to use (default: basic)")
     parser.add_argument("--provider", choices=["vllm", "openrouter"], default="openrouter",
                        help="Inference provider: 'vllm' (local) or 'openrouter' (API)")
     parser.add_argument("--model_path", default=MODEL_PATH,
@@ -253,6 +276,10 @@ def main():
     # Agent settings
     parser.add_argument("--max_actions", type=int, default=10,
                        help="Max actions per day (queries + submissions)")
+    parser.add_argument("--warmup_max_actions", type=int, default=10,
+                       help="Max actions per question during warmup phase (AllQAgent only)")
+    parser.add_argument("--warmup_parallelism", type=int, default=20,
+                       help="Number of concurrent threads for warmup phase (default 20)")
     parser.add_argument("--max_retries", type=int, default=3,
                        help="Max retry attempts for forecast parsing")
     parser.add_argument("--temperature", type=float, default=0.7,
@@ -283,6 +310,7 @@ def main():
     
     # Resume
     parser.add_argument("--resume", help="Directory of a previous run to resume")
+    parser.add_argument("--rescore", action="store_true", help="Recalculate metrics from history before resuming")
     
     # Parse CLI args first to get config path if provided
     args, remaining_argv = parser.parse_known_args()
@@ -361,10 +389,16 @@ def main():
     # The matcher runs as a subprocess and needs GPU allocation first.
     # If embedding model loads first (in-process), the subprocess can't share GPU.
     # Set output dir for matcher logs
+    # Set output dir for matcher logs
     os.environ['SIM_OUTPUT_DIR'] = output_dir
     
     matcher_provider = None
-    if args.matching == "vllm":
+    
+    # Optimization: Skip matcher GPU for Metaculus (uses exact string matching)
+    if args.dataset.startswith("metaculus"):
+        print(f"\nDataset '{args.dataset}' uses exact matching. Skipping matcher GPU allocation.")
+        matcher_provider = None # Passed as None to env, will set self.matcher = None
+    elif args.matching == "vllm":
         print(f"\nInitializing VLLM matcher server (must start before embedding model)...")
         from inference.vllm import VLLMInference
         matcher_provider = VLLMInference(args.matcher, max_model_len=args.max_model_len, 
@@ -427,6 +461,13 @@ def main():
             print(f"\nUsing agents defined in main config", flush=True)
             
         print(f"  Config loaded successfully", flush=True)
+        print(f"  Config loaded successfully", flush=True)
+        # We need to pass sim_start_date to create_agents_from_config
+        # It's computed later in main, but we need it here.
+        # So we'll need to move date parsing up or just pass args and let it find it.
+        # Actually args.sim_start_date doesn't exist yet, we calculated sim_start local var.
+        # Let's attach it to args object temporarily
+        args.sim_start_date = sim_start
         agents = create_agents_from_config(config_agents, args, output_dir, search_tool)
         
         # Save agent config copy if it was a separate file
@@ -462,6 +503,8 @@ def main():
         
         agent_config = AgentConfig(
             max_actions=args.max_actions,
+            warmup_max_actions=args.warmup_max_actions,
+            warmup_parallelism=args.warmup_parallelism,
             max_submit_retries=args.max_retries,
             memory_dir=agent_dir,
             sampling_params={
@@ -471,13 +514,23 @@ def main():
             search_cutoff_days=args.search_cutoff_days
         )
         
-        agent = BasicAgent(
-            agent_id=agent_id,
-            inference_provider=inference_provider,
-            config=agent_config,
-            model_name=model_name,
-            search_tool=search_tool
-        )
+        if args.scaffold == 'basic':
+            agent = BasicAgent(
+                agent_id=agent_id,
+                inference_provider=inference_provider,
+                config=agent_config,
+                model_name=model_name,
+                search_tool=search_tool
+            )
+        elif args.scaffold in ['allQ', 'allq']:
+            agent = AllQAgent(
+                agent_id=agent_id,
+                inference_provider=inference_provider,
+                config=agent_config,
+                model_name=model_name,
+                search_tool=search_tool,
+                start_date=sim_start
+            )
         agents.append(agent)
         print(f"  Created agent: {agent_id}")
     else:
@@ -488,7 +541,9 @@ def main():
     # Initialize environment with resolution date filter
     print(f"\nLoading dataset: {args.dataset}")
     env = SimulationEnvironment(
-        dataset_name=args.dataset,
+        dataset=args.dataset,
+        dataset_path=args.dataset_path,
+        dataset_cache=args.dataset_cache,
         start_date=sim_start,
         end_date=sim_end,
         inference_provider=matcher_provider,
@@ -503,6 +558,62 @@ def main():
     # Add all agents
     for agent in agents:
         env.add_agent(agent)
+        
+    # Optional rescore
+    if args.resume and args.rescore:
+        env.rescore()
+    
+    # Run WARMUP phase for agents that support it (Day 0)
+    # SKIP warmup if resuming - predictions already exist in actions.jsonl
+    if args.resume:
+        print("\n" + "="*60)
+        print("Skipping Warmup (resuming from previous run)")
+        print("="*60)
+    else:
+        print("\n" + "="*60)
+        print("Checking for Agent Warmup (Day 0 predictions)...")
+        print("="*60)
+        
+        # Get active questions
+        active_questions = env.q_pool.get_active()
+        
+        if active_questions:
+            # CRITICAL: Initialize prediction histories BEFORE warmup
+            # This ensures warmup predictions are properly tracked (not just logged).
+            # Normally, histories are created in env.step(), but warmup runs before that.
+            from environment.scoring import PredictionHistory
+            
+            for q in active_questions:
+                if q.qid not in env.prediction_histories:
+                    env.prediction_histories[q.qid] = PredictionHistory(
+                        question_id=q.qid,
+                        start_date=env.current_date,
+                        resolution_date=q.resolution_date
+                    )
+            
+            print(f"  Initialized {len(active_questions)} prediction histories for warmup.")
+            
+            # Create a ForecastInterface for warmup
+            from threading import Lock
+            warmup_interface = SimForecastInterface(
+                active_questions,
+                env.current_aggregates,
+                env.prediction_histories,
+                env.current_date,
+                env.logger,
+                resolved_questions=env.resolved_questions,
+                histories_lock=env._histories_lock,
+                market_csv_path=None  # No market CSV yet
+            )
+            warmup_interface.source_name = getattr(env, 'source_name', 'openforesight')
+            warmup_interface.source_context = getattr(env, 'source_context', '')
+            
+            for agent in agents:
+                if hasattr(agent, 'warmup'):
+                    agent.warmup(warmup_interface, env.current_date)
+        else:
+            print("  No active questions for warmup.")
+
     
     if not agents:
         print("No agents added")

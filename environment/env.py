@@ -105,10 +105,14 @@ class SimLogger:
         """Log model output to per-agent files (thread-safe)."""
         metadata = metadata or {}
         
+        # Extract qid from metadata if present
+        qid = metadata.get("qid")
+        
         # Raw record: includes input prompt and reasoning
         raw_record = {
             "sim_date": str(sim_date),
             "agent_id": agent_id,
+            "qid": qid,
             "prompt": prompt,
             "response": response,
             "metadata": metadata
@@ -123,6 +127,7 @@ class SimLogger:
         clean_record = {
             "sim_date": str(sim_date),
             "agent_id": agent_id,
+            "qid": qid,
             "response": response,
             "metadata": clean_metadata
         }
@@ -204,6 +209,7 @@ class MarketWriter:
                 'ground_truth': None,
                 'market_aggregate': json.dumps(agg) if agg else None,
                 'num_predictions': num_preds,
+                'options': json.dumps(q.options) if q.options else None,
             })
         
         # Resolved questions
@@ -219,6 +225,7 @@ class MarketWriter:
                 'ground_truth': q.ground_truth_answer,
                 'market_aggregate': None,
                 'num_predictions': 0,
+                'options': json.dumps(q.options) if q.options else None,
             })
         
         df = pd.DataFrame(rows)
@@ -239,16 +246,31 @@ class SimulationEnvironment:
     """
     
     def __init__(self, 
-                 dataset_name: str, 
-                 start_date: date,
-                 end_date: date,
+                 dataset: str = "openforesight",
+                 dataset_path: str = None,
+                 dataset_cache: str = None,
+                 start_date: date = None, # Make start_date optional or handle in signature carefully
+                 end_date: date = None,
+                 dataset_name: str = None, # Backward compatibility/argparse noise
                  inference_provider=None,
                  output_dir: str = ".",
                  resolution_start: date = None,
                  resolution_end: date = None,
                  parallel: bool = True,
                  split: str = "train",
-                 resume_dir: str = None):
+                 resume_dir: str = None,
+                 min_forecasters: int = 0,
+                 resolved_only: bool = False):
+        
+        # Handle positional args shift if someone called with positional args (unlikely in this codebase but safe)
+        # We'll rely on kwargs mostly.
+        
+        if dataset_name and dataset == "openforesight":
+             dataset = dataset_name # Support legacy arg if passed
+
+        if start_date is None:
+             raise ValueError("start_date required")
+
         self.current_date = start_date
         self.end_date = end_date
         self.output_dir = output_dir
@@ -266,15 +288,25 @@ class SimulationEnvironment:
             
         self.logger = SimLogger(self.output_dir, append=append_logs)
         self.market_writer = MarketWriter(self.output_dir)
+        matcher_cache_path = os.path.join(self.output_dir, "matcher_cache.json")
         
         # Components - filter questions to resolution window
         self.q_pool = QuestionPool(
-            dataset_name,
+            dataset=dataset,
+            dataset_path=dataset_path,
+            dataset_cache=dataset_cache,
             split=split,
             resolution_start=resolution_start,
-            resolution_end=resolution_end
+            resolution_end=resolution_end,
+            min_forecasters=min_forecasters,
+            resolved_only=resolved_only
         )
-        self.matcher = AnswerMatcher(inference_provider, logger=self.logger) if inference_provider else None
+        self.matcher = AnswerMatcher(inference_provider, logger=self.logger, cache_path=matcher_cache_path) if inference_provider else None
+        
+        # Store source context for prompts
+        self.source_context = self.q_pool.fetcher.get_prompt_context()
+        self.source_name = self.q_pool.fetcher.source_name
+        
         self.scorer = DEFAULT_SCORER
         
         # Track prediction history per question
@@ -391,6 +423,78 @@ class SimulationEnvironment:
         print("        Peer=Snapshot peer sum, TW-Peer=Time-weighted peer sum")
         print("        Acc=% of questions where agent's top choice matched truth.")
         print("="*90)
+
+    def rescore(self):
+        """
+        Re-evaluate all simulation days and re-write daily_metrics.csv.
+        Requires state to be loaded (e.g. via _restore_state).
+        """
+        print(f"\nRescoring simulation history from {self.output_base if hasattr(self, 'output_base') else self.output_dir}...")
+        
+        # 1. Reset cumulative state
+        self.agent_scores = {}
+        self.agent_correct = {}
+        self.agent_wrong = {}
+        self.agent_questions = {}
+        self.agent_raw_brier = {}
+        self.agent_snapshot_peer = {}
+        self.resolved_questions = []
+        self.q_pool.reset()
+        
+        # 2. Re-truncate metrics file
+        metrics_path = os.path.join(self.output_dir, "daily_metrics.csv")
+        self.logger.metrics_file.close()
+        with open(metrics_path, 'w') as f:
+            f.write("date,agent_id,avg_brier,peer_score,tw_peer_score,accuracy,total_predictions\n")
+        
+        # Re-open logger to ensure it now writes to the fresh file
+        self.logger.metrics_file = open(metrics_path, 'a')
+        
+        # 3. Determine rescore window
+        # Find earliest date in histories
+        all_dates = set()
+        for h in self.prediction_histories.values():
+            all_dates.add(h.start_date)
+            for agent_preds in h.predictions.values():
+                for p in agent_preds:
+                    all_dates.add(p.day)
+        
+        if not all_dates:
+            print("  No history found to rescore.")
+            return
+            
+        start_date = min(all_dates)
+        # Rescore up to the day BEFORE current simulation date
+        end_date = self.current_date - timedelta(days=1)
+        
+        print(f"  Window: {start_date} to {end_date}")
+        
+        iter_date = start_date
+        while iter_date <= end_date:
+            print(f"  > Day {iter_date}")
+            # Save original current_date and use iterator date
+            orig_date = self.current_date
+            self.current_date = iter_date
+            
+            # 1. Resolve questions expiring today
+            resolving = self.q_pool.pop_resolving(iter_date)
+            for q in resolving:
+                self._resolve_question(q)
+                self.resolved_questions.append(q)
+            
+            # 2. Update aggregates (end of day)
+            active_questions = self.q_pool.get_active()
+            self._update_aggregates(active_questions)
+            
+            # 3. Save daily metrics
+            self._save_daily_metrics()
+            
+            iter_date += timedelta(days=1)
+            # Restore date
+            self.current_date = orig_date
+            
+        self.logger.metrics_file.flush()
+        print("Rescoring complete.\n")
 
     def step(self):
         # 1. Resolve questions expiring today
@@ -601,6 +705,8 @@ class SimulationEnvironment:
             histories_lock=self._histories_lock,
             market_csv_path=self.market_csv_path,
         )
+        forecast_interface.source_name = getattr(self, 'source_name', 'openforesight')
+        forecast_interface.source_context = getattr(self, 'source_context', '')
         
         for agent in self.agents:
             forecast_interface.set_agent_context(agent.agent_id)
@@ -626,6 +732,9 @@ class SimulationEnvironment:
                 histories_lock=self._histories_lock,
                 market_csv_path=self.market_csv_path,
             )
+            forecast_interface.source_name = getattr(self, 'source_name', 'openforesight')
+            forecast_interface.source_context = getattr(self, 'source_context', '')
+            
             forecast_interface.set_agent_context(agent.agent_id)
             
             try:

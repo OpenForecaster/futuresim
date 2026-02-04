@@ -123,6 +123,8 @@ class AgentTimer:
     CATEGORIES = ["llm", "search", "df_query"]
     
     def __init__(self):
+        from threading import Lock
+        self._lock = Lock()
         self._stats: Dict[str, TimingStats] = {
             cat: TimingStats() for cat in self.CATEGORIES
         }
@@ -132,41 +134,44 @@ class AgentTimer:
     
     def start_day(self) -> None:
         """Mark the start of a day for total time tracking."""
-        self._day_start = time.time()
+        with self._lock:
+            self._day_start = time.time()
     
     def end_day(self) -> None:
         """Mark the end of a day."""
-        if self._day_start is not None:
-            self._day_total = time.time() - self._day_start
+        with self._lock:
+            if self._day_start is not None:
+                self._day_total = time.time() - self._day_start
     
     @contextmanager
     def track(self, category: str):
         """
         Context manager to track time for an operation.
-        
-        Usage:
-            with timer.track("llm"):
-                response = llm.generate(...)
         """
         if category not in self._stats:
-            self._stats[category] = TimingStats()
+            with self._lock:
+                if category not in self._stats: # Double-checked locking
+                    self._stats[category] = TimingStats()
         
         start = time.time()
         try:
             yield
         finally:
             duration = time.time() - start
-            self._stats[category].add(duration)
+            with self._lock:
+                self._stats[category].add(duration)
     
     def record(self, category: str, duration: float) -> None:
         """Manually record a timing for an operation."""
-        if category not in self._stats:
-            self._stats[category] = TimingStats()
-        self._stats[category].add(duration)
+        with self._lock:
+            if category not in self._stats:
+                self._stats[category] = TimingStats()
+            self._stats[category].add(duration)
 
     def record_tokens(self, usage: Dict) -> None:
         """Record token usage stats."""
-        self._tokens.add(usage)
+        with self._lock:
+            self._tokens.add(usage)
     
     def get_stats(self) -> Dict:
         """Get all timing statistics."""

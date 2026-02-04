@@ -7,6 +7,8 @@ from typing import Optional, Dict, Any
 @dataclass
 class AgentConfig:
     max_actions: int = 10
+    warmup_max_actions: int = 10
+    warmup_parallelism: int = 20  # Default higher parallelism for warmup
     max_submit_retries: int = 3
     max_outcomes_per_question: int = 5
     memory_dir: Optional[str] = None

@@ -44,14 +44,19 @@ def submit_sim_job(
     unique_name = f"{base_sim_name}_r{run_id:02d}"
     
     # 2. Setup directories
-    # Logs go to /fast/sgoel/logs/forecasting-sim/sims/<base_name>/<unique_name>
-    log_base = Path("/fast/sgoel/logs/forecasting-sim/sims")
-    run_dir = log_base / base_sim_name / unique_name
-    run_dir.mkdir(parents=True, exist_ok=True)
+    resume_path = config.get("resume")
+    if resume_path:
+        run_dir = Path(resume_path)
+    else:
+        # Logs go to /fast/sgoel/logs/forecasting-sim/sims/<base_name>/<unique_name>
+        log_base = Path("/fast/sgoel/logs/forecasting-sim/sims")
+        run_dir = log_base / base_sim_name / unique_name
+        run_dir.mkdir(parents=True, exist_ok=True)
     
     # 3. Prepare run specific config
     run_config = config.copy()
-    run_config["sim_name"] = unique_name
+    if not resume_path:
+        run_config["sim_name"] = unique_name
     
     # Save run config
     config_path = run_dir / "config.yaml"
@@ -59,7 +64,10 @@ def submit_sim_job(
     with open(config_path, "w") as f:
         yaml.dump(run_config, f)
         
-    print(f"Generated run config: {config_path}")
+    if resume_path:
+        print(f"Resuming in directory: {run_dir}")
+    else:
+        print(f"Generated run config: {config_path}")
 
     # 4. Prepare submission
     executable = str(script_dir / "run_sim.sh")
@@ -106,21 +114,34 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Generate config but do not submit job")
     
     # Resources
+    # Resources
     parser.add_argument("--gpus", type=int, default=1, help="GPUs per job")
     parser.add_argument("--memory", type=int, default=80, help="Memory in GB")
     parser.add_argument("--bid", type=int, default=25, help="HTCondor bid")
     
+    parser.add_argument("--resume", help="Directory of a previous run to resume")
+    parser.add_argument("--rescore", action="store_true", help="Recalculate metrics from history before resuming")
+
     args = parser.parse_args()
     
     # Load input config
     import yaml
     with open(args.config, "r") as f:
         base_config = yaml.safe_load(f)
+
+    # Apply CLI overrides
+    if args.resume:
+        base_config["resume"] = args.resume
+    if args.rescore:
+        base_config["rescore"] = True
+    if args.dataset:
+        base_config["dataset"] = args.dataset
         
     print(f"Submitting {args.runs} simulation job(s)...")
     print(f"  Config: {args.config}")
     if args.name:
         print(f"  Name override: {args.name}")
+    print(f"  Dataset: {base_config.get('dataset', 'unknown')}")
     
     cluster_ids = []
     for i in range(args.runs):

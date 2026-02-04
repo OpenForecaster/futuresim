@@ -1,8 +1,8 @@
-# Default Simulation Configuration
-# Usage: python mpi_scripts/run_sim/submit_sim.py --config configs/default_sim.yaml --runs 1
+# AllQAgent Simulation Configuration
+# Usage: python mpi_scripts/run_sim/submit_sim.py --config configs/allq_sim.yaml --runs 1
 
 # --- Simulation Meta ---
-sim_name: "deepseek_sim"
+sim_name: "allq_sim_deepseek"
 start_date: "2025-05-01" # Resolution window start
 end_date: "2025-08-23"   # Resolution window end
 lookback_days: 7         # Days before first resolution to start simulation
@@ -10,14 +10,13 @@ search_cutoff_days: 0    # Cap on search date based on current date in sim
 split: "test"            # Dataset split: train, test, or validation
 
 # --- Data Paths ---
-# --- Data Paths ---
-dataset: "openforesight"  # Options: "openforesight", "metaculus_binary", "metaculus_mcq"
-dataset_path: "/is/cluster/fast/sgoel/forecasting/qs/OpenForesight/data/"  # For openforesight
-dataset_cache: "/is/cluster/fast/sgoel/forecasting/qs/cache"  # For cached sources
-# Metaculus Filtering
-min_forecasters: 0 # Minimum number of forecasters required
-resolved_only: false # Only load resolved questions
+dataset: "openforesight"
+dataset_path: "/is/cluster/fast/sgoel/forecasting/qs/OpenForesight/data/"
+dataset_cache: "/is/cluster/fast/sgoel/forecasting/qs/cache"
+min_forecasters: 10
+resolved_only: true
 output_base: "/is/cluster/fast/sgoel/forecasting/current_sim"
+warmup_parallelism: 64
 
 
 # --- Search Settings ---
@@ -39,15 +38,14 @@ parallel: true
 # --- Agents Configuration ---
 defaults:
   provider: "openrouter"
-  scaffold: "basic"
+  scaffold: "allQ"
   max_actions: 10
+  warmup_max_actions: 10
   temperature: 0.7
   max_tokens: 2048
   max_retries: 3
-
+  
 agents:
   - model: "deepseek/deepseek-v3.2"
-  # - model: "x-ai/grok-3-mini"
     provider: "openrouter"
-    # You can override defaults here:
-    # temperature: 0.1
+    # You can override defaults here

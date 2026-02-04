@@ -65,6 +65,11 @@ class DfInterface:
                 lambda x: json.loads(x) if pd.notna(x) and x else None
             )
         
+        if 'options' in df.columns:
+            df['options'] = df['options'].apply(
+                lambda x: json.loads(x) if pd.notna(x) and x else None
+            )
+        
         # Parse dates
         if 'resolution_date' in df.columns:
             df['resolution_date'] = pd.to_datetime(df['resolution_date']).dt.date

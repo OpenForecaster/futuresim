@@ -48,6 +48,15 @@ python scripts/test_basic_agent.py \
 
 On seal-node we already have GPUs, so you can go for it directly.
 
+## AllQAgent (Warmup Mode)
+This agent performs a "warmup" phase on Day 0 where it predicts on **every single active question** before the simulation starts.
+- **Goal**: Establish a baseline score by ensuring coverage of all questions.
+- **Behavior**: 
+    - **Day 0**: Iterates through all questions. For each, it runs a mini-loop (default max 10 actions) to search and submit a forecast.
+    - **Day 1+**: Behaves like BasicAgent, but with a prompt reminder that initial predictions exist.
+- **Memory**: The warmup phase does **not** read/write persistent memory. Memory is enabled starting Day 1.
+- **Config**: Use `scaffold: "allQ"` and `warmup_max_actions: 10`.
+
 ## Scoring Approach
 
 **Method**: Brier-based peer scores + time-weighted averaging.
@@ -429,3 +438,24 @@ Verify each line of env code
 Q: in trying to make many submissions models eg grok dont get to use cot/reasoning. what to do about this?
 
 1. **Sandbox code execution**: Replace eval() with safe execution (RestrictedPython, AST whitelisting, or subprocess isolation)
+
+## Market Integration Roadmap (Planned)
+
+### Deferred to Future Work
+1. **Additional Platforms**:
+   - **Kalshi**: Need specialized fetcher and scoring.
+   - **Polymarket**: Prediction market format (shares/cents).
+   - **Manifold**: Play-money market.
+
+2. **Scoring for Prediction Markets**:
+   - Implement **Log Score** or **Profit/Loss** metrics for market-based platforms.
+   - Current Brier score is suited for probability forecasts but markets might need ROI-based metrics.
+
+3. **Complex Question Types**:
+   - **Numeric**: Range scoring, PDF construction.
+   - **Date**: Evaluation of date proximity (e.g. L1/L2 distance).
+   - Current Metaculus integration only supports Binary and MCQ.
+
+4. **Metaculus Fetching**:
+   - Add supports for `numeric` and `date` types in `MetaculusFetcher`.
+   - Implement `resolution` value parsing logic for these types.

@@ -19,18 +19,54 @@ class AnswerMatcher:
     but rejecting vaguer ones.
     """
     
-    def __init__(self, inference_provider, logger=None):
+    def __init__(self, inference_provider, logger=None, cache_path: str = None):
         """
         Args:
             inference_provider: Object with chat(messages, sampling_params) method.
             logger: Optional SimLogger for logging matcher decisions.
+            cache_path: Optional path to save/load persistent cache (JSON).
         """
         self.inference = inference_provider
         self.logger = logger
+        self.cache_path = cache_path
         
         # Simple cache: (predicted, ground_truth, qid) -> bool
         self._cache: Dict[tuple, bool] = {}
+        
+        if cache_path:
+            self.load_cache(cache_path)
     
+    def load_cache(self, path: str):
+        """Load cache from a JSON file."""
+        import os, json
+        if os.path.exists(path):
+            try:
+                with open(path, 'r') as f:
+                    raw_cache = json.load(f)
+                    # Keys were strings in JSON, convert back to tuples
+                    for k, v in raw_cache.items():
+                        parts = k.split("|||")
+                        if len(parts) == 3:
+                            self._cache[tuple(parts)] = v
+                if self.logger:
+                    print(f"  Loaded matcher cache: {len(self._cache)} entries from {path}")
+            except Exception as e:
+                print(f"  Error loading matcher cache: {e}")
+
+    def save_cache(self):
+        """Save current cache to JSON file."""
+        if not self.cache_path:
+            return
+            
+        import json
+        try:
+            # Convert tuple keys to strings for JSON
+            raw_cache = {f"{k[0]}|||{k[1]}|||{k[2]}": v for k, v in self._cache.items()}
+            with open(self.cache_path, 'w') as f:
+                json.dump(raw_cache, f)
+        except Exception as e:
+            print(f"  Error saving matcher cache: {e}")
+
     def _normalize(self, outcome: str) -> str:
         """Normalize outcome for exact match comparison."""
         return outcome.strip().lower()
@@ -40,13 +76,6 @@ class AnswerMatcher:
                       match_type: str = "is_equivalent") -> bool:
         """
         Check if two outcome strings are semantically equivalent.
-        
-        Args:
-            predicted: The predicted outcome string
-            ground_truth: The ground truth string (or another outcome to compare)
-            question_id: Optional question ID for logging context
-            question_title: Optional question title for logging context
-            match_type: Type of match operation ("check_guess", "expand_set", "is_equivalent")
         """
         pred_norm = self._normalize(predicted)
         truth_norm = self._normalize(ground_truth)
@@ -56,7 +85,7 @@ class AnswerMatcher:
             return True
         
         # Check cache
-        cache_key = (pred_norm, truth_norm, question_id)
+        cache_key = (pred_norm, truth_norm, str(question_id) if question_id else "None")
         if cache_key in self._cache:
             return self._cache[cache_key]
         
@@ -64,6 +93,10 @@ class AnswerMatcher:
         result = self._llm_is_equivalent(predicted, ground_truth, question_id, question_title, match_type)
         self._cache[cache_key] = result
         
+        # Save on update
+        if self.cache_path:
+            self.save_cache()
+            
         return result
     
     def _llm_is_equivalent(self, predicted: str, ground_truth: str,

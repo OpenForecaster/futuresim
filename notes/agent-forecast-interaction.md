@@ -40,6 +40,17 @@ sequenceDiagram
     Env->>Env: Parse and persist memory
     
     Note over Env: End of day, update aggregates
+
+    opt AllQAgent Warmup (Day 0)
+        Note over Env: Pre-simulation Warmup
+        loop For each Active Question
+            Env->>Agent: Warmup Prompt (Question Context)
+            loop Warmup Actions (max N)
+                Agent->>DfI: Search or Helper Tools (No DataFrame Query)
+            end
+            Agent->>Env: Submit Prediction (Strict: only for this QID)
+        end
+    end
 ```
 
 ---
@@ -235,6 +246,7 @@ python scripts/test_basic_agent.py \
 | `agents/utils/df_interface.py` | DfInterface for loading market.csv + query execution |
 | `agents/utils/memory.py` | BasicMemory class for persistent memory |
 | `agents/utils/forecast_parser.py` | XML forecast parsing utilities |
+| `agents/allQAgent/agent.py` | AllQAgent: BasicAgent + Day 0 Warmup Loop |
 | `environment/env.py` | SimulationEnvironment + SimForecastInterface + MarketWriter |
 | `environment/safe_executor.py` | QueryExecutor with eval() + timeout |
 | `environment/scoring/__init__.py` | Scoring with single-agent baseline |
