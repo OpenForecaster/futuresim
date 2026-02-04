@@ -432,12 +432,12 @@ class SimulationEnvironment:
         print(f"\nRescoring simulation history from {self.output_base if hasattr(self, 'output_base') else self.output_dir}...")
         
         # 1. Reset cumulative state
-        self.agent_scores = {}
-        self.agent_correct = {}
-        self.agent_wrong = {}
-        self.agent_questions = {}
-        self.agent_raw_brier = {}
-        self.agent_snapshot_peer = {}
+        self.agent_scores = {agent.agent_id: 0.0 for agent in self.agents}
+        self.agent_correct = {agent.agent_id: 0 for agent in self.agents}
+        self.agent_wrong = {agent.agent_id: 0 for agent in self.agents}
+        self.agent_questions = {agent.agent_id: 0 for agent in self.agents}
+        self.agent_raw_brier = {agent.agent_id: 0.0 for agent in self.agents}
+        self.agent_snapshot_peer = {agent.agent_id: 0.0 for agent in self.agents}
         self.resolved_questions = []
         self.q_pool.reset()
         

@@ -121,6 +121,7 @@ def main():
     
     parser.add_argument("--resume", help="Directory of a previous run to resume")
     parser.add_argument("--rescore", action="store_true", help="Recalculate metrics from history before resuming")
+    parser.add_argument("--dataset", help="Override dataset in config")
 
     args = parser.parse_args()
     
