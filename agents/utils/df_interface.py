@@ -57,7 +57,7 @@ class DfInterface:
             return self._df
         
         # Load base CSV
-        df = pd.read_csv(self.csv_path)
+        df = pd.read_csv(self.csv_path, dtype={'qid': str})
         
         # Parse JSON columns
         if 'market_aggregate' in df.columns:
@@ -99,6 +99,8 @@ class DfInterface:
         columns_desc = []
         for col in df.columns:
             dtype = str(df[col].dtype)
+            if col == 'qid':
+                dtype = 'str'  # Explicitly tell agent it's a string
             columns_desc.append(f"- {col} ({dtype})")
         
         n_active = len(df[df['is_resolved'] == False]) if 'is_resolved' in df.columns else len(df)

@@ -62,7 +62,7 @@ class QueryExecutor:
         df_copy = df.copy()
         exec_globals = {
             '__builtins__': {
-                'len': len, 'str': str, 'int': int, 'float': float,
+                'len': len, 'str': str, 'int': int, 'float': float, 'type': type,
                 'bool': bool, 'list': list, 'dict': dict, 'set': set,
                 'tuple': tuple, 'range': range, 'sorted': sorted,
                 'min': min, 'max': max, 'sum': sum, 'abs': abs, 'round': round,

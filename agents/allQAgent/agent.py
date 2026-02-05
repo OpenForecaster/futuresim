@@ -227,6 +227,11 @@ class AllQAgent(BasicAgent):
 your search query here
 </action>
 
+Optional date filtering:
+<action type="search" from="YYYY-MM-DD" to="YYYY-MM-DD">
+your search query here
+</action>
+
 You can search for recent news to inform your forecast.
 """
 

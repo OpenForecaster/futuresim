@@ -124,7 +124,9 @@ class LanceDBSearchTool(BaseSearchTool):
                         results = self._table.search(query, query_type="fts")
             
             if where:
-                results = results.where(where)
+                # CRITICAL: prefilter=True ensures date filtering happens BEFORE vector search
+                # Without this, post-filtering can return 0 results if top-N vectors fall outside date range
+                results = results.where(where, prefilter=True)
             return self._to_results(results.limit(max_results).to_list())
         except Exception as e:
             print(f"[LanceDB] Search error: {e}")

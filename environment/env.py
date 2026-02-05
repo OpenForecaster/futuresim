@@ -857,7 +857,7 @@ class SimulationEnvironment:
                     
                     if rtype == "prediction":
                         # Rebuild history
-                        qid = record.get("question_id")
+                        qid = str(record.get("question_id")) if record.get("question_id") is not None else None
                         agent_id = record.get("agent_id")
                         outcomes = record.get("outcomes")
                         
@@ -888,7 +888,7 @@ class SimulationEnvironment:
                                 
                     elif rtype == "resolution":
                         # Restore scores and resolved status
-                        qid = record.get("question_id")
+                        qid = str(record.get("question_id")) if record.get("question_id") is not None else None
                         scores = record.get("agent_scores", {})
                         
                         # Add to cumulative scores

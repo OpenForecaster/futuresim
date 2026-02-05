@@ -68,7 +68,7 @@ class QuestionPool:
         
         for q_data in questions:
             q = Question(
-                qid=q_data.qid,
+                qid=str(q_data.qid),
                 title=q_data.title,
                 background=q_data.background,
                 resolution_criteria=q_data.resolution_criteria,
