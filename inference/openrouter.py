@@ -208,6 +208,7 @@ class OpenRouterInference:
             - HTTP 429 (rate limit)
             - HTTP 500, 502, 503, 504, 524 (server errors)
             - Connection errors
+            - JSON decode errors (malformed responses)
         """
         last_error = None
         rate_limiter = GlobalRateLimiter()
@@ -227,7 +228,19 @@ class OpenRouterInference:
                 
                 # Success
                 if response.status_code == 200:
-                    data = response.json()
+                    # Handle malformed JSON responses
+                    try:
+                        data = response.json()
+                    except requests.exceptions.JSONDecodeError as e:
+                        last_error = e
+                        if attempt < self.max_retries:
+                            delay = self._calculate_backoff(attempt)
+                            print(f"  [OpenRouter] Malformed JSON response, retrying in {delay:.1f}s (attempt {attempt + 1}/{self.max_retries})")
+                            time.sleep(delay)
+                            continue
+                        # Exhausted retries
+                        print(f"  [OpenRouter] Malformed JSON after {self.max_retries} retries. Returning empty output.")
+                        return "", {}
                     
                     # Check for provider errors returned as 200 (e.g., Xiaomi 524 timeout)
                     if "error" in data and "choices" not in data:

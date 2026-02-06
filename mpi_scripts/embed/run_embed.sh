@@ -24,7 +24,7 @@ MODEL_PATH="/is/cluster/fast/sgoel/models/Qwen3-Embedding-8B"
 
 # Date range (2023 onwards)
 START_DATE="2023-01-01"
-END_DATE="2025-12-31"
+END_DATE="2026-01-31"
 
 # Worker config (passed from submit_job.py)
 WORKER_ID=${1:-0}

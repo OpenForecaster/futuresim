@@ -24,7 +24,7 @@ MODEL="Qwen3-Embedding-8B"
 
 # Date range
 START_DATE="2023-01-01"
-END_DATE="2025-12-31"
+END_DATE="2026-01-31"
 
 # Activate environment
 source ~/forecast-sim/fsim/bin/activate
