@@ -7,6 +7,9 @@ Then:
 # Initialize and sync environment
 uv sync
 
+# Initialize news pipeline dependencies (applies patches)
+./data/news/scripts/setup_news_pipeline.sh
+
 # Activate environment
 source .venv/bin/activate
 ```
