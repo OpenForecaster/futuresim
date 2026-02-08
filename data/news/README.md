@@ -23,25 +23,17 @@ This pipeline downloads news articles from CommonCrawl News (CCNews) and process
 source ~/forecast-sim/fsim/bin/activate
 cd ~/forecast-sim
 
-# Clone news-please (one-time setup)
-git clone https://github.com/fhamborg/news-please.git data/news/news-please
-pip install news-please
+# Initialize news pipeline dependencies (applies patches)
+./data/news/scripts/setup_news_pipeline.sh
 ```
 
 ### Step 0: Configure news-please
 
-Edit `data/news/news-please/newsplease/examples/commoncrawl.py`:
+The `setup_news_pipeline.sh` script automatically applies a patch to `news-please/examples/commoncrawl.py` to:
+1.  Load domains from `data/news/domains.txt` relative to the script location.
+2.  Accept `NEWS_START_DATE` and `NEWS_END_DATE` from environment variables (handled by `launch_news_crawl.py`).
 
-```python
-# Set start date to 2025-08-01
-from datetime import date
-start_date = date(2025, 8, 1)
-
-# Load domains from our filter file
-with open('/home/sgoel/forecast-sim/data/news/domains.txt') as f:
-    domains = [line.strip() for line in f if line.strip() and not line.startswith('#')]
-filter_valid_hosts = set(domains)
-```
+No manual editing of `commoncrawl.py` is required.
 
 ### Step 1: Download CCNews (Long-running)
 
