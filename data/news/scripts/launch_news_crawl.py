@@ -18,10 +18,7 @@ import argparse
 from pathlib import Path
 from datetime import datetime
 
-try:
-    import htcondor
-except ImportError:
-    htcondor = None
+import htcondor2 as htcondor
 
 JOB_BID = 15
 
@@ -49,25 +46,25 @@ def launch_news_crawl_job(
     if end_date:
         args_str += f" {end_date}"
 
-    job_settings = {
-        "executable": executable,
-        "arguments": args_str,
-        "output": f"{cluster_job_log}.out",
-        "error": f"{cluster_job_log}.err",
-        "log": f"{cluster_job_log}.log",
+        job_settings = {
+            "executable": executable,
+            "arguments": args_str,
+            "output": f"{cluster_job_log}.out",
+            "error": f"{cluster_job_log}.err",
+            "log": f"{cluster_job_log}.log",
         
-        "request_cpus": str(job_cpus),
-        "request_memory": f"{job_memory}GB",
+            "request_cpus": str(job_cpus),
+            "request_memory": f"{job_memory}GB",
         "request_disk": "500GB",  # Need disk for WARCs
         
-        "jobprio": str(job_bid - 1000),
-        "notify_user": "shashwat.goel@tuebingen.mpg.de",
-        "notification": "error",
-    }
+            "jobprio": str(job_bid - 1000),
+            "notify_user": "shashwat.goel@tuebingen.mpg.de",
+            "notification": "error",
+        }
 
-    job_description = htcondor.Submit(job_settings)
-    schedd = htcondor.Schedd()
-    submit_result = schedd.submit(job_description)
+        job_description = htcondor.Submit(job_settings)
+        schedd = htcondor.Schedd()
+        submit_result = schedd.submit(job_description)
 
     print(f"Launched CCNews crawl job: cluster-ID={submit_result.cluster()}")
     print(f"  Date range: {start_date} to {end_date or 'now'}")

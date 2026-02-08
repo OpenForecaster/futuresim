@@ -81,7 +81,9 @@ class SimLogger:
         pass
         
     def log_resolution(self, sim_date: date, question_id: str, 
-                       ground_truth: str, agent_scores: Dict[str, float]):
+                       ground_truth: str, agent_scores: Dict[str, float],
+                       raw_brier: Dict[str, float] = None,
+                       snapshot_peer: Dict[str, float] = None):
         record = {
             "sim_date": str(sim_date),
             "type": "resolution",
@@ -89,6 +91,10 @@ class SimLogger:
             "ground_truth": ground_truth,
             "agent_scores": agent_scores
         }
+        if raw_brier:
+            record["raw_brier"] = raw_brier
+        if snapshot_peer:
+            record["snapshot_peer"] = snapshot_peer
         with self._actions_lock:
             self.actions_file.write(json.dumps(record) + "\n")
             self.actions_file.flush()
@@ -427,11 +433,16 @@ class SimulationEnvironment:
     def rescore(self):
         """
         Re-evaluate all simulation days and re-write daily_metrics.csv.
-        Requires state to be loaded (e.g. via _restore_state).
+        Rebuilds prediction histories from actions.jsonl and replays all resolutions.
         """
-        print(f"\nRescoring simulation history from {self.output_base if hasattr(self, 'output_base') else self.output_dir}...")
+        print(f"\nRescoring simulation history from {self.output_dir}...")
         
-        # 1. Reset cumulative state
+        actions_path = os.path.join(self.output_dir, "actions.jsonl")
+        if not os.path.exists(actions_path):
+            print(f"  Error: {actions_path} not found")
+            return
+        
+        # 1. Reset ALL state
         self.agent_scores = {agent.agent_id: 0.0 for agent in self.agents}
         self.agent_correct = {agent.agent_id: 0 for agent in self.agents}
         self.agent_wrong = {agent.agent_id: 0 for agent in self.agents}
@@ -439,6 +450,7 @@ class SimulationEnvironment:
         self.agent_raw_brier = {agent.agent_id: 0.0 for agent in self.agents}
         self.agent_snapshot_peer = {agent.agent_id: 0.0 for agent in self.agents}
         self.resolved_questions = []
+        self.prediction_histories = {}
         self.q_pool.reset()
         
         # 2. Re-truncate metrics file
@@ -446,55 +458,101 @@ class SimulationEnvironment:
         self.logger.metrics_file.close()
         with open(metrics_path, 'w') as f:
             f.write("date,agent_id,avg_brier,peer_score,tw_peer_score,accuracy,total_predictions\n")
-        
-        # Re-open logger to ensure it now writes to the fresh file
         self.logger.metrics_file = open(metrics_path, 'a')
         
-        # 3. Determine rescore window
-        # Find earliest date in histories
+        # 3. Rebuild prediction histories from actions.jsonl (don't process resolutions yet)
+        predictions_by_date = {}  # date -> list of prediction records
+        resolutions_by_date = {}  # date -> list of (qid, ground_truth) tuples
         all_dates = set()
-        for h in self.prediction_histories.values():
-            all_dates.add(h.start_date)
-            for agent_preds in h.predictions.values():
-                for p in agent_preds:
-                    all_dates.add(p.day)
+        
+        print("  Rebuilding prediction histories...")
+        with open(actions_path, 'r') as f:
+            for line in f:
+                try:
+                    record = json.loads(line)
+                    sim_date_str = record.get("sim_date")
+                    if not sim_date_str:
+                        continue
+                    sim_date = date.fromisoformat(sim_date_str)
+                    all_dates.add(sim_date)
+                    
+                    rtype = record.get("type")
+                    
+                    if rtype == "prediction":
+                        qid = str(record.get("question_id")) if record.get("question_id") is not None else None
+                        agent_id = record.get("agent_id")
+                        outcomes = record.get("outcomes")
+                        
+                        if qid and agent_id and outcomes:
+                            # Ensure history exists
+                            if qid not in self.prediction_histories:
+                                q = self.q_pool.get_question(qid)
+                                if q:
+                                    self.prediction_histories[qid] = PredictionHistory(
+                                        question_id=qid,
+                                        start_date=sim_date,
+                                        resolution_date=q.resolution_date
+                                    )
+                            
+                            # Add prediction
+                            if qid in self.prediction_histories:
+                                pred = DailyPrediction(
+                                    agent_id=agent_id,
+                                    question_id=qid,
+                                    day=sim_date,
+                                    outcomes=outcomes
+                                )
+                                self.prediction_histories[qid].add_prediction(pred)
+                                
+                    elif rtype == "resolution":
+                        qid = str(record.get("question_id")) if record.get("question_id") is not None else None
+                        if qid:
+                            if sim_date not in resolutions_by_date:
+                                resolutions_by_date[sim_date] = []
+                            resolutions_by_date[sim_date].append(qid)
+                            
+                except json.JSONDecodeError:
+                    continue
         
         if not all_dates:
             print("  No history found to rescore.")
             return
-            
-        start_date = min(all_dates)
-        # Rescore up to the day BEFORE current simulation date
-        end_date = self.current_date - timedelta(days=1)
         
+        start_date = min(all_dates)
+        end_date = max(all_dates)
+        
+        print(f"  Found {len(self.prediction_histories)} questions with predictions")
         print(f"  Window: {start_date} to {end_date}")
         
+        # 4. Replay each day: resolve questions and save metrics
         iter_date = start_date
         while iter_date <= end_date:
-            print(f"  > Day {iter_date}")
-            # Save original current_date and use iterator date
-            orig_date = self.current_date
             self.current_date = iter_date
             
-            # 1. Resolve questions expiring today
-            resolving = self.q_pool.pop_resolving(iter_date)
-            for q in resolving:
-                self._resolve_question(q)
-                self.resolved_questions.append(q)
+            # Resolve questions that resolved on this date
+            if iter_date in resolutions_by_date:
+                for qid in resolutions_by_date[iter_date]:
+                    q = self.q_pool.get_question(qid)
+                    if q and qid in self.prediction_histories:
+                        self._resolve_question(q)
+                        self.resolved_questions.append(q)
+                        self.q_pool._resolved.add(qid)
             
-            # 2. Update aggregates (end of day)
-            active_questions = self.q_pool.get_active()
+            # Update aggregates for still-active questions
+            active_questions = [
+                self.q_pool.get_question(qid) 
+                for qid in self.prediction_histories.keys()
+                if self.q_pool.get_question(qid)
+            ]
             self._update_aggregates(active_questions)
             
-            # 3. Save daily metrics
+            # Save daily metrics
             self._save_daily_metrics()
             
             iter_date += timedelta(days=1)
-            # Restore date
-            self.current_date = orig_date
-            
+        
         self.logger.metrics_file.flush()
-        print("Rescoring complete.\n")
+        print(f"  Rescoring complete. Processed {len(self.resolved_questions)} resolutions.")
 
     def step(self):
         # 1. Resolve questions expiring today
@@ -769,19 +827,22 @@ class SimulationEnvironment:
         scorer = BrierScorer()
         
         # Raw Brier scores (per agent, not peer)
+        raw_brier_scores = {}
         for agent_id, pred in final_snapshot.items():
+            raw_brier = scorer.score_prediction(pred, q.ground_truth_answer, self.matcher,
+                                                 question_id=q.qid, question_title=q.title)
+            raw_brier_scores[agent_id] = raw_brier
             if agent_id in self.agent_raw_brier:
-                raw_brier = scorer.score_prediction(pred, q.ground_truth_answer, self.matcher,
-                                                     question_id=q.qid, question_title=q.title)
                 self.agent_raw_brier[agent_id] += raw_brier
         
         # Snapshot peer scores (not time-weighted)
+        snapshot_peer_scores = {}
         if final_snapshot:
-            snapshot_peer = compute_snapshot_peer_scores(
+            snapshot_peer_scores = compute_snapshot_peer_scores(
                 final_snapshot, q.ground_truth_answer, scorer, self.matcher,
                 question_id=q.qid, question_title=q.title
             )
-            for agent_id, peer_score in snapshot_peer.items():
+            for agent_id, peer_score in snapshot_peer_scores.items():
                 if agent_id in self.agent_snapshot_peer:
                     self.agent_snapshot_peer[agent_id] += peer_score
         
@@ -797,7 +858,9 @@ class SimulationEnvironment:
                 
         self.logger.log_resolution(
             self.current_date, q.qid, 
-            q.ground_truth_answer, result.agent_scores
+            q.ground_truth_answer, result.agent_scores,
+            raw_brier=raw_brier_scores,
+            snapshot_peer=snapshot_peer_scores
         )
         print(f"  Resolved: {q.title[:40]}... → '{q.ground_truth_answer[:20]}'")
         for aid, sc in result.agent_scores.items():
@@ -891,18 +954,26 @@ class SimulationEnvironment:
                         qid = str(record.get("question_id")) if record.get("question_id") is not None else None
                         scores = record.get("agent_scores", {})
                         
+                        # Restore raw_brier and snapshot_peer if available (new format)
+                        raw_brier = record.get("raw_brier", {})
+                        snapshot_peer = record.get("snapshot_peer", {})
+                        
                         # Add to cumulative scores
                         for aid, score in scores.items():
                             self.agent_scores[aid] = self.agent_scores.get(aid, 0.0) + score
-                            
-                            # Approximate counts (since we don't have per-question breakdown in log easily)
-                            # We can refine this using prediction histories if strictly needed, 
-                            # but for resumption this is usually "good enough" for the summary.
                             self.agent_questions[aid] = self.agent_questions.get(aid, 0) + 1
                             if score > 0:
                                 self.agent_correct[aid] = self.agent_correct.get(aid, 0) + 1
                             elif score < 0:
                                 self.agent_wrong[aid] = self.agent_wrong.get(aid, 0) + 1
+                            
+                            # Restore raw_brier if logged
+                            if aid in raw_brier:
+                                self.agent_raw_brier[aid] = self.agent_raw_brier.get(aid, 0.0) + raw_brier[aid]
+                            
+                            # Restore snapshot_peer if logged
+                            if aid in snapshot_peer:
+                                self.agent_snapshot_peer[aid] = self.agent_snapshot_peer.get(aid, 0.0) + snapshot_peer[aid]
 
                         # Mark as resolved in pool
                         if qid:

@@ -1,3 +1,16 @@
+# Installation
+
+To reproduce the environment, first make sure you have `uv` installed.
+Then:
+
+```bash
+# Initialize and sync environment
+uv sync
+
+# Activate environment
+source .venv/bin/activate
+```
+
 See scripts/test_basic_agent.py launch commands are at the top of it.
 
 notes/memory.md has a summary to understand the codebase / design choices.
