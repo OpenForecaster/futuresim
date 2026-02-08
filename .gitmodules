@@ -1,0 +1,4 @@
+[submodule "data/news/news-please"]
+	path = data/news/news-please
+	url = https://github.com/fhamborg/news-please.git
+	ignore = dirty
