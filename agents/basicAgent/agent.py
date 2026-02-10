@@ -78,6 +78,9 @@ class BasicAgent(BaseAgent):
         self._timer.reset()
         self._timer.start_day()
         
+        # Load memory for this date (loads most recent snapshot before current_date)
+        self._memory.set_date(current_date)
+        
         # Setup handlers
         self._setup_day(forecast_interface, current_date)
         
@@ -108,7 +111,8 @@ class BasicAgent(BaseAgent):
         """Initialize handlers for the day."""
         csv_path = forecast_interface.get_market_csv_path()
         self._query_handler.setup(
-            csv_path, forecast_interface, self.agent_id, current_date
+            csv_path, forecast_interface, self.agent_id, current_date,
+            single_agent_mode=self.config.single_agent_mode
         )
         self._search_handler.set_date(current_date)
         self._forecast_interface = forecast_interface
@@ -320,6 +324,51 @@ class BasicAgent(BaseAgent):
     # =========================================================================
     # Instructions & Memory
     # =========================================================================
+    # Prompt Helpers
+    # =========================================================================
+
+    def _get_scoring_section(self) -> str:
+        """Get scoring description - single vs multi-agent mode."""
+        if self.config.single_agent_mode:
+            return f"""## SCORING (Brier Score)
+You are evaluated on **Brier Skill Score** = 1 - Σ(pᵢ - yᵢ)² summed over all outcomes.
+- pᵢ = your probability for outcome i
+- yᵢ = 1 if outcome i is TRUE, 0 otherwise
+- **Higher is better**: 1.0 = perfect, 0.0 = no skill, negative = worse than uniform.
+
+Key Mechanics:
+1. **Accuracy**: Assign high probability to the TRUE outcome, low to others.
+2. **Calibration**: Your probabilities should reflect true frequencies.
+3. **Coverage**: Predict on as many questions as you can assess.
+4. **Max Outcomes**: Submit at most {self.config.max_outcomes_per_question} outcomes per question.
+5. **No Placeholders**: "Unknown", "TBD", "Other" hurt your score. Be specific.
+"""
+        else:
+            return f"""## SCORING (Time-Weighted Peer Score)
+You are evaluated on your **Time-Weighted Peer Score**.
+- **Peer Score**: How much better your forecast is compared to the crowd (average of other agents). 
+  - If you are the only predictor, you are compared against a baseline of 0.
+- **Time-Weighted**: Your score is accumulated over time.
+  - **Incentive**: Predict **early** and **accurately**, and on **more** questions. If you hold a prediction better than the crowd on D days, your improvement multiples D times!
+
+Key Mechanics:
+1. **Accuracy**: Brier score (squared error). Assign probability to the TRUE outcome.
+2. **Relative Performance**: You gain points by being more accurate than the market average.
+3. **Speed**: Establish a good position early to maximize the duration of your high score.
+4. **Number of predictions**: Your score is accumulated (summed, not averaged!) across all questions you predict on
+5. **Max Outcomes**: You can submit at most {self.config.max_outcomes_per_question} outcomes per question.
+6. **No Placeholders**: "Unknown", "TBD", "Other" are detrimental. Predict specific outcomes.
+"""
+    
+    def _get_data_notes(self) -> str:
+        """Get notes about DataFrame columns - conditional on agent mode."""
+        if self.config.single_agent_mode:
+            # Single-agent: market_aggregate just reflects own predictions, don't mention it
+            return "Note: `my_prediction` column contains your current forecast as a dict (or None if not yet predicted)."
+        else:
+            # Multi-agent: market_aggregate is meaningful
+            return """Note: `market_aggregate` and `my_prediction` columns contain Python dicts (or None). You can access them directly, e.g. `row['market_aggregate']['outcome_name']`.
+The `num_predictions` column shows how many predictions have been made on that question."""
     
     def _get_source_rules(self) -> str:
         """Get source-specific submission rules."""
@@ -407,20 +456,7 @@ You have access to a news article database. You can search it to gather informat
 
 {self._get_source_rules()}
 
-{memory_section}## SCORING (Time-Weighted Peer Score)
-You are evaluated on your **Time-Weighted Peer Score**.
-- **Peer Score**: How much better your forecast is compared to the crowd (average of other agents). 
-  - If you are the only predictor, you are compared against a baseline of 0.
-- **Time-Weighted**: Your score is accumulated over time.
-  - **Incentive**: Predict **early** and **accurately**, and on **more** questions. If you hold a prediction better than the crowd on D days, your improvement multiples D times!
-
-Key Mechanics:
-1. **Accuracy**: Brier score (squared error). Assign probability to the TRUE outcome.
-2. **Relative Performance**: You gain points by being more accurate than the market average.
-3. **Speed**: Establish a good position early to maximize the duration of your high score.
-4. **Number of predictions**: Your score is accumulated (summed, not averaged!) across all questions you predict on
-5. **Max Outcomes**: You can submit at most {self.config.max_outcomes_per_question} outcomes per question.
-6. **No Placeholders**: "Unknown", "TBD", "Other" are detrimental. Predict specific outcomes.
+{memory_section}{self._get_scoring_section()}
 {search_advice}
 ## AVAILABLE DATA
 DataFrame `df` with {df_info['n_rows']} questions ({df_info['n_active']} active/unresolved, {df_info['n_resolved']} resolved).
@@ -428,8 +464,7 @@ DataFrame `df` with {df_info['n_rows']} questions ({df_info['n_active']} active/
 Column descriptions:
 {df_info['columns_desc']}
 
-Note: `market_aggregate` and `my_prediction` columns contain Python dicts (or None). You can access them directly, e.g. `row['market_aggregate']['outcome_name']`.
-The `num_predictions` column shows how many predictions have been made on that question.
+{self._get_data_notes()}
 
 ## CODE EXECUTION ENVIRONMENT
 Your Python code runs in a sandbox with these variables pre-defined:

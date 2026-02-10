@@ -121,6 +121,8 @@ def main():
     
     parser.add_argument("--resume", help="Directory of a previous run to resume")
     parser.add_argument("--rescore", action="store_true", help="Recalculate metrics from history before resuming")
+    parser.add_argument("--restart_from", help="Directory of a previous run to restart from")
+    parser.add_argument("--restart_from_day", help="Day to restart from (YYYY-MM-DD)")
     parser.add_argument("--dataset", help="Override dataset in config")
 
     args = parser.parse_args()
@@ -135,6 +137,10 @@ def main():
         base_config["resume"] = args.resume
     if args.rescore:
         base_config["rescore"] = True
+    if args.restart_from:
+        base_config["restart_from"] = args.restart_from
+    if args.restart_from_day:
+        base_config["restart_from_day"] = args.restart_from_day
     if args.dataset:
         base_config["dataset"] = args.dataset
         

@@ -94,6 +94,84 @@ def save_config(output_dir: str, args: argparse.Namespace, extra: dict = None):
     print(f"Config saved to {config_path}")
 
 
+def prepare_restart_directory(source_dir: str, restart_day: str, output_dir: str) -> None:
+    """
+    Prepare a new output directory for restarting a simulation from a specific day.
+    
+    Copies:
+    - actions.jsonl entries with sim_date < restart_day
+    - Memory snapshots with date < restart_day
+    - Matcher cache (for efficiency)
+    
+    After this, you can use --resume on the new directory to continue.
+    """
+    from datetime import date
+    import shutil
+    
+    restart_date = datetime.strptime(restart_day, "%Y-%m-%d").date()
+    
+    # 1. Copy actions.jsonl entries before restart_day
+    src_actions = os.path.join(source_dir, "actions.jsonl")
+    dst_actions = os.path.join(output_dir, "actions.jsonl")
+    
+    if not os.path.exists(src_actions):
+        raise FileNotFoundError(f"Source actions.jsonl not found: {src_actions}")
+    
+    copied_count = 0
+    with open(src_actions, 'r') as src, open(dst_actions, 'w') as dst:
+        for line in src:
+            try:
+                record = json.loads(line)
+                record_date_str = record.get("sim_date")
+                if record_date_str:
+                    record_date = date.fromisoformat(record_date_str)
+                    if record_date < restart_date:
+                        dst.write(line)
+                        copied_count += 1
+            except (json.JSONDecodeError, ValueError):
+                continue
+    
+    print(f"  Copied {copied_count} action records (before {restart_day})")
+    
+    # 2. Copy memory snapshots before restart_day for each agent
+    src_agents = os.path.join(source_dir, "agents")
+    if os.path.exists(src_agents):
+        for agent_name in os.listdir(src_agents):
+            src_agent_dir = os.path.join(src_agents, agent_name)
+            src_memory_dir = os.path.join(src_agent_dir, "memory")
+            
+            if os.path.isdir(src_memory_dir):
+                dst_agent_dir = os.path.join(output_dir, "agents", agent_name)
+                dst_memory_dir = os.path.join(dst_agent_dir, "memory")
+                os.makedirs(dst_memory_dir, exist_ok=True)
+                
+                for mem_file in os.listdir(src_memory_dir):
+                    if mem_file.endswith(".txt"):
+                        try:
+                            file_date = date.fromisoformat(mem_file[:-4])  # Remove .txt
+                            if file_date < restart_date:
+                                shutil.copy(
+                                    os.path.join(src_memory_dir, mem_file),
+                                    os.path.join(dst_memory_dir, mem_file)
+                                )
+                        except ValueError:
+                            continue
+                            
+                print(f"  Copied memory for agent: {agent_name}")
+    
+    # 3. Copy matcher cache if exists
+    src_cache = os.path.join(source_dir, "matcher_cache.json")
+    if os.path.exists(src_cache):
+        shutil.copy(src_cache, output_dir)
+        print(f"  Copied matcher cache")
+    
+    # 4. Copy config.json as reference
+    src_config = os.path.join(source_dir, "config.json")
+    if os.path.exists(src_config):
+        dst_config = os.path.join(output_dir, "source_config.json")
+        shutil.copy(src_config, dst_config)
+
+
 def load_agents_config(config_path: str) -> dict:
     """Load agents configuration from YAML file."""
     try:
@@ -192,7 +270,8 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
                 'temperature': temperature,
                 'max_tokens': max_tokens,
             },
-            search_cutoff_days=search_cutoff_days
+            search_cutoff_days=search_cutoff_days,
+            single_agent_mode=(len(agents_list) == 1)  # Adjust prompt for single-agent runs
         )
         
         if scaffold == 'basic':
@@ -312,6 +391,10 @@ def main():
     parser.add_argument("--resume", help="Directory of a previous run to resume")
     parser.add_argument("--rescore", action="store_true", help="Recalculate metrics from history before resuming")
     
+    # Restart from specific day
+    parser.add_argument("--restart_from", help="Directory of a previous run to restart from")
+    parser.add_argument("--restart_from_day", help="Day to restart from (YYYY-MM-DD). Simulation re-runs from this day.")
+    
     # Parse CLI args first to get config path if provided
     args, remaining_argv = parser.parse_known_args()
     
@@ -365,6 +448,57 @@ def main():
     print(f"Resolution window: {resolution_start} to {resolution_end}")
     print(f"Simulation window: {sim_start} to {sim_end} (lookback={args.lookback_days} days)")
     
+    # Handle restart-from-day (creates new dir, copies truncated logs, then uses resume)
+    is_restart = False
+    if args.restart_from:
+        if not args.restart_from_day:
+            print("Error: --restart_from_day required when using --restart_from")
+            sys.exit(1)
+        
+        # Validate source exists
+        if not os.path.exists(args.restart_from):
+            print(f"Error: Restart source not found: {args.restart_from}")
+            sys.exit(1)
+        
+        # Load config from source run
+        src_config_path = os.path.join(args.restart_from, 'config.json')
+        if os.path.exists(src_config_path):
+            print(f"Loading configuration from source run: {src_config_path}")
+            with open(src_config_path, 'r') as f:
+                src_config = json.load(f)
+            # Update args with source config (preserve restart-specific flags)
+            restart_from = args.restart_from
+            restart_from_day = args.restart_from_day
+            for key, val in src_config.items():
+                if key not in ('restart_from', 'restart_from_day', 'resume', 'timestamp'):
+                    if not hasattr(args, key) or getattr(args, key) is None:
+                        setattr(args, key, val)
+            args.restart_from = restart_from
+            args.restart_from_day = restart_from_day
+        
+        # Create new output directory
+        output_dir = create_output_dir(args.sim_name + "_restart", args.output_base)
+        print(f"Restart output directory: {output_dir}")
+        
+        # Create agents directory
+        agents_dir = os.path.join(output_dir, "agents")
+        os.makedirs(agents_dir, exist_ok=True)
+        
+        # Prepare restart: copy truncated logs and memory
+        print(f"Preparing restart from {args.restart_from} @ day {args.restart_from_day}...")
+        prepare_restart_directory(args.restart_from, args.restart_from_day, output_dir)
+        
+        # Save new config with restart metadata
+        save_config(output_dir, args, {
+            'restart_source': args.restart_from,
+            'restart_from_day': args.restart_from_day
+        })
+        
+        # Set resume flag to use existing _restore_state logic
+        args.resume = output_dir
+        is_restart = True
+        print(f"Restart prepared. Will resume from truncated state.")
+    
     # Create output directory
     if args.resume:
         output_dir = args.resume
@@ -374,7 +508,7 @@ def main():
         if not os.path.exists(agents_dir):
              print(f"Warning: agents directory not found in {output_dir}")
              os.makedirs(agents_dir, exist_ok=True)
-    else:
+    elif not is_restart:
         output_dir = create_output_dir(args.sim_name, args.output_base)
         print(f"Output directory: {output_dir}")
         
@@ -511,7 +645,8 @@ def main():
                 'temperature': args.temperature,
                 'max_tokens': args.max_tokens,
             },
-            search_cutoff_days=args.search_cutoff_days
+            search_cutoff_days=args.search_cutoff_days,
+            single_agent_mode=True  # Legacy CLI mode is always single-agent
         )
         
         if args.scaffold == 'basic':

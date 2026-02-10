@@ -120,15 +120,32 @@ Background info provides context and current crowd forecast statistics if availa
         
         if resolution is not None:
             if self.type_filter == 'binary':
-                # Resolution is 0.0 (No) or 1.0 (Yes) usually
-                if isinstance(resolution, (int, float)):
+                # Resolution can be:
+                # - String: "yes", "no" (newer API)
+                # - Numeric: 0.0 (No), 1.0 (Yes) (older API)
+                if isinstance(resolution, str):
+                    if resolution.lower() == 'yes':
+                        ground_truth = "Yes"
+                    elif resolution.lower() == 'no':
+                        ground_truth = "No"
+                elif isinstance(resolution, (int, float)):
                     if resolution >= 0.5:
                         ground_truth = "Yes"
                     else:
                         ground_truth = "No"
             elif self.type_filter == 'multiple_choice' and options:
-                 # Check if resolution is index or value
-                 if isinstance(resolution, int) and 0 <= resolution < len(options):
+                 # Check if resolution is index or value or string
+                 if isinstance(resolution, str):
+                     # Direct option match
+                     if resolution in options:
+                         ground_truth = resolution
+                     else:
+                         # Try case-insensitive
+                         for opt in options:
+                             if opt.lower() == resolution.lower():
+                                 ground_truth = opt
+                                 break
+                 elif isinstance(resolution, int) and 0 <= resolution < len(options):
                      ground_truth = options[resolution]
                  elif isinstance(resolution, float):
                      idx = int(resolution)

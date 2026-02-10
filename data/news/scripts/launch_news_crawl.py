@@ -26,7 +26,7 @@ JOB_BID = 15
 def launch_news_crawl_job(
         start_date: str,
         end_date: str = None,
-        job_memory: int = 32,
+        job_memory: int = 128,
         job_cpus: int = 4,
         job_bid: int = JOB_BID,
 ):
@@ -80,7 +80,7 @@ if __name__ == "__main__":
                        help="Start date (YYYY-MM-DD), e.g., 2025-08-01")
     parser.add_argument('--end-date', type=str, default=None,
                        help="End date (YYYY-MM-DD), e.g., 2026-01-31. If not set, downloads up to now.")
-    parser.add_argument('--job_memory', type=int, default=32,
+    parser.add_argument('--job_memory', type=int, default=128,
                        help="Job memory in GB")
     parser.add_argument('--job_cpus', type=int, default=4,
                        help="Number of CPUs to request")

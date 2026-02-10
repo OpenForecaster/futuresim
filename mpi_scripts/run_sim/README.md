@@ -27,18 +27,28 @@ python mpi_scripts/run_sim/submit_sim.py --config configs/default_sim.yaml --nam
 python mpi_scripts/run_sim/submit_sim.py --config configs/default_sim.yaml --dry-run
 ```
 
-## Resuming a Simulation
+## Resuming / Restarting
 
-Continue a simulation that was stopped earlier. This restores the state from `actions.jsonl` and fast-forwards to the last recorded day:
+### Resume (continue from last day)
+Continue a simulation that was interrupted. Restores state from `actions.jsonl` and fast-forwards to the last recorded day:
 
 ```bash
 python scripts/test_basic_agent.py --resume /path/to/past/output_dir
 ```
 
+### Restart from Specific Day
+Re-run from a specific day, preserving all predictions before that day (e.g., to keep costly Day 0 warmup):
+
+```bash
+python scripts/test_basic_agent.py \
+    --restart_from /path/to/original/run \
+    --restart_from_day 2025-04-05
+```
+
+This creates a new directory with truncated logs, then resumes from the restart day.
+
 ## Arguments
 
-| Argument | Default | Description |
-|----------|---------|-------------|
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `--config` | required | Path to YAML configuration file |

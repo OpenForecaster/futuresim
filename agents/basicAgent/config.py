@@ -21,6 +21,9 @@ class AgentConfig:
     article_max_chars: int = 4000
     search_cutoff_days: int = 0
     
+    # Single agent mode - adjusts prompt to focus on accuracy only (no peer/market language)
+    single_agent_mode: bool = False
+    
     def __post_init__(self):
         if self.sampling_params is None:
             self.sampling_params = {'temperature': 0.7, 'max_tokens': 2048}

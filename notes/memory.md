@@ -57,6 +57,29 @@ This agent performs a "warmup" phase on Day 0 where it predicts on **every singl
 - **Memory**: The warmup phase does **not** read/write persistent memory. Memory is enabled starting Day 1.
 - **Config**: Use `scaffold: "allQ"` and `warmup_max_actions: 10`.
 
+## Simulation Resume & Restart
+
+### Resume (continue from last day)
+Use `--resume <output_dir>` to continue a simulation from where it left off. State is rebuilt from `actions.jsonl`.
+
+### Restart from Specific Day
+Use `--restart_from <source_dir> --restart_from_day YYYY-MM-DD` to re-run from a specific day:
+```bash
+python scripts/test_basic_agent.py \
+    --restart_from /path/to/original/run \
+    --restart_from_day 2025-04-05
+```
+- Creates a **new** output directory (`{sim_name}_restart/...`)
+- Copies `actions.jsonl` entries and memory snapshots **before** restart day
+- Uses existing `--resume` logic internally
+- **Warmup predictions preserved** (main use case: avoid costly Day 0 re-runs)
+
+### Per-Day Memory Storage
+Memory is saved per-day as `agents/<agent_id>/memory/{YYYY-MM-DD}.txt`.
+- On each day, `set_date(current_date)` loads the most recent memory file **before** that date
+- Enables restarting from any day with correct memory state
+- Backward compatible: if no memory files exist, starts with empty memory
+
 ## Scoring Approach
 
 **Method**: Brier-based peer scores + time-weighted averaging.
