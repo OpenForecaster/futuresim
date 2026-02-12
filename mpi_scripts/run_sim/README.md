@@ -20,8 +20,11 @@ python scripts/build_lancedb_index.py
 # Basic run using config:
 python mpi_scripts/run_sim/submit_sim.py --config configs/default_sim.yaml
 
-# Override simulation name and runs:
-python mpi_scripts/run_sim/submit_sim.py --config configs/default_sim.yaml --name my_test_run --runs 5
+# Override config keys at submit time (repeatable):
+python mpi_scripts/run_sim/submit_sim.py --config configs/default_sim.yaml --runs 5 \
+  --set sim_name=my_test_run \
+  --set resources.cpus=32 \
+  --set resources.memory_gb=120
 
 # Dry run to check generated config:
 python mpi_scripts/run_sim/submit_sim.py --config configs/default_sim.yaml --dry-run
@@ -52,14 +55,11 @@ This creates a new directory with truncated logs, then resumes from the restart 
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `--config` | required | Path to YAML configuration file |
-| `--name` | optional | Override simulation name prefix |
 | `--runs` | 1 | Number of parallel runs (for variance testing) |
-| `--gpus` | 1 | GPUs per job |
-| `--memory` | 80 | Memory in GB |
-| `--bid` | 25 | HTCondor bid |
+| `--set key=value` | repeatable | Override YAML config values (supports dot paths and list indices like `agents[0].model`) |
 
 ## Output
 
-- Logs: `mpi_scripts/run_sim/logs/<name>/`
-- Results: `/is/cluster/fast/sgoel/forecasting/current_sim/<name>_r<N>/`
+- Logs: `/fast/sgoel/logs/forecasting-sim/sims/<sim_name>/`
+- Results: `/is/cluster/fast/sgoel/forecasting/current_sim/<sim_name>_r<N>/`
 - Final metrics: `final_results.json` in each run directory

@@ -19,6 +19,9 @@ class CachedQuestion:
     options: Optional[List[str]] = None
     source: str = ""  # metaculus, kalshi, etc.
     metadata: Optional[Dict] = None
+    # Optional raw prompt from the upstream dataset (e.g. OpenForesight HF field "prompt").
+    # Kept separate from background/resolution_criteria so agents can choose to use it verbatim.
+    prompt: str = ""
 
     def to_dict(self):
         d = asdict(self)
@@ -130,7 +133,8 @@ class DataFetcher(ABC):
                 ground_truth_answer=row['ground_truth_answer'],
                 options=options,
                 source=row.get('source', self.source_name),
-                metadata=metadata
+                metadata=metadata,
+                prompt=row.get('prompt', '') or ""
             )
             questions.append(q)
             

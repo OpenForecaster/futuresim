@@ -46,7 +46,7 @@ class BasicAgent(BaseAgent):
         self.config = config or AgentConfig()
         
         # Handlers
-        self._memory = BasicMemory(agent_id, self.config.memory_dir)
+        self._memory = BasicMemory(agent_id, self.config.memory_dir) if self.config.enable_memory else None
         self._query_handler = QueryHandler()
         self._search_handler = SearchHandler(
             search_tool,
@@ -79,7 +79,8 @@ class BasicAgent(BaseAgent):
         self._timer.start_day()
         
         # Load memory for this date (loads most recent snapshot before current_date)
-        self._memory.set_date(current_date)
+        if self._memory:
+            self._memory.set_date(current_date)
         
         # Setup handlers
         self._setup_day(forecast_interface, current_date)
@@ -91,7 +92,8 @@ class BasicAgent(BaseAgent):
         all_forecasts = self._run_action_loop(messages, forecast_interface)
         
         # End of day: memory update (always happens)
-        self._prompt_memory_update(messages, forecast_interface, current_date)
+        if self._memory:
+            self._prompt_memory_update(messages, forecast_interface, current_date)
         
         # End timing and save stats
         self._timer.end_day()
@@ -415,6 +417,9 @@ Example (if options are ["Candidate A", "Candidate B", "Candidate C"]):
 </memory>
 
 """
+            memory_flow_note = "Note: After ending your day, you will be prompted to update your memory."
+        else:
+            memory_flow_note = ""
         
         # Search section (only if enabled)
         search_section = ""
@@ -516,7 +521,7 @@ Use `print()` to ensure you see output. We are not executing in a jupyter notebo
 You have {self.config.max_actions} actions per day. Each query, search, or submission uses 1 action.
 You can interleave queries, searches, and submissions as needed.
 When ready to move on, use <action type="next"/> to end your day.
-Note: After ending your day, you will be prompted to update your memory.
+{memory_flow_note}
 
 ## SUBMISSION RULES
 - qid must be from an active (is_resolved=False) question you saw in query results

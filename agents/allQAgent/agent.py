@@ -4,7 +4,7 @@ import time
 
 from agents.basicAgent.agent import BasicAgent
 from agents.basicAgent.config import AgentConfig
-from agents.utils.forecast_parser import parse_action
+from agents.utils.forecast_parser import parse_action, parse_answer_probability, ParsedAction
 
 class AllQAgent(BasicAgent):
     """
@@ -47,6 +47,17 @@ class AllQAgent(BasicAgent):
         
         # Set agent context so submissions are recorded correctly
         forecast_interface.current_agent_id = self.agent_id
+
+        # Critical for local vLLM: start the agent server ONCE before fanning out
+        # to many threads. Otherwise, thread-level failures/timeouts can lead to
+        # repeated server start attempts and instability.
+        try:
+            from inference.vllm import VLLMInference
+            if isinstance(self.inference, VLLMInference):
+                print(f"[{self.agent_id}] Warming up agent vLLM server before parallel warmup...")
+                self.inference.chat([{"role": "user", "content": "ping"}], {"temperature": 0.0, "max_tokens": 1})
+        except Exception as e:
+            print(f"[{self.agent_id}] Warning: agent vLLM warmup failed: {e}")
         
         # Parallel execution for warmup
         from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -86,7 +97,7 @@ class AllQAgent(BasicAgent):
     def _process_single_question(self, q, current_date, forecast_interface):
         """Process a single question validation loop (thread-safe)."""
         # customized prompt for single-question focus
-        system_prompt = self._build_warmup_system_prompt(current_date, q)
+        system_prompt = self._build_warmup_system_prompt(current_date, q, forecast_interface=forecast_interface)
         messages = [{"role": "user", "content": system_prompt}]
         
         # Run mini-loop for this question
@@ -151,6 +162,49 @@ class AllQAgent(BasicAgent):
             reasoning = usage.get("_reasoning_content") if usage else None
             self._timer.record_tokens(usage)
             messages.append({"role": "assistant", "content": response})
+
+            # singleans mode: accept <answer>/<probability> tags and submit a single-outcome forecast.
+            if getattr(self.config, "singleans", False):
+                answer, prob, err = parse_answer_probability(response)
+                if err:
+                    actions_remaining -= 1
+                    self._log_action(
+                        forecast_interface,
+                        messages,
+                        response,
+                        "warmup_singleans_parse_error",
+                        actions_remaining,
+                        qid=target_qid,
+                        error=err,
+                        reasoning=reasoning,
+                    )
+                    feedback = (
+                        "Format error: In singleans mode you must output:\n"
+                        "<answer>...</answer>\n"
+                        "<probability>...</probability>\n\n"
+                        f"Parser error: {err}\n\nActions remaining: {actions_remaining}"
+                    )
+                    feedback = self._add_exhaustion_warning(feedback, actions_remaining)
+                    messages.append({"role": "user", "content": feedback})
+                    continue
+
+                parsed = ParsedAction(
+                    action_type="submit",
+                    code=None,
+                    forecasts=[{"qid": target_qid, "outcomes": {answer: prob}}],
+                    query=None,
+                    error=None,
+                )
+                self._handle_submit(
+                    messages,
+                    forecast_interface,
+                    response,
+                    parsed,
+                    actions_remaining,
+                    qid=target_qid,
+                    reasoning=reasoning,
+                )
+                break
             
             # Parse
             parsed = parse_action(response, self.config.max_outcomes_per_question)
@@ -167,7 +221,7 @@ class AllQAgent(BasicAgent):
                 # Queries are disabled in warmup (no DataFrame access)
                 self._log_action(forecast_interface, messages, response, "warmup_query_disabled",
                                actions_remaining, qid=target_qid, reasoning=reasoning)
-                feedback = "Error: Database queries are not available during the warmup phase. Please use search or submit your forecast."
+                feedback = "Error: Database queries are not available in this per-question focused mode. Please use search or submit your forecast."
                 messages.append({"role": "user", "content": feedback})
                 actions_remaining -= 1
             
@@ -211,18 +265,27 @@ class AllQAgent(BasicAgent):
                     qid=target_qid, reasoning=reasoning
                 )
 
-    def _build_warmup_system_prompt(self, current_date: date, q) -> str:
+    def _format_forecast_dict(self, outcomes: Optional[Dict[str, float]]) -> str:
+        """Compact, stable formatting for probability dicts in prompts."""
+        if not outcomes:
+            return "None"
+        items = sorted(outcomes.items(), key=lambda kv: (-kv[1], kv[0]))
+        return "{" + ", ".join(f"{k}: {v:.3f}" for k, v in items) + "}"
+
+    def _build_warmup_system_prompt(self, current_date: date, q, forecast_interface=None) -> str:
         """
         Builds a focused prompt for Day 0 warmup.
         Includes Brier score context and question details.
         """
-        
+
         # Borrowing structure from BasicAgent._build_instructions but simplified
         
         search_section = ""
+        submit_num = 1
         if self._search_handler.is_available:
+             submit_num = 2
              search_section = """
-### 2. Search News Articles
+### 1. Search News Articles
 <action type="search">
 your search query here
 </action>
@@ -235,6 +298,31 @@ your search query here
 You can search for recent news to inform your forecast.
 """
 
+        # Optional: include existing prediction + market aggregate (without DF access).
+        # We only include this section if there's something non-empty to show; on day 0
+        # it is typically None/empty and can distract the model.
+        existing_section = ""
+        if forecast_interface is not None:
+            my_pred = None
+            history = forecast_interface.histories.get(q.qid) if hasattr(forecast_interface, "histories") else None
+            if history and getattr(forecast_interface, "current_agent_id", None):
+                my_pred = history.get_latest_prediction(forecast_interface.current_agent_id)
+
+            my_pred_text = ""
+            if my_pred:
+                my_pred_text = f"\nYour latest forecast: {self._format_forecast_dict(my_pred.outcomes)} (as of {my_pred.day})"
+
+            market_text = ""
+            if not self.config.single_agent_mode:
+                market = getattr(forecast_interface, "aggregates", {}).get(q.qid, {})
+                if market:
+                    market_text = f"\nMarket aggregate (as of {current_date}): {self._format_forecast_dict(market)}"
+
+            if my_pred_text or market_text:
+                existing_section = f"""
+## EXISTING FORECASTS (NO DF ACCESS){my_pred_text}{market_text}
+"""
+
         # Detailed instructions as requested, based on BasicAgent but stripped of memory/peer score
         return f"""You are a forecasting agent. Today is {current_date}. 
 Target Question: {q.title} (ID: {q.qid})
@@ -242,6 +330,7 @@ Target Question: {q.title} (ID: {q.qid})
 Background: {q.background}
 Resolution Criteria: {q.resolution_criteria}
 Answer Type: {q.answer_type}
+{existing_section}
 
 ## SCORING (Brier Score)
 For this initial phase, you are evaluated strictly on **Brier Score** (accuracy).
@@ -260,7 +349,7 @@ You have {self.config.warmup_max_actions} actions to research and forecast this 
 
 {search_section}
 
-### 3. Submit Forecast
+### {submit_num}. Submit Forecast
 <action type="submit">
 <forecast qid="{q.qid}">
   <outcome name="Answer1" prob="0.5"/>
@@ -284,3 +373,67 @@ You have {self.config.warmup_max_actions} actions to research and forecast this 
 ...
 </action>
 """
+
+
+class AllQDailyAgent(AllQAgent):
+    """
+    AllQDailyAgent ("allqd"): predict each active question independently each day.
+
+    - Per-question mini-loop (default 10 actions via warmup_max_actions)
+    - No DataFrame queries; existing prediction is provided in the prompt instead
+    - Per-day execution parallelized across all questions
+    """
+
+    def act(self, doc_interface, forecast_interface, current_date: date):
+        print(f"[{self.agent_id}] Starting ALLQD daily run on {current_date}")
+
+        # Start timing for the day
+        self._timer.reset()
+        self._timer.start_day()
+
+        # Active questions for this day (already safe-filtered by env)
+        questions = list(forecast_interface.questions.values())
+
+        # Setup handlers for this day (no DF interface)
+        self._setup_warmup_day(forecast_interface, current_date)
+
+        # Ensure submissions/logs are tagged correctly
+        forecast_interface.current_agent_id = self.agent_id
+
+        # Start the agent server before parallelizing across questions (same rationale
+        # as AllQ warmup).
+        try:
+            from inference.vllm import VLLMInference
+            if isinstance(self.inference, VLLMInference):
+                print(f"[{self.agent_id}] Warming up agent vLLM server before parallel allqd...")
+                self.inference.chat([{"role": "user", "content": "ping"}], {"temperature": 0.0, "max_tokens": 1})
+        except Exception as e:
+            print(f"[{self.agent_id}] Warning: agent vLLM warmup failed: {e}")
+
+        # Parallel execution across questions
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        max_workers = getattr(self.config, 'warmup_parallelism', 20)
+
+        print(f"[{self.agent_id}] Parallelizing allqd with {max_workers} threads over {len(questions)} questions...")
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_qid = {
+                executor.submit(self._process_single_question, q, current_date, forecast_interface): q.qid
+                for q in questions
+            }
+            for i, future in enumerate(as_completed(future_to_qid)):
+                qid = future_to_qid[future]
+                try:
+                    future.result()
+                    if (i + 1) % 10 == 0:
+                        print(f"[{self.agent_id}] ALLQD Progress: {i+1}/{len(questions)}")
+                except Exception as e:
+                    print(f"[{self.agent_id}] Error processing question {qid}: {e}")
+
+        # End timing and save stats
+        self._timer.end_day()
+        if self.config.memory_dir:
+            self._timer.save_day_stats(self.config.memory_dir, current_date)
+
+        forecast_interface.next_day()
+        return []

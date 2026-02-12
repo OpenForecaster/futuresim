@@ -36,7 +36,7 @@ import os
 import sys
 import argparse
 from pathlib import Path
-from datetime import date
+from datetime import date, datetime
 
 # Add parent directories to path
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))  # data/news
@@ -78,26 +78,142 @@ def check_dir_exists(path: str) -> bool:
     return False
 
 
+def get_latest_mtime(path: str, recursive: bool = False):
+    """
+    Return newest mtime (epoch seconds) for path contents.
+    If recursive=False, only checks direct children for directories.
+    """
+    p = Path(path)
+    if not p.exists():
+        return None
+    if p.is_file():
+        return p.stat().st_mtime
+
+    latest = None
+    if recursive:
+        for root, _, files in os.walk(p):
+            for fname in files:
+                fp = Path(root) / fname
+                try:
+                    ts = fp.stat().st_mtime
+                except OSError:
+                    continue
+                if latest is None or ts > latest:
+                    latest = ts
+    else:
+        for child in p.iterdir():
+            try:
+                ts = child.stat().st_mtime
+            except OSError:
+                continue
+            if latest is None or ts > latest:
+                latest = ts
+
+    # Fallback to dir mtime if empty
+    if latest is None:
+        return p.stat().st_mtime
+    return latest
+
+
+def fmt_mtime(ts):
+    if ts is None:
+        return "n/a"
+    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+
+
 def show_status():
-    """Show status of each processing step."""
+    """Show status of each processing step with freshness checks."""
     print("\n=== News Pipeline Status ===\n")
-    
-    checks = [
-        ("1. Raw articles", RAW_ARTICLES_DIR),
-        ("2. JSONL files", JSONL_DIR),
-        ("3. Deduped JSONL", DEDUPED_DIR),
-        ("4. Parquet data", f"{PARQUET_OUTPUT_DIR}/data"),
-        ("5. Embeddings", f"{EMBEDDINGS_DIR}/Qwen3-Embedding-8B"),
-        ("6. LanceDB index", f"{LANCEDB_DIR}/Qwen3-Embedding-8B"),
+
+    stages = [
+        {
+            "id": "raw",
+            "name": "1. Raw articles",
+            "path": RAW_ARTICLES_DIR,
+            "deps": [],
+            "recursive": False,
+        },
+        {
+            "id": "jsonl",
+            "name": "2. JSONL files",
+            "path": JSONL_DIR,
+            "deps": ["raw"],
+            "recursive": False,
+        },
+        {
+            "id": "dedup",
+            "name": "3. Deduped JSONL",
+            "path": DEDUPED_DIR,
+            "deps": ["jsonl"],
+            "recursive": False,
+        },
+        {
+            "id": "parquet",
+            "name": "4. Parquet data",
+            "path": f"{PARQUET_OUTPUT_DIR}/data",
+            "deps": ["dedup"],
+            "recursive": False,
+        },
+        {
+            "id": "embed",
+            "name": "5. Embeddings",
+            "path": f"{EMBEDDINGS_DIR}/Qwen3-Embedding-8B",
+            "deps": ["parquet"],
+            "recursive": False,
+        },
+        {
+            "id": "lancedb",
+            "name": "6. LanceDB index",
+            "path": f"{LANCEDB_DIR}/Qwen3-Embedding-8B",
+            "deps": ["parquet", "embed"],
+            "recursive": False,
+        },
     ]
-    
-    for name, path in checks:
+
+    stage_info = {}
+    for stage in stages:
+        path = stage["path"]
         exists = check_dir_exists(path)
-        status = "✓ Ready" if exists else "✗ Missing"
-        print(f"  {name}: {status}")
+        stage_info[stage["id"]] = {
+            "exists": exists,
+            "mtime": get_latest_mtime(path, recursive=stage["recursive"]) if exists else None,
+            "state": None,
+            "reasons": [],
+        }
+
+    for stage in stages:
+        info = stage_info[stage["id"]]
+        path = stage["path"]
+        status = "✓ Ready"
+        stale_reasons = []
+
+        if not info["exists"]:
+            status = "✗ Missing"
+            info["state"] = "missing"
+        else:
+            for dep in stage["deps"]:
+                dep_info = stage_info[dep]
+                if dep_info["state"] in {"missing", "stale"}:
+                    status = "⚠ Stale"
+                    stale_reasons.append(f"dependency not ready: {dep}")
+                    continue
+                if info["mtime"] is not None and dep_info["mtime"] is not None and info["mtime"] < dep_info["mtime"]:
+                    status = "⚠ Stale"
+                    stale_reasons.append(f"older than {dep} ({fmt_mtime(dep_info['mtime'])})")
+            if status == "✓ Ready":
+                info["state"] = "ready"
+            else:
+                info["state"] = "stale"
+        info["reasons"] = stale_reasons
+
+        print(f"  {stage['name']}: {status}")
         print(f"    Path: {path}")
-    
-    print("\n  Run with --step <name> to process each step.")
+        print(f"    Latest update: {fmt_mtime(info['mtime'])}")
+        if stale_reasons:
+            print(f"    Reason: {', '.join(stale_reasons)}")
+
+    print("\n  NOTE: 'Ready' means present and not older than upstream dependencies.")
+    print("  Run with --step <name> to process each step.")
     print("  Steps: jsonl, dedup, parquet, embed, lancedb\n")
 
 

@@ -46,31 +46,31 @@ def launch_news_crawl_job(
     if end_date:
         args_str += f" {end_date}"
 
-        job_settings = {
-            "executable": executable,
-            "arguments": args_str,
-            "output": f"{cluster_job_log}.out",
-            "error": f"{cluster_job_log}.err",
-            "log": f"{cluster_job_log}.log",
-        
-            "request_cpus": str(job_cpus),
-            "request_memory": f"{job_memory}GB",
-        "request_disk": "500GB",  # Need disk for WARCs
-        
-            "jobprio": str(job_bid - 1000),
-            "notify_user": "shashwat.goel@tuebingen.mpg.de",
-            "notification": "error",
-        }
+    job_settings = {
+        "executable": executable,
+        "arguments": args_str,
+        "output": f"{cluster_job_log}.out",
+        "error": f"{cluster_job_log}.err",
+        "log": f"{cluster_job_log}.log",
 
-        job_description = htcondor.Submit(job_settings)
-        schedd = htcondor.Schedd()
-        submit_result = schedd.submit(job_description)
+        "request_cpus": str(job_cpus),
+        "request_memory": f"{job_memory}GB",
+        "request_disk": "500GB",  # Need disk for WARCs
+
+        "jobprio": str(job_bid - 1000),
+        "notify_user": "shashwat.goel@tuebingen.mpg.de",
+        "notification": "error",
+    }
+
+    job_description = htcondor.Submit(job_settings)
+    schedd = htcondor.Schedd()
+    submit_result = schedd.submit(job_description)
 
     print(f"Launched CCNews crawl job: cluster-ID={submit_result.cluster()}")
     print(f"  Date range: {start_date} to {end_date or 'now'}")
     print(f"  This is a LONG-RUNNING job (days/weeks)")
     print(f"  Monitor with: condor_q {submit_result.cluster()}")
-    print(f"  Logs: {LOG_PATH}/{submit_result.cluster()}.out")
+    print(f"  Logs: {LOG_PATH}/{submit_result.cluster()}.0.out")
 
 
 if __name__ == "__main__":

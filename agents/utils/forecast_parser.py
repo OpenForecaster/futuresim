@@ -26,6 +26,41 @@ class ParsedAction:
     error: Optional[str] = None  # Error message if parsing failed
 
 
+def parse_answer_probability(response: str) -> Tuple[Optional[str], Optional[float], Optional[str]]:
+    """
+    Parse an OpenForesight-style single answer response:
+      <answer>...</answer>
+      <probability>0.5</probability>
+
+    Returns: (answer, prob, error)
+    """
+    if not response:
+        return None, None, "Empty response"
+
+    # Take the LAST occurrence if the model included multiple.
+    ans_matches = re.findall(r"<answer>\s*(.*?)\s*</answer>", response, flags=re.IGNORECASE | re.DOTALL)
+    prob_matches = re.findall(r"<probability>\s*(.*?)\s*</probability>", response, flags=re.IGNORECASE | re.DOTALL)
+
+    if not ans_matches or not prob_matches:
+        return None, None, 'Missing <answer>...</answer> or <probability>...</probability> tags'
+
+    answer = (ans_matches[-1] or "").strip()
+    prob_raw = (prob_matches[-1] or "").strip()
+
+    if not answer:
+        return None, None, "Empty <answer> value"
+
+    try:
+        prob = float(prob_raw)
+    except Exception:
+        return None, None, f"Invalid probability: {prob_raw!r}"
+
+    if not (0.0 <= prob <= 1.0):
+        return None, None, f"Probability must be between 0 and 1, got {prob}"
+
+    return answer, prob, None
+
+
 
 
 def parse_action(response: str, max_outcomes: int = 5) -> ParsedAction:

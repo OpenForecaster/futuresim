@@ -1,0 +1,81 @@
+# AllQAgent Simulation Configuration (Qwen3-30B-Instruct, local vLLM)
+# Usage:
+#   python mpi_scripts/run_sim/submit_sim.py --config configs/allq_sim_qwen3_30b_it_2507.yaml --runs 1
+#
+# Notes:
+# - Agent runs on GPU0; matcher + embedder run on GPU1 (same split pattern as allq_sim_oss20b).
+# - Uses the same per-call token/context budgeting style as the other allq configs.
+
+# --- Simulation Meta ---
+sim_name: "allq_sim_qwen3_30b_it_2507"
+start_date: "2025-05-01"
+end_date: "2025-08-23"
+lookback_days: 7
+search_cutoff_days: 0
+split: "test"
+
+# --- HTCondor Resources ---
+resources:
+  gpus: 2
+  cpus: 16
+  memory_gb: 96
+  disk_gb: 50
+  bid: 25
+  # A100/H100 are both fine; keep 80GB-class GPUs for stable 30B + aux stack.
+  requirements: "TARGET.CUDACapability >= 8.0 && TARGET.CUDAGlobalMemoryMb > 70000 && TARGET.Machine =!= \"i103.internal.cluster.is.localnet\""
+
+# --- Data Paths ---
+dataset: "openforesight"
+dataset_path: "/is/cluster/fast/sgoel/forecasting/qs/OpenForesight/data/"
+dataset_cache: "/is/cluster/fast/sgoel/forecasting/qs/cache"
+min_forecasters: 10
+resolved_only: true
+output_base: "/is/cluster/fast/sgoel/forecasting/current_sim"
+warmup_parallelism: 64
+
+# --- Search Settings ---
+search_db: "/is/cluster/fast/sgoel/forecasting/news/deduped_articles/lance/Qwen3-Embedding-8B"
+embedding_model: "/is/cluster/fast/sgoel/models/Qwen3-Embedding-8B"
+embedding_gpu_mem: 0.4
+
+# --- Answer Matching ---
+matching: "vllm"
+matcher: "/fast/rolmedo/models/qwen3-4b-it-2507"
+matcher_gpu_mem: 0.3
+
+# Shared max context used by vLLM (agent/matcher/embedding) in this runner.
+max_model_len: 65536
+
+# Qwen3 context extension via YaRN RoPE scaling.
+# This is required to run above the base 32,768 context window.
+rope_scaling:
+  rope_type: "yarn"
+  factor: 2.0
+  original_max_position_embeddings: 32768
+
+# --- vLLM Agent Runtime ---
+vllm_gpu_mem: 0.92
+vllm_enable_tools: false
+
+# --- Local 2-GPU Pinning ---
+# matcher + embedder on GPU1 (parent process), agent vLLM on GPU0 (subprocess override).
+aux_cuda_visible_devices: "1"
+agent_cuda_visible_devices: "0"
+
+# --- Inference Defaults ---
+rate_limit: 32.0
+parallel: true
+
+# --- Agents Configuration ---
+defaults:
+  provider: "vllm"
+  scaffold: "allQ"
+  max_actions: 10
+  warmup_max_actions: 10
+  temperature: 0.7
+  max_tokens: 8192
+  max_retries: 3
+
+agents:
+  - model: "/fast/rolmedo/models/qwen3-30b-it-2507"
+    provider: "vllm"

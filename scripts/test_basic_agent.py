@@ -51,7 +51,9 @@ if os.path.exists(env_path):
 
 from environment.env import SimulationEnvironment, SimForecastInterface
 from agents.basicAgent import BasicAgent, AgentConfig
-from agents.allQAgent import AllQAgent
+from agents.allQAgent import AllQAgent, AllQDailyAgent
+from agents.ogAgent import OgAgent
+from agents.gptossAgent import GPTOSSBasicAgent, GPTOSSAllQAgent
 
 
 # Default paths
@@ -61,16 +63,8 @@ CURRENT_SIM_DIR = "/is/cluster/fast/sgoel/forecasting/current_sim"
 
 
 class ThreadSafeLLM:
-    """Wrapper for vLLM model to make it thread-safe for embedding."""
-    from threading import Lock
-    
-    def __init__(self, model):
-        self.model = model
-        self.lock = self.Lock()
-    
-    def embed(self, *args, **kwargs):
-        with self.lock:
-            return self.model.embed(*args, **kwargs)
+    """Deprecated: embedding is now served via vLLM OpenAI server (see below)."""
+    pass
 
 
 def create_output_dir(sim_name: str, base_dir: str = CURRENT_SIM_DIR) -> str:
@@ -158,7 +152,54 @@ def prepare_restart_directory(source_dir: str, restart_day: str, output_dir: str
                             continue
                             
                 print(f"  Copied memory for agent: {agent_name}")
+
+            # Also copy timing stats (and other per-day lightweight logs) so the restarted
+            # run directory has a continuous history.
+            src_timing = os.path.join(src_agent_dir, "timing_stats.jsonl")
+            if os.path.exists(src_timing):
+                dst_agent_dir = os.path.join(output_dir, "agents", agent_name)
+                os.makedirs(dst_agent_dir, exist_ok=True)
+                dst_timing = os.path.join(dst_agent_dir, "timing_stats.jsonl")
+                copied = 0
+                with open(src_timing, "r") as src, open(dst_timing, "w") as dst:
+                    for line in src:
+                        try:
+                            rec = json.loads(line)
+                            d = date.fromisoformat(str(rec.get("date")))
+                            if d < restart_date:
+                                dst.write(line)
+                                copied += 1
+                        except Exception:
+                            continue
+                if copied:
+                    print(f"  Copied timing stats for agent: {agent_name} ({copied} lines)")
     
+    # 2.5 Copy daily metrics history (before restart_day) if present.
+    # Note: some runs have no CSV header; we filter by the first comma-delimited field.
+    src_metrics = os.path.join(source_dir, "daily_metrics.csv")
+    if os.path.exists(src_metrics):
+        dst_metrics = os.path.join(output_dir, "daily_metrics.csv")
+        copied = 0
+        with open(src_metrics, "r") as src, open(dst_metrics, "w") as dst:
+            for line in src:
+                line = line.strip()
+                if not line:
+                    continue
+                first = line.split(",", 1)[0]
+                # Optional header support
+                if first.lower() == "date":
+                    dst.write(line + "\n")
+                    continue
+                try:
+                    d = date.fromisoformat(first)
+                except ValueError:
+                    continue
+                if d < restart_date:
+                    dst.write(line + "\n")
+                    copied += 1
+        if copied:
+            print(f"  Copied {copied} daily metrics rows (before {restart_day})")
+
     # 3. Copy matcher cache if exists
     src_cache = os.path.join(source_dir, "matcher_cache.json")
     if os.path.exists(src_cache):
@@ -187,7 +228,17 @@ def create_inference_provider(provider: str, model: str, args):
     """Create an inference provider instance."""
     if provider == "vllm":
         from inference.vllm import VLLMInference
-        return VLLMInference(model, max_model_len=args.max_model_len)
+        rope_scaling = getattr(args, "rope_scaling", None)
+        return VLLMInference(
+            model,
+            max_model_len=args.max_model_len,
+            gpu_memory_utilization=getattr(args, "vllm_gpu_mem", 0.3),
+            tensor_parallel_size=getattr(args, "vllm_tensor_parallel_size", 1),
+            startup_timeout=getattr(args, "vllm_startup_timeout", 300.0),
+            rope_scaling=rope_scaling,
+            enable_tools=getattr(args, "vllm_enable_tools", False),
+            cuda_visible_devices=getattr(args, "agent_cuda_visible_devices", None),
+        )
     elif provider == "openrouter":
         from inference.openrouter import OpenRouterInference
         return OpenRouterInference(model)
@@ -210,6 +261,16 @@ def get_model_short_name(model: str) -> str:
 def create_agents_from_config(config: dict, args, output_dir: str, search_tool=None) -> list:
     """Create agent instances from config dict."""
     from inference.openrouter import GlobalRateLimiter
+    def _as_bool(v):
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, str):
+            s = v.strip().lower()
+            if s in ("1", "true", "yes", "on"):
+                return True
+            if s in ("0", "false", "no", "off"):
+                return False
+        return bool(v)
     
     defaults = config.get('defaults', {})
     agents_list = config.get('agents', [])
@@ -219,6 +280,24 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
     
     print(f"  Found {len(agents_list)} agents in config", flush=True)
     
+    # If any agent uses OpenRouter, size the shared HTTP connection pool to match
+    # the run's parallelism (max warmup_parallelism across agents).
+    if any((a.get('provider', defaults.get('provider', 'openrouter')) == 'openrouter') for a in agents_list):
+        try:
+            from inference.openrouter import configure_http_pool
+            desired_pool = int(getattr(args, 'warmup_parallelism', 20))
+            desired_pool = max(desired_pool, int(defaults.get('warmup_parallelism', desired_pool) or desired_pool))
+            for a in agents_list:
+                if a.get('provider', defaults.get('provider', 'openrouter')) != 'openrouter':
+                    continue
+                wp = a.get('warmup_parallelism', defaults.get('warmup_parallelism', desired_pool))
+                if wp is not None:
+                    desired_pool = max(desired_pool, int(wp))
+            configure_http_pool(pool_maxsize=desired_pool, pool_connections=desired_pool)
+            print(f"  OpenRouter HTTP pool: connections=maxsize={desired_pool}", flush=True)
+        except Exception as e:
+            print(f"  Warning: failed to configure OpenRouter HTTP pool: {e}", flush=True)
+
     # Configure global rate limiter
     GlobalRateLimiter.configure(args.rate_limit)
     print(f"  Rate limiter configured: {args.rate_limit} req/s", flush=True)
@@ -248,6 +327,20 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
         temperature = agent_def.get('temperature', defaults.get('temperature', args.temperature))
         max_tokens = agent_def.get('max_tokens', defaults.get('max_tokens', args.max_tokens))
         search_cutoff_days = agent_def.get('search_cutoff_days', defaults.get('search_cutoff_days', getattr(args, 'search_cutoff_days', 0)))
+        enable_memory = agent_def.get('enable_memory', defaults.get('enable_memory', True))
+        singleans = agent_def.get('singleans', defaults.get('singleans', False))
+        gptoss_prompt_mode = agent_def.get(
+            'gptoss_prompt_mode',
+            defaults.get('gptoss_prompt_mode', getattr(args, 'gptoss_prompt_mode', 'instructions'))
+        )
+        gptoss_reasoning_effort = str(agent_def.get(
+            'gptoss_reasoning_effort',
+            defaults.get('gptoss_reasoning_effort', getattr(args, 'gptoss_reasoning_effort', 'medium'))
+        )).lower()
+        gptoss_include_reasoning = _as_bool(agent_def.get(
+            'gptoss_include_reasoning',
+            defaults.get('gptoss_include_reasoning', getattr(args, 'gptoss_include_reasoning', True))
+        ))
         
         # Generate unique agent ID: scaffold_modelname_NNN
         model_short = get_model_short_name(model)
@@ -266,24 +359,38 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
             warmup_parallelism=warmup_parallelism,
             max_submit_retries=max_retries,
             memory_dir=agent_dir,  # Per-agent memory directory
+            enable_memory=enable_memory,
+            singleans=singleans,
             sampling_params={
                 'temperature': temperature,
                 'max_tokens': max_tokens,
             },
             search_cutoff_days=search_cutoff_days,
-            single_agent_mode=(len(agents_list) == 1)  # Adjust prompt for single-agent runs
+            single_agent_mode=(len(agents_list) == 1),  # Adjust prompt for single-agent runs
+            gptoss_prompt_mode=gptoss_prompt_mode,
+            gptoss_reasoning_effort=gptoss_reasoning_effort,
+            gptoss_include_reasoning=gptoss_include_reasoning,
         )
         
+        # GPT-OSS Harmony tool calling: only when using vLLM + enable_tools + gpt-oss weights.
+        use_gptoss_harmony = (
+            provider == "vllm"
+            and bool(getattr(args, "vllm_enable_tools", False))
+            and ("gpt-oss" in str(model).lower())
+        )
+
         if scaffold == 'basic':
-            agent = BasicAgent(
+            agent_cls = GPTOSSBasicAgent if use_gptoss_harmony else BasicAgent
+            agent = agent_cls(
                 agent_id=agent_id,
                 inference_provider=inference_provider,
                 config=agent_config,
                 model_name=model,
                 search_tool=search_tool
             )
-        elif scaffold == 'allQ' or scaffold == 'allq':
-            agent = AllQAgent(
+        elif scaffold in ('allQ', 'allq'):
+            agent_cls = GPTOSSAllQAgent if use_gptoss_harmony else AllQAgent
+            agent = agent_cls(
                 agent_id=agent_id,
                 inference_provider=inference_provider,
                 config=agent_config,
@@ -291,8 +398,26 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
                 search_tool=search_tool,
                 start_date=args.sim_start_date  # Passed from create_agents call
             )
+        elif scaffold == 'allqd':
+            agent = AllQDailyAgent(
+                agent_id=agent_id,
+                inference_provider=inference_provider,
+                config=agent_config,
+                model_name=model,
+                search_tool=search_tool,
+                start_date=args.sim_start_date
+            )
+        elif scaffold in ('og', 'ogagent', 'ogAgent'):
+            agent = OgAgent(
+                agent_id=agent_id,
+                inference_provider=inference_provider,
+                config=agent_config,
+                model_name=model,
+                search_tool=search_tool,
+                start_date=args.sim_start_date
+            )
         else:
-            raise ValueError(f"Unknown scaffold: {scaffold}. Only 'basic' and 'allQ' are supported.")
+            raise ValueError(f"Unknown scaffold: {scaffold}. Only 'basic', 'allQ', 'allqd', and 'og' are supported.")
         
         agents.append(agent)
         print(f"  Created agent: {agent_id} ({provider}:{model}) [Scaffold: {scaffold}]")
@@ -310,6 +435,13 @@ def main():
                        help="First resolution date (YYYY-MM-DD) - questions resolving from this date")
     parser.add_argument("--end_date", default="2024-12-27",
                        help="Last resolution date (YYYY-MM-DD) - questions resolving until this date")
+    # Optional: decouple question-resolution filtering window from the simulation window.
+    # This is useful when you want to run only Day 0 (start_date=end_date) but still
+    # warm up over a broader set of questions.
+    parser.add_argument("--resolution_start", default=None,
+                       help="Resolution window start (YYYY-MM-DD). Defaults to --start_date.")
+    parser.add_argument("--resolution_end", default=None,
+                       help="Resolution window end (YYYY-MM-DD). Defaults to --end_date.")
     parser.add_argument("--lookback_days", type=int, default=7,
                        help="Days before first resolution to start simulation (default 7)")
     
@@ -339,7 +471,7 @@ def main():
                        help="Disable parallel agent execution")
     
     # Single-agent settings (used when no config file)
-    parser.add_argument("--scaffold", choices=["basic", "allQ", "allq"], default="basic",
+    parser.add_argument("--scaffold", choices=["basic", "allQ", "allq", "allqd", "og"], default="basic",
                        help="Agent scaffold to use (default: basic)")
     parser.add_argument("--provider", choices=["vllm", "openrouter"], default="openrouter",
                        help="Inference provider: 'vllm' (local) or 'openrouter' (API)")
@@ -365,6 +497,33 @@ def main():
                        help="Sampling temperature")
     parser.add_argument("--max_tokens", type=int, default=2048,
                        help="Max tokens to generate")
+    parser.add_argument("--gptoss_prompt_mode", choices=["instructions", "first_user"], default="instructions",
+                       help="GPT-OSS Responses prompt placement mode")
+    parser.add_argument("--gptoss_reasoning_effort", choices=["low", "medium", "high"], default="medium",
+                       help="GPT-OSS reasoning effort for Responses API")
+    parser.add_argument("--gptoss_include_reasoning", action="store_true", default=True,
+                       help="Request reasoning content in GPT-OSS Responses output")
+    parser.add_argument("--no_gptoss_include_reasoning", action="store_true",
+                       help="Disable reasoning content in GPT-OSS Responses output")
+
+    # vLLM runtime settings (when provider == vllm in config)
+    parser.add_argument("--vllm_gpu_mem", type=float, default=0.3,
+                       help="GPU memory fraction for vLLM agent models (0.0-1.0, default 0.3)")
+    parser.add_argument("--vllm_tensor_parallel_size", type=int, default=1,
+                       help="Tensor parallel size for vLLM agent models (default 1)")
+    parser.add_argument("--vllm_startup_timeout", type=float, default=300.0,
+                       help="vLLM server startup timeout in seconds (default 300)")
+    parser.add_argument("--vllm_enable_tools", action="store_true", default=False,
+                       help="Start vLLM servers with tool-calling enabled (Responses API recommended for gpt-oss tools)")
+
+    # GPU pinning for local multi-GPU runs.
+    # If you set aux_cuda_visible_devices=1 and agent_cuda_visible_devices=0, then:
+    # - matcher vLLM subprocess + in-process embedder will use GPU 1 (parent process visibility)
+    # - agent vLLM subprocesses will be pinned to GPU 0 (per-subprocess override)
+    parser.add_argument("--aux_cuda_visible_devices", default=None,
+                       help="CUDA_VISIBLE_DEVICES for matcher + embedder (parent process). E.g. '1'")
+    parser.add_argument("--agent_cuda_visible_devices", default=None,
+                       help="CUDA_VISIBLE_DEVICES for agent vLLM subprocesses. E.g. '0'")
     
     # Answer matching settings
     parser.add_argument("--matching", choices=["exact", "openrouter", "vllm"], default="vllm",
@@ -397,6 +556,7 @@ def main():
     
     # Parse CLI args first to get config path if provided
     args, remaining_argv = parser.parse_known_args()
+    config = None
     
     # Load config if provided
     if args.config:
@@ -431,19 +591,102 @@ def main():
         args = parser.parse_args(args=remaining_argv + sys.argv[1:])
     else:
         args = parser.parse_args()
+
+    def _config_uses_vllm(cfg: dict | None, parsed_args: argparse.Namespace) -> bool:
+        # Legacy single-agent mode.
+        if getattr(parsed_args, "provider", None) == "vllm":
+            return True
+        if not cfg:
+            return False
+
+        defaults = cfg.get("defaults", {}) or {}
+        default_provider = defaults.get("provider")
+        for a in (cfg.get("agents") or []):
+            p = a.get("provider", default_provider)
+            if p == "vllm":
+                return True
+        return default_provider == "vllm"
+
+    # Apply GPU pinning BEFORE starting matcher server or loading embedding model.
+    #
+    # Important: on clusters, HTCondor/Slurm often set CUDA_VISIBLE_DEVICES to an
+    # allocated subset (sometimes UUIDs). We interpret numeric specs like "0"/"1"
+    # as indices into that *current* visible list, and rewrite them to the actual
+    # entry (index or UUID) to avoid pinning to non-allocated GPUs.
+    orig_visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    base_visible = None
+    if orig_visible:
+        base_visible = [x.strip() for x in orig_visible.split(",") if x.strip()]
+
+    def _map_cuda_spec(spec: str | None) -> str | None:
+        if spec is None:
+            return None
+        s = str(spec).strip()
+        if not s:
+            return None
+        if base_visible is not None:
+            # Support comma-separated index lists like "0,1" for tensor-parallel runs.
+            parts = [p.strip() for p in s.split(",") if p.strip()]
+            if parts and all(p.isdigit() for p in parts):
+                mapped = []
+                for p in parts:
+                    idx = int(p)
+                    if not (0 <= idx < len(base_visible)):
+                        return None
+                    mapped.append(base_visible[idx])
+                return ",".join(mapped)
+        return s
+
+    aux_mapped = _map_cuda_spec(getattr(args, "aux_cuda_visible_devices", None))
+    agent_mapped = _map_cuda_spec(getattr(args, "agent_cuda_visible_devices", None))
+
+    if getattr(args, "aux_cuda_visible_devices", None) is not None and aux_mapped is None:
+        print(
+            f"Warning: aux_cuda_visible_devices={args.aux_cuda_visible_devices!r} not compatible with "
+            f"CUDA_VISIBLE_DEVICES={orig_visible!r}; ignoring aux pinning."
+        )
+    if getattr(args, "agent_cuda_visible_devices", None) is not None and agent_mapped is None:
+        print(
+            f"Warning: agent_cuda_visible_devices={args.agent_cuda_visible_devices!r} not compatible with "
+            f"CUDA_VISIBLE_DEVICES={orig_visible!r}; ignoring agent pinning."
+        )
+
+    args.aux_cuda_visible_devices = aux_mapped
+    args.agent_cuda_visible_devices = agent_mapped
+
+    # Only apply agent pinning if we will actually start vLLM agent servers.
+    if args.agent_cuda_visible_devices and not _config_uses_vllm(config, args):
+        print(
+            "Warning: agent_cuda_visible_devices was set but no agent is configured with provider=vllm; "
+            "ignoring agent pinning."
+        )
+        args.agent_cuda_visible_devices = None
+
+    # This ensures the in-process embedding model lands on aux GPU deterministically.
+    if args.aux_cuda_visible_devices:
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(args.aux_cuda_visible_devices)
     
     # Handle parallel flag
     if args.no_parallel:
         args.parallel = False
+    if args.no_gptoss_include_reasoning:
+        args.gptoss_include_reasoning = False
     
-    # Parse dates - these are resolution date bounds
-    resolution_start = datetime.strptime(args.start_date, "%Y-%m-%d").date()
-    resolution_end = datetime.strptime(args.end_date, "%Y-%m-%d").date()
+    # Parse dates
+    # start_date/end_date define the SIMULATION window (via sim_start + sim_end).
+    # resolution_start/resolution_end define which questions are loaded (by resolution date).
+    sim_resolution_start = datetime.strptime(args.start_date, "%Y-%m-%d").date()
+    sim_resolution_end = datetime.strptime(args.end_date, "%Y-%m-%d").date()
+
+    resolution_start_str = args.resolution_start or args.start_date
+    resolution_end_str = args.resolution_end or args.end_date
+    resolution_start = datetime.strptime(resolution_start_str, "%Y-%m-%d").date()
+    resolution_end = datetime.strptime(resolution_end_str, "%Y-%m-%d").date()
     
     # Simulation starts lookback_days before first resolution
     from datetime import timedelta
-    sim_start = resolution_start - timedelta(days=args.lookback_days)
-    sim_end = resolution_end
+    sim_start = sim_resolution_start - timedelta(days=args.lookback_days)
+    sim_end = sim_resolution_end
     
     print(f"Resolution window: {resolution_start} to {resolution_end}")
     print(f"Simulation window: {sim_start} to {sim_end} (lookback={args.lookback_days} days)")
@@ -535,8 +778,14 @@ def main():
     elif args.matching == "vllm":
         print(f"\nInitializing VLLM matcher server (must start before embedding model)...")
         from inference.vllm import VLLMInference
+        matcher_rope_scaling = getattr(args, "matcher_rope_scaling", None)
+        if matcher_rope_scaling is None:
+            matcher_rope_scaling = getattr(args, "rope_scaling", None)
         matcher_provider = VLLMInference(args.matcher, max_model_len=args.max_model_len, 
-                                          gpu_memory_utilization=args.matcher_gpu_mem)
+                                          gpu_memory_utilization=args.matcher_gpu_mem,
+                                          startup_timeout=getattr(args, "vllm_startup_timeout", 300.0),
+                                          rope_scaling=matcher_rope_scaling,
+                                          cuda_visible_devices=getattr(args, "aux_cuda_visible_devices", None))
         # Force server startup by making a warmup call - fail job if this fails
         print(f"  Warming up matcher ({args.matcher}, GPU: {args.matcher_gpu_mem:.0%})...")
         matcher_provider.chat([{"role": "user", "content": "test"}], {"temperature": 0, "max_tokens": 1})
@@ -562,16 +811,25 @@ def main():
         if args.embedding_model and os.path.exists(args.embedding_model):
             print(f"  Loading embedding model: {args.embedding_model} (GPU: {args.embedding_gpu_mem:.0%})")
             try:
-                from vllm import LLM
-                # Embedding model should fit comfortably on 80GB GPU with 0.4 utilization
-                raw_model = LLM(model=args.embedding_model, convert="embed", 
-                                      gpu_memory_utilization=args.embedding_gpu_mem,
-                                      max_model_len=args.max_model_len)
-                # Wrap in thread-safe wrapper to prevent deadlocks when called from multiple agents
-                embedding_model = ThreadSafeLLM(raw_model)
-                print("  Embedding model loaded (queries will use semantic/hybrid search)")
+                from inference.vllm import VLLMInference
+                embedding_rope_scaling = getattr(args, "embedding_rope_scaling", None)
+                if embedding_rope_scaling is None:
+                    embedding_rope_scaling = getattr(args, "rope_scaling", None)
+                embedding_model = VLLMInference(
+                    args.embedding_model,
+                    max_model_len=args.max_model_len,
+                    gpu_memory_utilization=args.embedding_gpu_mem,
+                    startup_timeout=getattr(args, "vllm_startup_timeout", 300.0),
+                    rope_scaling=embedding_rope_scaling,
+                    cuda_visible_devices=getattr(args, "aux_cuda_visible_devices", None),
+                )
+                # Force server startup and verify /v1/embeddings works.
+                warm = embedding_model.embed(["test"], use_tqdm=False)
+                if not warm:
+                    raise RuntimeError("Embedding warmup returned empty result")
+                print("  Embedding server ready (queries will use semantic/hybrid search)")
             except Exception as e:
-                print(f"  Warning: Failed to load embedding model: {e}")
+                print(f"  Warning: Failed to start embedding server: {e}")
                 print("  Falling back to keyword-only search")
         
         search_tool = LanceDBSearchTool(args.search_db, embedding_model=embedding_model)
@@ -618,11 +876,26 @@ def main():
         if args.provider == "vllm":
             from inference.vllm import VLLMInference
             print(f"Loading VLLM model: {args.model_path} (max_model_len={args.max_model_len})")
-            inference_provider = VLLMInference(args.model_path, max_model_len=args.max_model_len)
+            inference_provider = VLLMInference(
+                args.model_path,
+                max_model_len=args.max_model_len,
+                tensor_parallel_size=getattr(args, "vllm_tensor_parallel_size", 1),
+                startup_timeout=getattr(args, "vllm_startup_timeout", 300.0),
+                rope_scaling=getattr(args, "rope_scaling", None),
+            )
             model_name = os.path.basename(args.model_path)
             
         elif args.provider == "openrouter":
             from inference.openrouter import OpenRouterInference
+            # Match HTTP connection pool to requested warmup parallelism.
+            # (Even in single-agent mode, AllQ/AllQD uses thread pools for per-question runs.)
+            try:
+                from inference.openrouter import configure_http_pool
+                desired_pool = max(20, int(getattr(args, 'warmup_parallelism', 20)))
+                configure_http_pool(pool_maxsize=desired_pool, pool_connections=desired_pool)
+                print(f"OpenRouter HTTP pool: connections=maxsize={desired_pool}")
+            except Exception as e:
+                print(f"Warning: failed to configure OpenRouter HTTP pool: {e}")
             print(f"Using OpenRouter model: {args.openrouter_model}")
             inference_provider = OpenRouterInference(args.openrouter_model)
             model_name = args.openrouter_model
@@ -641,12 +914,16 @@ def main():
             warmup_parallelism=args.warmup_parallelism,
             max_submit_retries=args.max_retries,
             memory_dir=agent_dir,
+            enable_memory=True,
             sampling_params={
                 'temperature': args.temperature,
                 'max_tokens': args.max_tokens,
             },
             search_cutoff_days=args.search_cutoff_days,
-            single_agent_mode=True  # Legacy CLI mode is always single-agent
+            single_agent_mode=True,  # Legacy CLI mode is always single-agent
+            gptoss_prompt_mode=args.gptoss_prompt_mode,
+            gptoss_reasoning_effort=args.gptoss_reasoning_effort,
+            gptoss_include_reasoning=args.gptoss_include_reasoning,
         )
         
         if args.scaffold == 'basic':
@@ -659,6 +936,24 @@ def main():
             )
         elif args.scaffold in ['allQ', 'allq']:
             agent = AllQAgent(
+                agent_id=agent_id,
+                inference_provider=inference_provider,
+                config=agent_config,
+                model_name=model_name,
+                search_tool=search_tool,
+                start_date=sim_start
+            )
+        elif args.scaffold == 'allqd':
+            agent = AllQDailyAgent(
+                agent_id=agent_id,
+                inference_provider=inference_provider,
+                config=agent_config,
+                model_name=model_name,
+                search_tool=search_tool,
+                start_date=sim_start
+            )
+        elif args.scaffold == 'og':
+            agent = OgAgent(
                 agent_id=agent_id,
                 inference_provider=inference_provider,
                 config=agent_config,
@@ -743,8 +1038,11 @@ def main():
             warmup_interface.source_name = getattr(env, 'source_name', 'openforesight')
             warmup_interface.source_context = getattr(env, 'source_context', '')
             
+            # Only AllQAgent uses the explicit "warmup" (day-0 all-questions sweep).
+            # AllQDailyAgent ("allqd") should behave identically on every day, so we do not
+            # run a separate phase 0 for it.
             for agent in agents:
-                if hasattr(agent, 'warmup'):
+                if isinstance(agent, AllQAgent) and not isinstance(agent, AllQDailyAgent):
                     agent.warmup(warmup_interface, env.current_date)
         else:
             print("  No active questions for warmup.")

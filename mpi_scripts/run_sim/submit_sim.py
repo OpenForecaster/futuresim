@@ -3,42 +3,112 @@
 Submit simulation job(s) to HTCondor.
 
 Usage:
-    # Single agent, single run:
-    python submit_sim.py --model xiaomi/mimo-v2-flash:free --name single_test
+    # Basic:
+    python submit_sim.py --config configs/allq_sim_ds.yaml --runs 1
 
-    # Single agent, 5 runs for variance testing:
-    python submit_sim.py --model xiaomi/mimo-v2-flash:free --name variance_test --runs 5
-
-    # 4-agent selfplay, single run:
-    python submit_sim.py --model xiaomi/mimo-v2-flash:free --agents 4 --name selfplay_test
-
-    # With search enabled:
-    python submit_sim.py --model xiaomi/mimo-v2-flash:free --name search_test --search
+    # Override config keys at submit time (repeatable):
+    python submit_sim.py --config configs/allq_sim_ds.yaml \\
+        --set sim_name=allq_tmp \\
+        --set defaults.temperature=0.2 \\
+        --set resources.cpus=32
 """
 
 import argparse
+import re
 from pathlib import Path
+from typing import Any
 
-import htcondor2 as htcondor
+
+def _parse_set_kv(s: str) -> tuple[str, Any]:
+    if "=" not in s:
+        raise ValueError(f"Invalid --set {s!r}. Expected key=value.")
+    key, raw = s.split("=", 1)
+    key = key.strip()
+    if not key:
+        raise ValueError(f"Invalid --set {s!r}. Empty key.")
+    # Parse value as YAML to support bool/int/float/null and quoted strings.
+    import yaml
+    val = yaml.safe_load(raw)
+    return key, val
+
+
+def _tokenize_path(path: str) -> list[Any]:
+    # Supports dot paths + list indices: agents[0].model
+    tokens: list[Any] = []
+    for part in path.split("."):
+        part = part.strip()
+        if not part:
+            raise ValueError(f"Invalid --set path {path!r}: empty segment")
+        for m in re.finditer(r"([^\[\]]+)|\[(\d+)\]", part):
+            key, idx = m.group(1), m.group(2)
+            if key is not None:
+                k = key.strip()
+                if not k:
+                    raise ValueError(f"Invalid --set path {path!r}: empty key in segment {part!r}")
+                tokens.append(k)
+            else:
+                tokens.append(int(idx))
+    return tokens
+
+
+def _ensure_list_len(xs: list, n: int) -> None:
+    while len(xs) <= n:
+        xs.append(None)
+
+
+def _set_in_config(cfg: Any, path: str, value: Any) -> None:
+    tokens = _tokenize_path(path)
+    cur = cfg
+    for i, tok in enumerate(tokens):
+        is_last = i == len(tokens) - 1
+        nxt = None if is_last else tokens[i + 1]
+
+        if is_last:
+            if isinstance(tok, int):
+                if not isinstance(cur, list):
+                    raise ValueError(f"Path {path!r} expects list at final container, got {type(cur).__name__}")
+                _ensure_list_len(cur, tok)
+                cur[tok] = value
+                return
+            if not isinstance(cur, dict):
+                raise ValueError(f"Path {path!r} expects dict at final container, got {type(cur).__name__}")
+            cur[tok] = value
+            return
+
+        # Not last: ensure next container exists and has correct type.
+        if isinstance(tok, int):
+            if not isinstance(cur, list):
+                raise ValueError(f"Path {path!r} expects list container, got {type(cur).__name__}")
+            _ensure_list_len(cur, tok)
+            if cur[tok] is None:
+                cur[tok] = [] if isinstance(nxt, int) else {}
+            cur = cur[tok]
+            continue
+
+        if not isinstance(cur, dict):
+            raise ValueError(f"Path {path!r} expects dict container, got {type(cur).__name__}")
+        if tok not in cur or cur[tok] is None:
+            cur[tok] = [] if isinstance(nxt, int) else {}
+        cur = cur[tok]
 
 
 def submit_sim_job(
     config: dict,
-    sim_name_override: str = None,
     run_id: int = 0,
     gpus: int = 1,
     cpus: int = 16,
     memory_gb: int = 80,
     disk_gb: int = 50,
     bid: int = 25,
+    requirements: str = None,
     dry_run: bool = False,
 ) -> int:
     """Submit a single simulation job."""
+    import htcondor2 as htcondor
     script_dir = Path(__file__).parent
     
     # 1. Determine sim_name
-    # If passed in args, use that. Else get from config. Else default.
-    base_sim_name = sim_name_override or config.get("sim_name", "sim_run")
+    base_sim_name = config.get("sim_name", "sim_run")
     
     # Unique sim name for this specific run instance
     unique_name = f"{base_sim_name}_r{run_id:02d}"
@@ -84,7 +154,7 @@ def submit_sim_job(
         "request_disk": f"{disk_gb}GB",
         "request_gpus": str(gpus),
         "jobprio": str(bid - 1000),
-        "requirements": "TARGET.CUDACapability >= 8.0 && TARGET.CUDAGlobalMemoryMb > 70000",
+        "requirements": requirements or "TARGET.CUDACapability >= 8.0 && TARGET.CUDAGlobalMemoryMb > 70000",
         "environment": "PYTHONUNBUFFERED=1",
     }
     
@@ -107,23 +177,22 @@ def main():
     
     # Configuration input
     parser.add_argument("--config", required=True, help="Path to YAML configuration file")
+    parser.add_argument(
+        "--set",
+        dest="set_values",
+        action="append",
+        default=[],
+        help="Override config values (repeatable). Example: --set defaults.temperature=0.2",
+    )
     
     # Submission overrides / controls
-    parser.add_argument("--name", help="Override simulation name prefix")
     parser.add_argument("--runs", type=int, default=1, help="Number of runs (for variance)")
     parser.add_argument("--dry-run", action="store_true", help="Generate config but do not submit job")
-    
-    # Resources
-    # Resources
-    parser.add_argument("--gpus", type=int, default=1, help="GPUs per job")
-    parser.add_argument("--memory", type=int, default=80, help="Memory in GB")
-    parser.add_argument("--bid", type=int, default=25, help="HTCondor bid")
     
     parser.add_argument("--resume", help="Directory of a previous run to resume")
     parser.add_argument("--rescore", action="store_true", help="Recalculate metrics from history before resuming")
     parser.add_argument("--restart_from", help="Directory of a previous run to restart from")
     parser.add_argument("--restart_from_day", help="Day to restart from (YYYY-MM-DD)")
-    parser.add_argument("--dataset", help="Override dataset in config")
 
     args = parser.parse_args()
     
@@ -141,29 +210,48 @@ def main():
         base_config["restart_from"] = args.restart_from
     if args.restart_from_day:
         base_config["restart_from_day"] = args.restart_from_day
-    if args.dataset:
-        base_config["dataset"] = args.dataset
+    if args.set_values:
+        for s in args.set_values:
+            k, v = _parse_set_kv(s)
+            _set_in_config(base_config, k, v)
         
     print(f"Submitting {args.runs} simulation job(s)...")
     print(f"  Config: {args.config}")
-    if args.name:
-        print(f"  Name override: {args.name}")
     print(f"  Dataset: {base_config.get('dataset', 'unknown')}")
+
+    # Infer resources from config unless explicitly overridden by CLI flags.
+    # Preferred format:
+    #   resources:
+    #     gpus: 1
+    #     cpus: 16
+    #     memory_gb: 80
+    #     disk_gb: 50
+    #     bid: 25
+    #     requirements: "..."
+    resources = base_config.get("resources", {}) or {}
+    inferred_gpus = resources.get("gpus", base_config.get("gpus", 1))
+    inferred_cpus = resources.get("cpus", base_config.get("cpus", 16))
+    inferred_memory = resources.get("memory_gb", base_config.get("memory_gb", 80))
+    inferred_disk = resources.get("disk_gb", base_config.get("disk_gb", 50))
+    inferred_bid = resources.get("bid", base_config.get("bid", 25))
+    inferred_requirements = resources.get("requirements", base_config.get("requirements"))
+    
+    print(f"  Resources: gpus={inferred_gpus} cpus={inferred_cpus} mem={inferred_memory}GB disk={inferred_disk}GB bid={inferred_bid}")
+    if inferred_requirements:
+        print(f"  Requirements: {inferred_requirements}")
     
     cluster_ids = []
     for i in range(args.runs):
         cluster_id = submit_sim_job(
             config=base_config,
-            sim_name_override=args.name,
             run_id=i,
-            gpus=args.gpus,
-            memory_gb=args.memory,
-            bid=args.bid,
+            gpus=inferred_gpus,
+            cpus=inferred_cpus,
+            memory_gb=inferred_memory,
+            disk_gb=inferred_disk,
+            bid=inferred_bid,
+            requirements=inferred_requirements,
             dry_run=args.dry_run,
-            # Pass hardware defaults if not in config? 
-            # Actually hardcoded defaults in function signature are clearer for this script's usage
-            disk_gb=50, 
-            cpus=16,
         )
         cluster_ids.append(cluster_id)
         print(f"  Submitted run {i}: cluster {cluster_id}")
@@ -171,7 +259,7 @@ def main():
     print(f"\nAll jobs submitted! Cluster IDs: {cluster_ids}")
     
     # Determine where logs went for helpful message
-    sim_name = args.name or base_config.get("sim_name", "sim_run")
+    sim_name = base_config.get("sim_name", "sim_run")
     print(f"Logs: /fast/sgoel/logs/forecasting-sim/sims/{sim_name}/")
 
 

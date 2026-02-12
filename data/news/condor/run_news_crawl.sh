@@ -53,4 +53,3 @@ python3 -m newsplease.examples.commoncrawl \
     1
 
 echo "CCNews extraction complete!"
-

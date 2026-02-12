@@ -27,6 +27,9 @@ cd ~/forecast-sim
 ./data/news/scripts/setup_news_pipeline.sh
 ```
 
+`setup_news_pipeline.sh` also ensures required NLTK tokenizer data is present (e.g. `punkt_tab`),
+so the CCNews crawl does not fail on HTCondor nodes due to missing NLTK resources.
+
 ### Step 0: Configure news-please
 
 The `setup_news_pipeline.sh` script automatically applies a patch to `news-please/examples/commoncrawl.py` to:
