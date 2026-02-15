@@ -15,6 +15,8 @@ Usage:
 
 import argparse
 import re
+import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -104,7 +106,16 @@ def submit_sim_job(
     dry_run: bool = False,
 ) -> int:
     """Submit a single simulation job."""
-    import htcondor2 as htcondor
+    htcondor = None
+    try:
+        import htcondor2 as _htcondor
+        htcondor = _htcondor
+    except ImportError:
+        try:
+            import htcondor as _htcondor
+            htcondor = _htcondor
+        except ImportError:
+            htcondor = None
     script_dir = Path(__file__).parent
     
     # 1. Determine sim_name
@@ -158,18 +169,42 @@ def submit_sim_job(
         "environment": "PYTHONUNBUFFERED=1",
     }
     
-    job = htcondor.Submit(job_settings)
-    
     if dry_run:
         print(f"Dry run: Job would be submitted to {run_dir}")
         print(f"  Executable: {executable}")
         print(f"  Arguments: {config_path}")
         return -1
-        
-    schedd = htcondor.Schedd()
-    result = schedd.submit(job, count=1)
-    
-    return result.cluster()
+
+    if htcondor is not None:
+        job = htcondor.Submit(job_settings)
+        schedd = htcondor.Schedd()
+        result = schedd.submit(job, count=1)
+        return result.cluster()
+
+    # Fallback path when python HTCondor bindings are unavailable.
+    with tempfile.NamedTemporaryFile("w", suffix=".sub", delete=False) as tf:
+        sub_path = Path(tf.name)
+        for k, v in job_settings.items():
+            tf.write(f"{k} = {v}\n")
+        tf.write("queue 1\n")
+
+    try:
+        proc = subprocess.run(
+            ["condor_submit_bid", str(bid), str(sub_path)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        out = (proc.stdout or "") + "\n" + (proc.stderr or "")
+        m = re.search(r"cluster\s+(\d+)", out, flags=re.IGNORECASE)
+        if not m:
+            raise RuntimeError(f"Failed to parse cluster id from condor_submit output:\n{out}")
+        return int(m.group(1))
+    finally:
+        try:
+            sub_path.unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 def main():

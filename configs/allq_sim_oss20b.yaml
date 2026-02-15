@@ -66,6 +66,7 @@ parallel: true
 defaults:
   provider: "vllm"
   scaffold: "allQ"
+  enable_memory: true
   # GPT-OSS Harmony prompt placement A/B:
   # - "instructions" (baseline): put task text in Responses API `instructions`
   # - "first_user": prepend task text to first user message
@@ -73,6 +74,10 @@ defaults:
   # GPT-OSS Responses reasoning controls.
   gptoss_reasoning_effort: "medium"
   gptoss_include_reasoning: true
+  # Replay only parser-safe structured items between tool turns.
+  gptoss_replay_mode: "raw_recommended"
+  # Reserve room for reasoning + visible output (OpenAI recommendation: start around 25k).
+  gptoss_min_max_output_tokens: 25000
   max_actions: 10
   warmup_max_actions: 10
   temperature: 1.0

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import hashlib
-from datetime import date, timedelta
+import random
+import time
+from datetime import date
 from typing import Any, Dict, List, Optional, Tuple
 
 from agents.basicAgent.agent import BasicAgent
@@ -15,22 +17,50 @@ from .tools import (
     build_memory_tools,
     response_to_action,
     extract_function_calls,
+    extract_assistant_messages,
+    extract_replay_items_for_tool_turn,
     extract_reasoning_text,
+    extract_reasoning_token_count,
 )
 
 
-def _to_responses_input(conversation: List[Dict[str, str]]) -> List[Dict[str, Any]]:
+def _to_responses_input(conversation: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
-    Convert a simple chat history [{role, content:str}, ...] into Responses API "input".
+    Convert local Harmony-like conversation items into Responses API input.
+
+    Supports:
+    - message-like items: {"role", "content", ...}
+    - preformatted Responses items: {"type": ...}
     """
     out: List[Dict[str, Any]] = []
     for m in conversation or []:
+        if not isinstance(m, dict):
+            continue
+        # Pass through preformatted Responses items (e.g. function_call_output).
+        if isinstance(m.get("type"), str):
+            out.append(m)
+            continue
+
         role = (m.get("role") or "user").strip()
         content = m.get("content", "")
         blocks: List[Dict[str, str]] = []
         if content is not None and str(content) != "":
             blocks.append({"type": "input_text", "text": str(content)})
-        out.append({"role": role, "content": blocks})
+        item: Dict[str, Any] = {"role": role, "content": blocks}
+
+        name = m.get("name")
+        if isinstance(name, str) and name.strip():
+            item["name"] = name.strip()
+        channel = m.get("channel")
+        if isinstance(channel, str) and channel.strip():
+            item["channel"] = channel.strip()
+        recipient = m.get("recipient")
+        if isinstance(recipient, str) and recipient.strip():
+            item["recipient"] = recipient.strip()
+        content_type = m.get("content_type")
+        if isinstance(content_type, str) and content_type.strip():
+            item["content_type"] = content_type.strip()
+        out.append(item)
     return out
 
 
@@ -52,32 +82,44 @@ class GPTOSSBasicAgent(BasicAgent):
             return "instructions"
         return mode
 
-    def _seed_harmony_conversation(self, instructions: str) -> Tuple[str, List[Dict[str, str]]]:
+    def _seed_harmony_conversation(
+        self,
+        instructions: str,
+        current_date: date,
+        *,
+        actions_remaining: int,
+    ) -> Tuple[str, List[Dict[str, Any]]]:
         """
         Build initial Responses payload in either baseline mode (`instructions`) or
         A/B mode (`first_user`).
         """
+        del current_date  # current date is already included in developer instructions
+        begin = f"Begin. Actions remaining {int(actions_remaining)}"
         mode = self._get_gptoss_prompt_mode()
         if mode == "first_user":
             first_user = (instructions or "").strip()
             if first_user:
-                first_user = f"{first_user}\n\nBegin."
+                first_user = f"{first_user}\n\n{begin}"
             else:
-                first_user = "Begin."
+                first_user = begin
             return "", [{"role": "user", "content": first_user}]
-        return instructions, [{"role": "user", "content": "Begin."}]
+        return instructions, [{"role": "user", "content": begin}]
 
     def act(self, doc_interface, forecast_interface, current_date: date) -> List[Dict[str, Any]]:
         self._timer.reset()
         self._timer.start_day()
 
-        if self._memory:
+        if self._memory is not None:
             self._memory.set_date(current_date)
 
         self._setup_day(forecast_interface, current_date)
 
         instructions = self._build_harmony_instructions(current_date)
-        instructions_for_api, conversation = self._seed_harmony_conversation(instructions)
+        instructions_for_api, conversation = self._seed_harmony_conversation(
+            instructions,
+            current_date,
+            actions_remaining=int(self.config.max_actions),
+        )
 
         all_forecasts = self._run_harmony_action_loop(
             instructions=instructions_for_api,
@@ -85,7 +127,7 @@ class GPTOSSBasicAgent(BasicAgent):
             forecast_interface=forecast_interface,
         )
 
-        if self._memory:
+        if self._memory is not None:
             self._harmony_memory_update(
                 instructions=instructions_for_api,
                 conversation=conversation,
@@ -109,83 +151,45 @@ class GPTOSSBasicAgent(BasicAgent):
         Keep BasicAgent instructions intact (scoring, feedback, rules, data notes),
         but replace XML action format with Harmony tool-call guidance.
         """
-        base_prompt = BasicAgent._build_instructions(self, current_date)
-        return self._rewrite_basic_prompt_for_harmony(base_prompt, current_date)
+        # Use class-specific prompt builder (e.g., AllQ reminder text) and only
+        # rewrite the output/action format portion for Harmony tool calls.
+        base_prompt = self._build_instructions(current_date)
+        return self._rewrite_basic_prompt_for_harmony(base_prompt)
 
-    def _rewrite_basic_prompt_for_harmony(self, base_prompt: str, current_date: date) -> str:
-        # Keep everything before RESPONSE FORMAT as-is (scoring, data notes, etc.).
+    def _rewrite_basic_prompt_for_harmony(self, base_prompt: str) -> str:
+        prefix = base_prompt
         if "## RESPONSE FORMAT" in base_prompt:
             prefix = base_prompt.split("## RESPONSE FORMAT", 1)[0].rstrip()
-        else:
-            prefix = base_prompt.rstrip()
 
-        memory_flow_note = (
-            "Note: After ending your day, you will be prompted to update your memory."
-            if self._memory
-            else ""
+        return (
+            f"{prefix}\n\n"
+            "## RESPONSE FORMAT\n"
+            "Use function tools only (no XML tags).\n"
+            "- Call exactly ONE tool per turn.\n"
+            "- Do not output <reasoning> or <action> tags.\n"
+            "- Tool signatures, constraints, and examples are defined in the tool schema.\n\n"
+            "## INTERACTION FLOW\n"
+            f"You have {self.config.max_actions} actions per day. Each query/search/submit consumes 1 action.\n"
+            "When ready to move on, call `next_day()`.\n\n"
+            "## SUBMISSION RULES\n"
+            "- You may call `submit_forecasts` multiple times in a single day until actions run out.\n"
+            "- One `submit_forecasts` call may include forecasts for multiple question IDs.\n"
+            "- You may update earlier same-day forecasts by submitting again for the same qid.\n"
+            "- In peer-scoring mode, broader accurate coverage improves total score.\n"
         )
 
-        has_search = bool(self._search_handler.is_available)
-        end_day_num = 4 if has_search else 3
-        submit_num = 3 if has_search else 2
-
-        cutoff_desc = "today's date"
-        if has_search and self.config.search_cutoff_days > 0:
-            cutoff_date = current_date - timedelta(days=self.config.search_cutoff_days)
-            cutoff_desc = f"{cutoff_date} (today - {self.config.search_cutoff_days} days)"
-
-        search_tool_section = ""
-        if has_search:
-            search_tool_section = f"""
-### 2. Search News Articles
-Call tool:
-`search_news(query="...", from_date="YYYY-MM-DD" (optional), to_date="YYYY-MM-DD" (optional))`
-
-Notes:
-- `to_date` is capped at {cutoff_desc} (no future leakage).
-- Use at most one `search_news` call per turn.
-"""
-
-        suffix = f"""
-## RESPONSE FORMAT
-
-## ACTION TYPES
-
-### 1. Query Questions (explore data)
-Call tool:
-`query_df(code="print(df[df['is_resolved'] == False][['qid', 'title', 'answer_type']].head())")`
-`query_df` supports multi-line Python code in one call; statements execute sequentially.
-
-Use `print()` to ensure you see output. We are not executing in a jupyter notebook, so `.head()` preview alone can be unreliable.
-{search_tool_section}
-### {submit_num}. Submit Forecasts
-Call tool:
-`submit_forecasts(forecasts=[{{"qid":"QUESTION_ID","outcomes":{{"Answer1":0.5,"Answer2":0.3}}}}])`
-`submit_forecasts` accepts forecasts on multiple questions in one call via the `forecasts=[...]` list.
-
-### {end_day_num}. End Day (proceed to next day)
-Call tool:
-`next_day()`
-
-## INTERACTION FLOW
-You have {self.config.max_actions} actions per day. Each query, search, or submission uses 1 action.
-You can interleave queries, searches, and submissions as needed.
-When ready to move on, call `next_day()` to end your day.
-{memory_flow_note}
-
-## SUBMISSION RULES
-- qid must be from an active (is_resolved=False) question you saw in query results
-- One forecast per QID per submit action (can submit multiple times for different questions)
-- Max {self.config.max_outcomes_per_question} outcomes per question.
-- Outcome names must be REAL predicted answers (e.g., person names, locations, numbers)
-- NEVER use placeholders like "Unknown", "TBD", "Other", "N/A" - these ALWAYS hurt your score
-- Probabilities must sum to ≤ 1.0
-- Submit at least one forecast before ending your day
-
----
-
-You have {self.config.max_actions} actions available. Begin."""
-        return f"{prefix}\n\n{suffix.strip()}"
+    @staticmethod
+    def _build_final_submit_tool_instruction(target_qid: str) -> str:
+        """
+        Strict final-turn instruction for per-question loops.
+        """
+        return (
+            "FINAL ACTION (last chance): You have exactly 1 action remaining and MUST submit now.\n"
+            f"Target question ID: {target_qid}\n"
+            "Call exactly one tool: submit_forecasts.\n"
+            "Do NOT call query_df, search_news, or next_day.\n"
+            "Submit only this question id with concrete outcomes and probabilities (sum <= 1.0)."
+        )
 
     # =========================================================================
     # Harmony action loop
@@ -195,7 +199,7 @@ You have {self.config.max_actions} actions available. Begin."""
         self,
         *,
         instructions: str,
-        conversation: List[Dict[str, str]],
+        conversation: List[Dict[str, Any]],
         forecast_interface,
         target_qid: Optional[str] = None,
         enable_query: bool = True,
@@ -212,25 +216,62 @@ You have {self.config.max_actions} actions available. Begin."""
             enable_search=enable_search,
             max_outcomes_per_question=self.config.max_outcomes_per_question,
         )
-        # Record the actual instructions used for this loop in compact form.
-        instructions_text = instructions or ""
-        instructions_sha256 = hashlib.sha256(instructions_text.encode("utf-8")).hexdigest()
-        instructions_preview = instructions_text[:1500]
         prompt_mode = self._get_gptoss_prompt_mode()
         reasoning_effort = str(getattr(self.config, "gptoss_reasoning_effort", "medium") or "medium").strip().lower()
         include_reasoning = bool(getattr(self.config, "gptoss_include_reasoning", True))
+        final_submit_prompt_injected = False
 
         while actions_remaining > 0:
-            with self._timer.track("llm"):
-                resp_json = self._call_responses(
-                    instructions=instructions,
-                    conversation=conversation,
-                    tools=tools,
-                    sampling_params=self.config.sampling_params,
+            # Last-action guardrail for per-question runs: force a submit attempt.
+            if target_qid is not None and actions_remaining == 1 and not final_submit_prompt_injected:
+                conversation.append(
+                    {"role": "user", "content": self._build_final_submit_tool_instruction(target_qid)}
                 )
+                final_submit_prompt_injected = True
+
+            model_input_payload = self._build_model_input_for_logging(instructions=instructions, conversation=conversation)
+            try:
+                with self._timer.track("llm"):
+                    resp_json = self._call_responses_with_retries(
+                        instructions=instructions,
+                        conversation=conversation,
+                        tools=tools,
+                        sampling_params=self.config.sampling_params,
+                    )
+            except Exception as e:
+                if self._is_fatal_inference_failure(e):
+                    raise RuntimeError(f"Fatal inference failure in action loop: {e}") from e
+                actions_remaining -= 1
+                err_msg = f"LLM ERROR after retries: {e}"
+                self._log_harmony_action(
+                    forecast_interface=forecast_interface,
+                    conversation=conversation,
+                    rendered_response=err_msg,
+                    phase="llm_error",
+                    actions_remaining=actions_remaining,
+                    qid=target_qid,
+                    prompt_mode=prompt_mode,
+                    reasoning_effort=reasoning_effort,
+                    include_reasoning=include_reasoning,
+                    error=str(e),
+                    prompt_override=model_input_payload,
+                )
+                conversation.append(
+                    {
+                        "role": "user",
+                        "content": f"{err_msg}\n\nActions remaining: {actions_remaining}",
+                    }
+                )
+                continue
 
             parsed, assistant_text, tool_calls = response_to_action(resp_json)
             reasoning_text = extract_reasoning_text(resp_json)
+            assistant_messages = extract_assistant_messages(resp_json)
+            replay_items = extract_replay_items_for_tool_turn(resp_json)
+            reasoning_tokens_turn = extract_reasoning_token_count(resp_json)
+            status = resp_json.get("status")
+            incomplete_details = resp_json.get("incomplete_details") or {}
+            incomplete_reason = incomplete_details.get("reason") if isinstance(incomplete_details, dict) else None
 
             # Normalize Responses-API usage fields to the timer's expected schema.
             raw_usage = resp_json.get("usage") or {}
@@ -247,7 +288,20 @@ You have {self.config.max_actions} actions available. Begin."""
                 usage["prompt_tokens_details"] = usage.get("input_tokens_details")
             if "total_tokens" not in usage:
                 usage["total_tokens"] = usage.get("prompt_tokens", 0) + usage.get("completion_tokens", 0)
+            if "reasoning_tokens" not in usage and reasoning_tokens_turn > 0:
+                usage["reasoning_tokens"] = reasoning_tokens_turn
             self._timer.record_tokens(usage)
+
+            # Persist assistant side of the turn in Harmony-like structure.
+            self._append_assistant_turns(
+                conversation=conversation,
+                assistant_messages=assistant_messages,
+                assistant_text=assistant_text,
+                replay_items=replay_items,
+                tool_calls=tool_calls,
+                reasoning_text=reasoning_text,
+                replay_mode=str(getattr(self.config, "gptoss_replay_mode", "raw_recommended") or "raw_recommended"),
+            )
 
             # Log a compact representation (don’t shove huge JSON into logs).
             rendered = self._render_turn_for_logging(assistant_text, tool_calls)
@@ -261,19 +315,28 @@ You have {self.config.max_actions} actions available. Begin."""
                 prompt_mode=prompt_mode,
                 reasoning_effort=reasoning_effort,
                 include_reasoning=include_reasoning,
-                instructions_sha256=instructions_sha256,
-                instructions_preview=instructions_preview,
                 reasoning=reasoning_text if reasoning_text else None,
+                reasoning_tokens=reasoning_tokens_turn,
+                status=status,
+                incomplete_reason=incomplete_reason,
                 usage=usage,
+                prompt_override=model_input_payload,
             )
 
             if parsed is None:
                 # Model didn't call a tool. Consume an action and push back a firm reminder.
                 actions_remaining -= 1
-                feedback = (
-                    "No tool call detected. You MUST call exactly one tool each turn.\n\n"
-                    f"Actions remaining: {actions_remaining}"
-                )
+                if status == "incomplete" and incomplete_reason == "max_output_tokens":
+                    feedback = (
+                        "Response was incomplete because max_output_tokens was reached before a tool call. "
+                        "Call exactly one tool with concise arguments.\n\n"
+                        f"Actions remaining: {actions_remaining}"
+                    )
+                else:
+                    feedback = (
+                        "No tool call detected. You MUST call exactly one tool each turn.\n\n"
+                        f"Actions remaining: {actions_remaining}"
+                    )
                 conversation.append({"role": "user", "content": feedback})
                 continue
 
@@ -285,6 +348,7 @@ You have {self.config.max_actions} actions available. Begin."""
                     conversation=conversation,
                     forecast_interface=forecast_interface,
                     parsed=parsed,
+                    tool_call=tool_calls[0] if tool_calls else None,
                     actions_remaining=actions_remaining,
                     qid=target_qid,
                 )
@@ -295,6 +359,7 @@ You have {self.config.max_actions} actions available. Begin."""
                     conversation=conversation,
                     forecast_interface=forecast_interface,
                     parsed=parsed,
+                    tool_call=tool_calls[0] if tool_calls else None,
                     actions_remaining=actions_remaining,
                     qid=target_qid,
                 )
@@ -305,6 +370,7 @@ You have {self.config.max_actions} actions available. Begin."""
                     conversation=conversation,
                     forecast_interface=forecast_interface,
                     parsed=parsed,
+                    tool_call=tool_calls[0] if tool_calls else None,
                     actions_remaining=actions_remaining,
                     qid=target_qid,
                     target_qid=target_qid,
@@ -331,7 +397,7 @@ You have {self.config.max_actions} actions available. Begin."""
         self,
         *,
         instructions: str,
-        conversation: List[Dict[str, str]],
+        conversation: List[Dict[str, Any]],
         tools: List[Dict[str, Any]],
         sampling_params: Dict[str, Any],
     ) -> Dict[str, Any]:
@@ -341,6 +407,11 @@ You have {self.config.max_actions} actions available. Begin."""
             raise TypeError("GPTOSSBasicAgent currently requires provider=vllm (VLLMInference).")
 
         sp = dict(sampling_params or {})
+        min_output = int(getattr(self.config, "gptoss_min_max_output_tokens", 25000) or 0)
+        if min_output > 0:
+            current_max = int(sp.get("max_tokens", 0) or 0)
+            if current_max < min_output:
+                sp["max_tokens"] = min_output
         sp["tools"] = tools
         sp["tool_choice"] = "auto"  # vLLM Harmony requires this
 
@@ -351,8 +422,8 @@ You have {self.config.max_actions} actions available. Begin."""
         }
         effort = str(getattr(self.config, "gptoss_reasoning_effort", "medium") or "medium").strip().lower()
         if effort in ("low", "medium", "high"):
-            overrides["reasoning_effort"] = effort
-        overrides["include_reasoning"] = bool(getattr(self.config, "gptoss_include_reasoning", True))
+            # /v1/responses expects reasoning controls under `reasoning`.
+            overrides["reasoning"] = {"effort": effort}
 
         return self.inference.responses_json(
             instructions=instructions,
@@ -360,6 +431,60 @@ You have {self.config.max_actions} actions available. Begin."""
             sampling_params=sp,
             request_overrides=overrides,
         )
+
+    @staticmethod
+    def _is_fatal_inference_failure(error: Exception) -> bool:
+        """Detect inference failures that should abort immediately."""
+        msg = str(error).lower()
+        fatal_markers = (
+            "vllm server died on port",
+            "vllm server failed to start",
+            "vllm server process died immediately",
+            "engine core initialization failed",
+            "cuda out of memory occurred when warming up sampler",
+        )
+        return any(marker in msg for marker in fatal_markers)
+
+    def _call_responses_with_retries(
+        self,
+        *,
+        instructions: str,
+        conversation: List[Dict[str, Any]],
+        tools: List[Dict[str, Any]],
+        sampling_params: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        max_retries = max(0, int(getattr(self.config, "gptoss_responses_max_retries", 3)))
+        base_backoff = max(0.0, float(getattr(self.config, "gptoss_retry_backoff_base_s", 1.0)))
+        max_backoff = max(base_backoff, float(getattr(self.config, "gptoss_retry_backoff_max_s", 16.0)))
+        attempts = max_retries + 1
+
+        last_error: Optional[Exception] = None
+        for attempt in range(attempts):
+            try:
+                return self._call_responses(
+                    instructions=instructions,
+                    conversation=conversation,
+                    tools=tools,
+                    sampling_params=sampling_params,
+                )
+            except Exception as e:
+                last_error = e
+                if self._is_fatal_inference_failure(e):
+                    raise
+                if attempt >= max_retries:
+                    break
+                delay = min(max_backoff, base_backoff * (2 ** attempt))
+                # Add light jitter to prevent synchronized retries.
+                delay += delay * 0.2 * random.random()
+                print(
+                    f"[{self.agent_id}] /v1/responses error (attempt {attempt + 1}/{attempts}): {e}. "
+                    f"Retrying in {delay:.1f}s...",
+                    flush=True,
+                )
+                time.sleep(delay)
+
+        assert last_error is not None
+        raise last_error
 
     @staticmethod
     def _render_turn_for_logging(assistant_text: str, tool_calls: List[Dict[str, Any]]) -> str:
@@ -374,20 +499,145 @@ You have {self.config.max_actions} actions available. Begin."""
         self,
         *,
         forecast_interface,
-        conversation: List[Dict[str, str]],
+        conversation: List[Dict[str, Any]],
         rendered_response: str,
         phase: str,
         actions_remaining: int,
         qid: Optional[str] = None,
+        prompt_override: Optional[str] = None,
         **extra,
     ) -> None:
-        last_user = ""
-        for m in reversed(conversation):
-            if m.get("role") == "user":
-                last_user = m.get("content") or ""
-                break
+        last_user = prompt_override if isinstance(prompt_override, str) else ""
+        if not last_user:
+            for m in reversed(conversation):
+                if m.get("role") == "user":
+                    last_user = m.get("content") or ""
+                    break
         metadata = {"phase": phase, "actions_remaining": actions_remaining, "qid": qid, **extra}
         forecast_interface.log_model_output(last_user, rendered_response, metadata)
+
+    @staticmethod
+    def _build_model_input_for_logging(*, instructions: str, conversation: List[Dict[str, Any]]) -> str:
+        """
+        Render the exact Responses request-side context for this turn.
+        """
+        payload = {
+            "instructions": instructions or "",
+            "input": _to_responses_input(conversation),
+        }
+        return json.dumps(payload, ensure_ascii=False)
+
+    @staticmethod
+    def _append_tool_output_message(
+        conversation: List[Dict[str, Any]],
+        *,
+        tool_call: Optional[Dict[str, Any]],
+        tool_name: str,
+        output: str,
+    ) -> None:
+        if isinstance(tool_call, dict) and isinstance(tool_call.get("call_id"), str):
+            conversation.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": tool_call["call_id"],
+                    "output": output,
+                }
+            )
+            return
+
+        # Fallback for providers that do not expose call_id.
+        conversation.append(
+            {
+                "role": "tool",
+                "name": f"functions.{tool_name}",
+                "channel": "commentary",
+                "recipient": "assistant",
+                "content": output,
+            }
+        )
+
+    @staticmethod
+    def _append_assistant_turns(
+        *,
+        conversation: List[Dict[str, Any]],
+        assistant_messages: List[Dict[str, Any]],
+        assistant_text: str,
+        replay_items: List[Dict[str, Any]],
+        tool_calls: List[Dict[str, Any]],
+        reasoning_text: str,
+        replay_mode: str,
+    ) -> None:
+        if tool_calls and replay_mode == "raw_recommended" and replay_items:
+            conversation.extend(replay_items)
+            return
+
+        # If a final channel message exists, drop earlier analysis messages to
+        # avoid replaying stale chain-of-thought into later turns.
+        if assistant_messages:
+            has_final = any((m.get("channel") == "final") for m in assistant_messages)
+            if has_final:
+                cleaned: List[Dict[str, Any]] = []
+                seen_final = False
+                for m in assistant_messages:
+                    channel = m.get("channel")
+                    if not seen_final and channel == "analysis":
+                        continue
+                    cleaned.append(m)
+                    if channel == "final":
+                        seen_final = True
+                assistant_messages = cleaned
+
+        has_analysis_message = any((m.get("channel") == "analysis") for m in assistant_messages)
+        # Keep CoT for subsequent sampling when tools are being called.
+        if tool_calls and reasoning_text and not has_analysis_message:
+            conversation.append(
+                {
+                    "role": "assistant",
+                    "channel": "analysis",
+                    "content": reasoning_text,
+                }
+            )
+
+        # Preserve explicit assistant messages from model output when available.
+        if assistant_messages:
+            for m in assistant_messages:
+                content = m.get("content")
+                if not isinstance(content, str) or not content.strip():
+                    continue
+                conversation.append(
+                    {
+                        "role": "assistant",
+                        "channel": m.get("channel"),
+                        "recipient": m.get("recipient"),
+                        "content_type": m.get("content_type"),
+                        "content": content,
+                    }
+                )
+        elif assistant_text and assistant_text.strip():
+            # Fallback: if we only got flattened output text, preserve it with a sensible channel.
+            conversation.append(
+                {
+                    "role": "assistant",
+                    "channel": "commentary" if tool_calls else "final",
+                    "content": assistant_text.strip(),
+                }
+            )
+
+        # Keep explicit assistant tool-call messages in the transcript.
+        for tc in tool_calls:
+            name = tc.get("name")
+            args_raw = tc.get("arguments_raw")
+            if not isinstance(name, str) or not isinstance(args_raw, str):
+                continue
+            conversation.append(
+                {
+                    "role": "assistant",
+                    "channel": "commentary",
+                    "recipient": f"functions.{name}",
+                    "content_type": "json",
+                    "content": args_raw,
+                }
+            )
 
     # =========================================================================
     # Tool handlers
@@ -396,9 +646,10 @@ You have {self.config.max_actions} actions available. Begin."""
     def _harmony_handle_query(
         self,
         *,
-        conversation: List[Dict[str, str]],
+        conversation: List[Dict[str, Any]],
         forecast_interface,
         parsed: ParsedAction,
+        tool_call: Optional[Dict[str, Any]],
         actions_remaining: int,
         qid: Optional[str],
     ) -> int:
@@ -413,27 +664,43 @@ You have {self.config.max_actions} actions available. Begin."""
         else:
             feedback = f"QUERY ERROR: {parsed.error or 'Missing code'}\n\nActions remaining: {actions_remaining}"
 
-        conversation.append({"role": "user", "content": feedback})
+        self._append_tool_output_message(
+            conversation,
+            tool_call=tool_call,
+            tool_name="query_df",
+            output=feedback,
+        )
         return actions_remaining
 
     def _harmony_handle_search(
         self,
         *,
-        conversation: List[Dict[str, str]],
+        conversation: List[Dict[str, Any]],
         forecast_interface,
         parsed: ParsedAction,
+        tool_call: Optional[Dict[str, Any]],
         actions_remaining: int,
         qid: Optional[str],
     ) -> int:
         actions_remaining -= 1
         if not self._search_handler.is_available:
             feedback = f"SEARCH ERROR: Search is not available.\n\nActions remaining: {actions_remaining}"
-            conversation.append({"role": "user", "content": feedback})
+            self._append_tool_output_message(
+                conversation,
+                tool_call=tool_call,
+                tool_name="search_news",
+                output=feedback,
+            )
             return actions_remaining
 
         if not parsed.query:
             feedback = f"SEARCH ERROR: Missing query.\n\nActions remaining: {actions_remaining}"
-            conversation.append({"role": "user", "content": feedback})
+            self._append_tool_output_message(
+                conversation,
+                tool_call=tool_call,
+                tool_name="search_news",
+                output=feedback,
+            )
             return actions_remaining
 
         min_date = None
@@ -456,20 +723,27 @@ You have {self.config.max_actions} actions available. Begin."""
                 parsed.query,
                 max_results=self.config.max_search_results,
                 min_date=min_date,
+                max_date=max_date,
             )
         if error:
             feedback = f"SEARCH ERROR: {error}\n\nActions remaining: {actions_remaining}"
         else:
             feedback = f"SEARCH RESULTS:\n{result}\n\nActions remaining: {actions_remaining}"
-        conversation.append({"role": "user", "content": feedback})
+        self._append_tool_output_message(
+            conversation,
+            tool_call=tool_call,
+            tool_name="search_news",
+            output=feedback,
+        )
         return actions_remaining
 
     def _harmony_handle_submit(
         self,
         *,
-        conversation: List[Dict[str, str]],
+        conversation: List[Dict[str, Any]],
         forecast_interface,
         parsed: ParsedAction,
+        tool_call: Optional[Dict[str, Any]],
         actions_remaining: int,
         qid: Optional[str],
         target_qid: Optional[str],
@@ -494,7 +768,12 @@ You have {self.config.max_actions} actions available. Begin."""
         else:
             feedback = f"SUBMIT ERROR: {parsed.error or 'No valid forecasts'}\n\nActions remaining: {actions_remaining}"
 
-        conversation.append({"role": "user", "content": feedback})
+        self._append_tool_output_message(
+            conversation,
+            tool_call=tool_call,
+            tool_name="submit_forecasts",
+            output=feedback,
+        )
         return actions_remaining, submitted
 
     # =========================================================================
@@ -505,31 +784,92 @@ You have {self.config.max_actions} actions available. Begin."""
         self,
         *,
         instructions: str,
-        conversation: List[Dict[str, str]],
+        conversation: List[Dict[str, Any]],
         forecast_interface,
         current_date: date,
     ) -> None:
-        if not self._memory:
+        if self._memory is None:
             return
 
-        # Ask for memory update as a separate tool-call turn.
-        prompt = (
-            f"End of day {current_date}. If you want to update memory for tomorrow, "
-            "call update_memory(memory=...) with a complete replacement. "
-            "If you do not want to update memory, respond without calling any tool."
-        )
-        conversation.append({"role": "user", "content": prompt})
+        memory_prompt = f"""End of day {current_date}. You can now update your memory.
+
+## MEMORY UPDATE
+Your memory is the ONLY context you will retain tomorrow. Everything else (this conversation,
+queries, forecasts) will be forgotten. Tomorrow you'll receive a fresh system prompt with
+your memory included.
+
+Use memory to record:
+- Insights about recurring question patterns
+- Strategies that worked well or poorly
+- Important observations about data/trends
+- Notes about specific questions you're tracking
+
+Keep it CONCISE (a few paragraphs max) as it consumes your context window.
+
+To update memory, call this tool exactly once:
+`update_memory(memory="Your updated memory content here (complete replacement, not a diff)")`
+
+If you don't want to update memory, respond without calling any tool.
+Current memory length: {len(self._memory)} characters"""
+        conversation.append({"role": "user", "content": memory_prompt})
+        model_input_payload = self._build_model_input_for_logging(instructions=instructions, conversation=conversation)
 
         tools = build_memory_tools()
-        with self._timer.track("llm"):
-            resp_json = self._call_responses(
-                instructions=instructions,
+        try:
+            with self._timer.track("llm"):
+                resp_json = self._call_responses_with_retries(
+                    instructions=instructions,
+                    conversation=conversation,
+                    tools=tools,
+                    sampling_params=self.config.sampling_params,
+                )
+        except Exception as e:
+            self._log_harmony_action(
+                forecast_interface=forecast_interface,
                 conversation=conversation,
-                tools=tools,
-                sampling_params=self.config.sampling_params,
+                rendered_response=f"MEMORY UPDATE ERROR after retries: {e}",
+                phase="memory_update_error",
+                actions_remaining=-1,
+                current_memory_len=len(self._memory),
+                error=str(e),
+                prompt_override=model_input_payload,
             )
+            print(f"[{self.agent_id}] Memory update skipped after retries: {e}", flush=True)
+            return
+
+        reasoning_text = extract_reasoning_text(resp_json)
+        reasoning_tokens_turn = extract_reasoning_token_count(resp_json)
+        replay_items = extract_replay_items_for_tool_turn(resp_json)
+        status = resp_json.get("status")
+        incomplete_details = resp_json.get("incomplete_details") or {}
+        incomplete_reason = incomplete_details.get("reason") if isinstance(incomplete_details, dict) else None
+        raw_usage = resp_json.get("usage") or {}
+        usage = dict(raw_usage) if isinstance(raw_usage, dict) else {}
+        if "prompt_tokens" not in usage and "input_tokens" in usage:
+            usage["prompt_tokens"] = usage.get("input_tokens", 0)
+        if "completion_tokens" not in usage and "output_tokens" in usage:
+            usage["completion_tokens"] = usage.get("output_tokens", 0)
+        if "completion_tokens_details" not in usage and "output_tokens_details" in usage:
+            usage["completion_tokens_details"] = usage.get("output_tokens_details")
+        if "prompt_tokens_details" not in usage and "input_tokens_details" in usage:
+            usage["prompt_tokens_details"] = usage.get("input_tokens_details")
+        if "total_tokens" not in usage:
+            usage["total_tokens"] = usage.get("prompt_tokens", 0) + usage.get("completion_tokens", 0)
+        if "reasoning_tokens" not in usage and reasoning_tokens_turn > 0:
+            usage["reasoning_tokens"] = reasoning_tokens_turn
+        self._timer.record_tokens(usage)
 
         tool_calls = extract_function_calls(resp_json)
+        assistant_messages = extract_assistant_messages(resp_json)
+        self._append_assistant_turns(
+            conversation=conversation,
+            assistant_messages=assistant_messages,
+            assistant_text="",
+            replay_items=replay_items,
+            tool_calls=tool_calls,
+            reasoning_text=reasoning_text,
+            replay_mode=str(getattr(self.config, "gptoss_replay_mode", "raw_recommended") or "raw_recommended"),
+        )
         rendered = self._render_turn_for_logging("", tool_calls)
         self._log_harmony_action(
             forecast_interface=forecast_interface,
@@ -537,6 +877,13 @@ You have {self.config.max_actions} actions available. Begin."""
             rendered_response=rendered,
             phase="memory_update",
             actions_remaining=-1,
+            current_memory_len=len(self._memory),
+            reasoning=reasoning_text if reasoning_text else None,
+            reasoning_tokens=reasoning_tokens_turn,
+            status=status,
+            incomplete_reason=incomplete_reason,
+            usage=usage,
+            prompt_override=model_input_payload,
         )
 
         # Apply update if present.
@@ -548,6 +895,12 @@ You have {self.config.max_actions} actions available. Begin."""
                 mem = args.get("memory")
                 if isinstance(mem, str) and mem.strip():
                     self._memory.update(mem)
+                    self._append_tool_output_message(
+                        conversation,
+                        tool_call=tc,
+                        tool_name="update_memory",
+                        output=f"Memory updated ({len(mem)} characters).",
+                    )
                     break
 
 
@@ -566,12 +919,10 @@ class GPTOSSAllQAgent(AllQAgent, GPTOSSBasicAgent):
         forecast_interface.current_agent_id = self.agent_id
 
         # Warm server before high parallelism.
-        try:
-            from inference.vllm import VLLMInference
-            if isinstance(self.inference, VLLMInference):
-                self.inference.chat([{"role": "user", "content": "ping"}], {"temperature": 0.0, "max_tokens": 1})
-        except Exception:
-            pass
+        from inference.vllm import VLLMInference
+        if isinstance(self.inference, VLLMInference):
+            # Fail fast if the agent vLLM server cannot start.
+            self.inference.chat([{"role": "user", "content": "ping"}], {"temperature": 0.0, "max_tokens": 1})
 
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -580,7 +931,11 @@ class GPTOSSAllQAgent(AllQAgent, GPTOSSBasicAgent):
 
         def _run_one(q):
             instructions = self._build_harmony_warmup_instructions(current_date, q, forecast_interface=forecast_interface)
-            instructions_for_api, convo = self._seed_harmony_conversation(instructions)
+            instructions_for_api, convo = self._seed_harmony_conversation(
+                instructions,
+                current_date,
+                actions_remaining=int(getattr(self.config, "warmup_max_actions", 10)),
+            )
             self._run_harmony_action_loop(
                 instructions=instructions_for_api,
                 conversation=convo,
@@ -600,6 +955,17 @@ class GPTOSSAllQAgent(AllQAgent, GPTOSSBasicAgent):
                         print(f"[{self.agent_id}] Warmup Progress: {i+1}/{len(questions)}")
                 except Exception as e:
                     print(f"[{self.agent_id}] Error processing question {qid}: {e}")
+                    if self._is_fatal_inference_failure(e):
+                        print(
+                            f"[{self.agent_id}] Fatal inference failure detected. Aborting warmup immediately.",
+                            flush=True,
+                        )
+                        for pending in futs:
+                            if not pending.done():
+                                pending.cancel()
+                        raise RuntimeError(
+                            f"[{self.agent_id}] Warmup aborted due to fatal inference failure: {e}"
+                        ) from e
 
         self.warmed_up = True
         self._timer.end_day()
@@ -610,52 +976,17 @@ class GPTOSSAllQAgent(AllQAgent, GPTOSSBasicAgent):
 
     def _build_harmony_warmup_instructions(self, current_date: date, q, forecast_interface=None) -> str:
         base_prompt = AllQAgent._build_warmup_system_prompt(self, current_date, q, forecast_interface=forecast_interface)
-        return self._rewrite_allq_warmup_prompt_for_harmony(base_prompt, current_date, q.qid)
+        return self._rewrite_allq_warmup_prompt_for_harmony(base_prompt, q.qid)
 
-    def _rewrite_allq_warmup_prompt_for_harmony(self, base_prompt: str, current_date: date, target_qid: str) -> str:
-        # Keep question context/scoring exactly as AllQ, replace action/response formatting section.
-        if "## ACTIONS" in base_prompt:
-            prefix = base_prompt.split("## ACTIONS", 1)[0].rstrip()
-        else:
-            prefix = base_prompt.rstrip()
-
-        has_search = bool(self._search_handler.is_available)
-        cutoff_desc = "today's date"
-        if has_search and self.config.search_cutoff_days > 0:
-            cutoff_date = current_date - timedelta(days=self.config.search_cutoff_days)
-            cutoff_desc = f"{cutoff_date} (today - {self.config.search_cutoff_days} days)"
-
-        search_section = ""
-        submit_num = 1
-        if has_search:
-            submit_num = 2
-            search_section = f"""
-### 1. Search News Articles
-Call tool:
-`search_news(query="...", from_date="YYYY-MM-DD" (optional), to_date="YYYY-MM-DD" (optional))`
-
-Notes:
-- `to_date` is capped at {cutoff_desc} (no future leakage).
-- Use at most one `search_news` call per turn.
-"""
-
-        suffix = f"""
-## ACTIONS
-You have {self.config.warmup_max_actions} actions to research and forecast this question.
-
-{search_section}
-### {submit_num}. Submit Forecast
-Call tool:
-`submit_forecasts(forecasts=[{{"qid":"{target_qid}","outcomes":{{"Answer1":0.5,"Answer2":0.3}}}}])`
-`submit_forecasts` supports forecasts on multiple questions, but in warmup you should submit for qid `{target_qid}` only.
-
-(Submitting ends your turn for this question).
-
-## SUBMISSION RULES
-- qid must be {target_qid}
-- Outcome names must be REAL predicted answers (e.g., person names, locations, numbers)
-- You can submit up to {self.config.max_outcomes_per_question} outcomes per question.
-- NEVER use placeholders like "Unknown", "TBD", "Other", "N/A" - these ALWAYS hurt your score
-- Probabilities must sum to ≤ 1.0
-"""
-        return f"{prefix}\n\n{suffix.strip()}\n"
+    def _rewrite_allq_warmup_prompt_for_harmony(self, base_prompt: str, target_qid: str) -> str:
+        del target_qid
+        prefix = base_prompt
+        if "## RESPONSE FORMAT" in base_prompt:
+            prefix = base_prompt.split("## RESPONSE FORMAT", 1)[0].rstrip()
+        return (
+            f"{prefix}\n\n"
+            "## RESPONSE FORMAT\n"
+            "Use function tools only (no XML tags).\n"
+            "- Call exactly ONE tool per turn.\n"
+            "- Tool signatures, constraints, and examples are defined in the tool schema.\n"
+        )

@@ -79,7 +79,7 @@ class BasicAgent(BaseAgent):
         self._timer.start_day()
         
         # Load memory for this date (loads most recent snapshot before current_date)
-        if self._memory:
+        if self._memory is not None:
             self._memory.set_date(current_date)
         
         # Setup handlers
@@ -92,7 +92,7 @@ class BasicAgent(BaseAgent):
         all_forecasts = self._run_action_loop(messages, forecast_interface)
         
         # End of day: memory update (always happens)
-        if self._memory:
+        if self._memory is not None:
             self._prompt_memory_update(messages, forecast_interface, current_date)
         
         # End timing and save stats
@@ -235,7 +235,8 @@ class BasicAgent(BaseAgent):
                 result, error = self._search_handler.search(
                     parsed.query, 
                     max_results=self.config.max_search_results,
-                    min_date=min_date
+                    min_date=min_date,
+                    max_date=max_date,
                 )
             self._log_action(forecast_interface, messages, response, "search", actions_remaining, qid=qid, reasoning=reasoning)
             
@@ -410,7 +411,7 @@ Example (if options are ["Candidate A", "Candidate B", "Candidate C"]):
         df_info = self._query_handler.get_info()
         
         memory_section = ""
-        if self._memory:
+        if self._memory is not None:
             memory_section = f"""## YOUR MEMORY FROM PREVIOUS DAYS
 <memory>
 {self._memory.get()}

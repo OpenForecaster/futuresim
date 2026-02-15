@@ -107,7 +107,7 @@ dependencies = [
     "kiwisolver",
     "lance-namespace",
     "lance-namespace-urllib3-client",
-    "lancedb",
+    "lancedb==0.29.1",
     "langdetect",
     "lark",
     "llguidance",

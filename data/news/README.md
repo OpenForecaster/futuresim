@@ -28,7 +28,8 @@ cd ~/forecast-sim
 ```
 
 `setup_news_pipeline.sh` also ensures required NLTK tokenizer data is present (e.g. `punkt_tab`),
-so the CCNews crawl does not fail on HTCondor nodes due to missing NLTK resources.
+and installs `indic-nlp-library` in `fsim` to avoid newspaper4k extraction failures on Bengali pages.
+If either setup step fails, the script exits non-zero.
 
 ### Step 0: Configure news-please
 

@@ -28,6 +28,43 @@ class AllQAgent(BasicAgent):
         super().__init__(agent_id, inference_provider, config, model_name, search_tool)
         self.start_date = start_date
         self.warmed_up = False
+
+    @staticmethod
+    def _is_fatal_inference_failure(error: Exception) -> bool:
+        """Detect inference failures that should abort the run immediately."""
+        msg = str(error).lower()
+        fatal_markers = (
+            "vllm server died on port",
+            "vllm server failed to start",
+            "vllm server process died immediately",
+            "engine core initialization failed",
+            "cuda out of memory occurred when warming up sampler",
+        )
+        return any(marker in msg for marker in fatal_markers)
+
+    def _build_final_submit_instruction(self, target_qid: str) -> str:
+        """
+        Build a strict, last-action instruction that forces a submission attempt.
+        This is injected as an extra user turn when only one action remains.
+        """
+        if getattr(self.config, "singleans", False):
+            return (
+                "FINAL ACTION (last chance): You have exactly 1 action remaining and must submit now.\n"
+                f"Target question ID: {target_qid}\n"
+                "Do NOT search, query, or skip.\n"
+                "Respond ONLY with:\n"
+                "<answer>...</answer>\n"
+                "<probability>...</probability>\n"
+                "No extra text."
+            )
+
+        return (
+            "FINAL ACTION (last chance): You have exactly 1 action remaining and must submit now.\n"
+            f"Target question ID: {target_qid}\n"
+            "Do NOT use search, query, or next.\n"
+            "Return exactly one submit action for this qid only:\n"
+            f"<action type=\"submit\"><forecast qid=\"{target_qid}\">...</forecast></action>"
+        )
         
     def warmup(self, forecast_interface, current_date: date) -> None:
         """
@@ -51,13 +88,11 @@ class AllQAgent(BasicAgent):
         # Critical for local vLLM: start the agent server ONCE before fanning out
         # to many threads. Otherwise, thread-level failures/timeouts can lead to
         # repeated server start attempts and instability.
-        try:
-            from inference.vllm import VLLMInference
-            if isinstance(self.inference, VLLMInference):
-                print(f"[{self.agent_id}] Warming up agent vLLM server before parallel warmup...")
-                self.inference.chat([{"role": "user", "content": "ping"}], {"temperature": 0.0, "max_tokens": 1})
-        except Exception as e:
-            print(f"[{self.agent_id}] Warning: agent vLLM warmup failed: {e}")
+        from inference.vllm import VLLMInference
+        if isinstance(self.inference, VLLMInference):
+            print(f"[{self.agent_id}] Warming up agent vLLM server before parallel warmup...")
+            # Fail fast: if startup/warmup fails, abort instead of spending hours on retries.
+            self.inference.chat([{"role": "user", "content": "ping"}], {"temperature": 0.0, "max_tokens": 1})
         
         # Parallel execution for warmup
         from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -81,6 +116,17 @@ class AllQAgent(BasicAgent):
                         print(f"[{self.agent_id}] Warmup Progress: {i+1}/{len(questions)}")
                 except Exception as e:
                     print(f"[{self.agent_id}] Error processing question {qid}: {e}")
+                    if self._is_fatal_inference_failure(e):
+                        print(
+                            f"[{self.agent_id}] Fatal inference failure detected. Aborting warmup immediately.",
+                            flush=True,
+                        )
+                        for pending in future_to_qid:
+                            if not pending.done():
+                                pending.cancel()
+                        raise RuntimeError(
+                            f"[{self.agent_id}] Warmup aborted due to fatal inference failure: {e}"
+                        ) from e
             
         self.warmed_up = True
         
@@ -149,8 +195,14 @@ class AllQAgent(BasicAgent):
         - All actions are tagged with target_qid for searchable logs
         """
         actions_remaining = self.config.warmup_max_actions
+        final_submit_prompt_injected = False
         
         while actions_remaining > 0:
+            # Last-action guardrail: explicitly force a submit attempt.
+            if actions_remaining == 1 and not final_submit_prompt_injected:
+                messages.append({"role": "user", "content": self._build_final_submit_instruction(target_qid)})
+                final_submit_prompt_injected = True
+
             # Get response
             with self._timer.track("llm"):
                 response, usage = self.inference.chat(messages, self.config.sampling_params)
@@ -402,13 +454,11 @@ class AllQDailyAgent(AllQAgent):
 
         # Start the agent server before parallelizing across questions (same rationale
         # as AllQ warmup).
-        try:
-            from inference.vllm import VLLMInference
-            if isinstance(self.inference, VLLMInference):
-                print(f"[{self.agent_id}] Warming up agent vLLM server before parallel allqd...")
-                self.inference.chat([{"role": "user", "content": "ping"}], {"temperature": 0.0, "max_tokens": 1})
-        except Exception as e:
-            print(f"[{self.agent_id}] Warning: agent vLLM warmup failed: {e}")
+        from inference.vllm import VLLMInference
+        if isinstance(self.inference, VLLMInference):
+            print(f"[{self.agent_id}] Warming up agent vLLM server before parallel allqd...")
+            # Fail fast: if startup/warmup fails, abort instead of wasting the whole day loop.
+            self.inference.chat([{"role": "user", "content": "ping"}], {"temperature": 0.0, "max_tokens": 1})
 
         # Parallel execution across questions
         from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -429,6 +479,17 @@ class AllQDailyAgent(AllQAgent):
                         print(f"[{self.agent_id}] ALLQD Progress: {i+1}/{len(questions)}")
                 except Exception as e:
                     print(f"[{self.agent_id}] Error processing question {qid}: {e}")
+                    if self._is_fatal_inference_failure(e):
+                        print(
+                            f"[{self.agent_id}] Fatal inference failure detected. Aborting allqd immediately.",
+                            flush=True,
+                        )
+                        for pending in future_to_qid:
+                            if not pending.done():
+                                pending.cancel()
+                        raise RuntimeError(
+                            f"[{self.agent_id}] ALLQD aborted due to fatal inference failure: {e}"
+                        ) from e
 
         # End timing and save stats
         self._timer.end_day()

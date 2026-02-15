@@ -326,8 +326,8 @@ class SimulationEnvironment:
         self.agent_scores: Dict[str, float] = {}  # Cumulative time-weighted peer scores
         
         # Track prediction outcomes for summary
-        self.agent_correct: Dict[str, int] = {}  # Count of positive scores
-        self.agent_wrong: Dict[str, int] = {}    # Count of negative scores
+        self.agent_correct: Dict[str, int] = {}  # Count of top-choice matches
+        self.agent_wrong: Dict[str, int] = {}    # Count of top-choice misses
         self.agent_questions: Dict[str, int] = {}  # Total questions predicted on
         
         # Additional metrics for final summary
@@ -593,6 +593,42 @@ class SimulationEnvironment:
         # 6. Save daily metrics
         self._save_daily_metrics()
     
+    def _normalize_outcome(self, s: str) -> str:
+        """Normalize outcome strings for deterministic exact matching."""
+        return s.lower().replace(" ", "").strip()
+
+    def _is_top_choice_correct(
+        self,
+        pred: DailyPrediction,
+        ground_truth: str,
+        question_id: Optional[str] = None,
+        question_title: Optional[str] = None
+    ) -> bool:
+        """Return True when the highest-probability predicted outcome matches truth."""
+        if not pred or not pred.outcomes:
+            return False
+
+        max_prob = -1.0
+        best_outcome = None
+        for outcome, prob in pred.outcomes.items():
+            if prob > max_prob:
+                max_prob = prob
+                best_outcome = outcome
+
+        if not best_outcome:
+            return False
+
+        if self.matcher:
+            return self.matcher.is_equivalent(
+                best_outcome,
+                ground_truth,
+                question_id=question_id,
+                question_title=question_title,
+                match_type="check_guess"
+            )
+
+        return self._normalize_outcome(best_outcome) == self._normalize_outcome(ground_truth)
+
     def _compute_daily_active_scores(self, active_questions: List[Question]):
         """
         Compute daily scores only for the currently active questions.
@@ -600,11 +636,7 @@ class SimulationEnvironment:
         Includes Brier score, Peer score, TW-Peer score, and Accuracy.
         """
         active_stats = {}
-        
-        # Helper normalization for accuracy check
-        def normalize(s: str) -> str:
-            return s.lower().replace(" ", "").strip()
-        
+
         from environment.scoring import resolve_question, compute_snapshot_peer_scores
             
         for q in active_questions:
@@ -657,26 +689,13 @@ class SimulationEnvironment:
                     brier = self.scorer.score_prediction(pred, q.ground_truth_answer, self.matcher,
                                                           question_id=q.qid, question_title=q.title)
                     
-                    # Accuracy: Highest probability guess matches truth (ties broken arbitrarily)
-                    # Find outcome with max probability
-                    max_prob = -1.0
-                    best_outcome = None
-                    for outcome, prob in pred.outcomes.items():
-                        if prob > max_prob:
-                            max_prob = prob
-                            best_outcome = outcome
-                    
-                    # Check match
-                    is_accurate = False
-                    if best_outcome:
-                        if self.matcher:
-                            if self.matcher.is_equivalent(best_outcome, q.ground_truth_answer,
-                                                          question_id=q.qid, question_title=q.title,
-                                                          match_type="check_guess"):
-                                is_accurate = True
-                        else:
-                            if normalize(best_outcome) == normalize(q.ground_truth_answer):
-                                is_accurate = True
+                    # Accuracy: Highest probability guess matches truth (ties broken by insertion order)
+                    is_accurate = self._is_top_choice_correct(
+                        pred,
+                        q.ground_truth_answer,
+                        question_id=q.qid,
+                        question_title=q.title
+                    )
                     
                     # Aggregate stats
                     if aid not in active_stats:
@@ -850,10 +869,19 @@ class SimulationEnvironment:
         for agent_id, score in result.agent_scores.items():
             if agent_id in self.agent_scores:
                 self.agent_scores[agent_id] += score
+                pred = final_snapshot.get(agent_id)
+                if pred is None:
+                    continue
+
                 self.agent_questions[agent_id] = self.agent_questions.get(agent_id, 0) + 1
-                if score > 0:
+                if self._is_top_choice_correct(
+                    pred,
+                    q.ground_truth_answer,
+                    question_id=q.qid,
+                    question_title=q.title
+                ):
                     self.agent_correct[agent_id] = self.agent_correct.get(agent_id, 0) + 1
-                elif score < 0:
+                else:
                     self.agent_wrong[agent_id] = self.agent_wrong.get(agent_id, 0) + 1
                 
         self.logger.log_resolution(
@@ -953,6 +981,12 @@ class SimulationEnvironment:
                         # Restore scores and resolved status
                         qid = str(record.get("question_id")) if record.get("question_id") is not None else None
                         scores = record.get("agent_scores", {})
+                        ground_truth = record.get("ground_truth", "")
+                        q = self.q_pool.get_question(qid) if qid else None
+                        question_title = q.title if q else None
+
+                        history = self.prediction_histories.get(qid) if qid else None
+                        final_snapshot = history.get_all_current_predictions() if history else {}
                         
                         # Restore raw_brier and snapshot_peer if available (new format)
                         raw_brier = record.get("raw_brier", {})
@@ -962,10 +996,23 @@ class SimulationEnvironment:
                         for aid, score in scores.items():
                             self.agent_scores[aid] = self.agent_scores.get(aid, 0.0) + score
                             self.agent_questions[aid] = self.agent_questions.get(aid, 0) + 1
-                            if score > 0:
-                                self.agent_correct[aid] = self.agent_correct.get(aid, 0) + 1
-                            elif score < 0:
-                                self.agent_wrong[aid] = self.agent_wrong.get(aid, 0) + 1
+                            pred = final_snapshot.get(aid)
+                            if pred and ground_truth:
+                                if self._is_top_choice_correct(
+                                    pred,
+                                    ground_truth,
+                                    question_id=qid,
+                                    question_title=question_title
+                                ):
+                                    self.agent_correct[aid] = self.agent_correct.get(aid, 0) + 1
+                                else:
+                                    self.agent_wrong[aid] = self.agent_wrong.get(aid, 0) + 1
+                            else:
+                                # Backward-compatible fallback for older logs without enough data.
+                                if score > 0:
+                                    self.agent_correct[aid] = self.agent_correct.get(aid, 0) + 1
+                                elif score < 0:
+                                    self.agent_wrong[aid] = self.agent_wrong.get(aid, 0) + 1
                             
                             # Restore raw_brier if logged
                             if aid in raw_brier:

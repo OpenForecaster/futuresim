@@ -12,6 +12,7 @@ import json
 import atexit
 import subprocess
 import socket
+import sys
 from threading import Lock, Condition
 from dataclasses import dataclass
 
@@ -184,9 +185,10 @@ class VLLMInference:
         
             print(f"Starting VLLM server for {self.model_name} on port {self._port}...", flush=True)
         
-            # Start server process
+            # Start server process through a local wrapper so repo-level
+            # compatibility patches can be applied reproducibly.
             cmd = [
-                "python", "-m", "vllm.entrypoints.openai.api_server",
+                sys.executable, "-m", "inference.vllm_api_server_wrapper",
                 "--model", self.model_path,
                 "--port", str(self._port),
                 "--gpu-memory-utilization", str(self.gpu_mem),
@@ -241,7 +243,51 @@ class VLLMInference:
                     content = f.read()
                 print(f"  ERROR: Server process died immediately! Exit code: {proc.returncode}", flush=True)
                 print(f"  Server log:\n{content[:1000]}", flush=True)
-                raise RuntimeError(f"VLLM server process died immediately on port {self._port}")
+                if self.rope_scaling and "--rope-scaling" in " ".join(cmd) and "unrecognized arguments: --rope-scaling" in content:
+                    # Compatibility fallback for older vLLM builds:
+                    # pass rope_scaling through HF config overrides.
+                    print("  [VLLM] --rope-scaling unsupported; retrying with --hf-overrides rope_scaling.", flush=True)
+                    try:
+                        self._log_file.close()
+                    except Exception:
+                        pass
+                    try:
+                        proc.terminate()
+                    except Exception:
+                        pass
+                    cmd2 = list(cmd)
+                    if "--rope-scaling" in cmd2:
+                        i = cmd2.index("--rope-scaling")
+                        # Remove flag and its JSON argument.
+                        del cmd2[i:i+2]
+                    cmd2 += ["--hf-overrides", json.dumps({"rope_scaling": self.rope_scaling}, separators=(",", ":"))]
+                    self._log_file = open(log_file, 'w')
+                    proc = subprocess.Popen(
+                        cmd2,
+                        stdout=self._log_file,
+                        stderr=subprocess.STDOUT,
+                        env=self._build_subprocess_env(),
+                    )
+                    with _SERVERS_LOCK:
+                        _VLLM_SERVERS[str(self._port)] = {
+                            'process': proc,
+                            'model_path': self.model_path,
+                            'cuda_visible_devices': self.cuda_visible_devices,
+                            'tensor_parallel_size': self.tensor_parallel_size,
+                        }
+                    time.sleep(0.5)
+                    if proc.poll() is not None:
+                        self._log_file.flush()
+                        with open(log_file, 'r') as f:
+                            content2 = f.read()
+                        print(f"  ERROR: Retry with --hf-overrides also failed! Exit code: {proc.returncode}", flush=True)
+                        print(f"  Server log:\n{content2[:1000]}", flush=True)
+                        raise RuntimeError(
+                            "vLLM does not support configured rope scaling on this node "
+                            "(both --rope-scaling and --hf-overrides path failed)."
+                        )
+                else:
+                    raise RuntimeError(f"VLLM server process died immediately on port {self._port}")
         
             # Wait for server to be ready with detailed progress
             print(f"  Waiting for server to be ready...", flush=True)
@@ -341,6 +387,19 @@ class VLLMInference:
         env = os.environ.copy()
         if self.cuda_visible_devices is not None:
             env["CUDA_VISIBLE_DEVICES"] = str(self.cuda_visible_devices)
+        # Ensure subprocess can import local modules (inference.* wrapper).
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        existing_pythonpath = env.get("PYTHONPATH", "")
+        path_items = [p for p in existing_pythonpath.split(os.pathsep) if p] if existing_pythonpath else []
+        if repo_root not in path_items:
+            env["PYTHONPATH"] = (
+                repo_root if not existing_pythonpath else f"{repo_root}{os.pathsep}{existing_pythonpath}"
+            )
+        # Enable permissive Harmony parser mode by default for GPT-OSS.
+        # This mitigates malformed-header parse failures without editing
+        # site-packages directly.
+        if self._is_gpt_oss and "FSIM_VLLM_HARMONY_NON_STRICT" not in env:
+            env["FSIM_VLLM_HARMONY_NON_STRICT"] = "1"
         return env
 
     def embed(self, texts: List[str], use_tqdm: bool = False) -> List[_EmbedItem]:
@@ -462,6 +521,39 @@ class VLLMInference:
             pass
         usage = data.get("usage", {}) or {}
         return "".join(chunks), usage
+
+    @staticmethod
+    def _normalize_responses_overrides(overrides: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Normalize caller-side /v1/responses overrides to the schema expected by
+        current vLLM Responses endpoints.
+
+        Notes:
+        - vLLM expects reasoning effort under `reasoning: {"effort": ...}` for
+          GPT-OSS Harmony system message construction.
+        - Some callers still pass legacy top-level keys like `reasoning_effort`
+          and `include_reasoning`; map/drop those to avoid ignored-field warnings.
+        """
+        if not overrides:
+            return {}
+
+        normalized = dict(overrides)
+
+        effort_raw = normalized.pop("reasoning_effort", None)
+        if isinstance(effort_raw, str):
+            effort = effort_raw.strip().lower()
+            if effort in ("none", "minimal", "low", "medium", "high", "xhigh"):
+                reasoning_cfg = normalized.get("reasoning")
+                if not isinstance(reasoning_cfg, dict):
+                    reasoning_cfg = {}
+                reasoning_cfg = dict(reasoning_cfg)
+                reasoning_cfg.setdefault("effort", effort)
+                normalized["reasoning"] = reasoning_cfg
+
+        # /v1/responses does not accept this top-level field on vLLM 0.13.
+        normalized.pop("include_reasoning", None)
+
+        return normalized
     
     def chat(self, messages: List[Dict[str, str]], sampling_params: Dict[str, Any]) -> Tuple[str, Dict]:
         """
@@ -507,7 +599,6 @@ class VLLMInference:
             payload["tools"] = sampling_params["tools"]
         if "tool_choice" in sampling_params:
             payload["tool_choice"] = sampling_params["tool_choice"]
-        
         session = self._get_session()
         
         for attempt in range(3):
@@ -590,6 +681,12 @@ class VLLMInference:
             payload["tools"] = sampling_params["tools"]
         if "tool_choice" in sampling_params:
             payload["tool_choice"] = sampling_params["tool_choice"]
+        responses_overrides = {
+            k: sampling_params[k]
+            for k in ("reasoning", "reasoning_effort", "include_reasoning")
+            if k in sampling_params
+        }
+        payload.update(self._normalize_responses_overrides(responses_overrides))
 
         session = self._get_session()
         for attempt in range(3):
@@ -660,7 +757,7 @@ class VLLMInference:
             payload["tool_choice"] = sampling_params["tool_choice"]
         if request_overrides:
             # e.g. {"parallel_tool_calls": False, "max_tool_calls": 1}
-            payload.update(request_overrides)
+            payload.update(self._normalize_responses_overrides(request_overrides))
 
         session = self._get_session()
         for attempt in range(3):

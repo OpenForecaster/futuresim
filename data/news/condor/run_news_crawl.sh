@@ -36,6 +36,8 @@ mkdir -p "$ARTICLES_DIR"
 
 # Activate environment
 source ~/forecast-sim/fsim/bin/activate
+# Use shared tokenizer data provisioned by setup_news_pipeline.sh
+export NLTK_DATA="${NLTK_DATA:-/home/sgoel/forecast-sim/fsim/nltk_data}"
 
 # Navigate to news-please
 cd "$REPO_DIR/news-please"

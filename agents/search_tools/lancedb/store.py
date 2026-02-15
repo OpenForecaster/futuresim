@@ -108,28 +108,27 @@ class LanceDBSearchTool(BaseSearchTool):
                 self._load_embedding_model()
                 
                 if not self._embedding_model:
-                    # Fall back to keyword search if no model
-                    print("[LanceDB] No embedding model available, falling back to keyword search")
-                    results = self._table.search(query, query_type="fts")
+                    print("[LanceDB] No embedding model available for semantic/hybrid search")
+                    return []
                 else:
-                    try:
-                        # Encode query with instruction prefix (per Qwen3-Embedding docs)
-                        query_embedding = self._encode_query(query)
-                        if search_type == "semantic":
-                            results = self._table.search(query_embedding)
-                        else:  # hybrid - use separate vector() and text()
-                            results = self._table.search(query_type="hybrid").vector(query_embedding).text(query)
-                    except Exception as e:
-                        print(f"[LanceDB] Embedding/Hybrid search failed: {e}. Falling back to keyword search.")
-                        results = self._table.search(query, query_type="fts")
+                    # Encode query with instruction prefix (per Qwen3-Embedding docs)
+                    query_embedding = self._encode_query(query)
+                    if not query_embedding:
+                        print("[LanceDB] Empty query embedding returned by embedding model")
+                        return []
+                    if search_type == "semantic":
+                        results = self._table.search(query_embedding)
+                    else:  # hybrid - use separate vector() and text()
+                        results = self._table.search(query_type="hybrid").vector(query_embedding).text(query)
             
             if where:
-                # CRITICAL: prefilter=True ensures date filtering happens BEFORE vector search
-                # Without this, post-filtering can return 0 results if top-N vectors fall outside date range
-                results = results.where(where, prefilter=True)
-            return self._to_results(results.limit(max_results).to_list())
+                # Use prefilter=False consistently across search modes for reproducibility.
+                # In current LanceDB hybrid, prefilter=True is wired incorrectly.
+                results = results.where(where, prefilter=False)
+            rows = results.limit(max_results).to_list()
+            return self._to_results(rows)
         except Exception as e:
-            print(f"[LanceDB] Search error: {e}")
+            print(f"[LanceDB] Search failed ({search_type}): {e}")
             return []
     
     def _encode_query(self, query: str) -> list:
@@ -142,10 +141,20 @@ class LanceDBSearchTool(BaseSearchTool):
         if hasattr(self._embedding_model, 'embed'):
             # vLLM model - suppress progress bar
             outputs = self._embedding_model.embed([instruct_query], use_tqdm=False)
+            if not outputs:
+                print("[LanceDB] Embedding API returned no outputs")
+                return []
+            if not outputs[0].outputs.embedding:
+                print("[LanceDB] Embedding API returned an empty embedding vector")
+                return []
             return outputs[0].outputs.embedding
         else:
             # sentence-transformers or similar
-            return self._embedding_model.encode(instruct_query).tolist()
+            vec = self._embedding_model.encode(instruct_query).tolist()
+            if not vec:
+                print("[LanceDB] Embedding model returned an empty embedding vector")
+                return []
+            return vec
     
     def get_article(self, article_id: str) -> Optional[Article]:
         if not self._available:

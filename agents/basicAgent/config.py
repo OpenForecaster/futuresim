@@ -37,6 +37,17 @@ class AgentConfig:
     # reasoning_effort: "low" | "medium" | "high"
     gptoss_reasoning_effort: str = "medium"
     gptoss_include_reasoning: bool = True
+    # Replay policy for GPT-OSS tool turns:
+    # - "sanitized": rebuild assistant/tool transcript from parsed fields
+    # - "raw_recommended": replay only reasoning/function_call/function_call_output items
+    gptoss_replay_mode: str = "raw_recommended"
+    # Reserve output budget for reasoning+visible tokens on GPT-OSS Responses calls.
+    # 0 disables clamping; otherwise max_output_tokens is raised to at least this value.
+    gptoss_min_max_output_tokens: int = 25000
+    # GPT-OSS Responses retry controls.
+    gptoss_responses_max_retries: int = 3
+    gptoss_retry_backoff_base_s: float = 1.0
+    gptoss_retry_backoff_max_s: float = 16.0
     
     def __post_init__(self):
         if self.sampling_params is None:

@@ -229,9 +229,12 @@ def create_inference_provider(provider: str, model: str, args):
     if provider == "vllm":
         from inference.vllm import VLLMInference
         rope_scaling = getattr(args, "rope_scaling", None)
+        agent_max_model_len = getattr(args, "agent_max_model_len", None)
+        if agent_max_model_len is None:
+            agent_max_model_len = args.max_model_len
         return VLLMInference(
             model,
-            max_model_len=args.max_model_len,
+            max_model_len=agent_max_model_len,
             gpu_memory_utilization=getattr(args, "vllm_gpu_mem", 0.3),
             tensor_parallel_size=getattr(args, "vllm_tensor_parallel_size", 1),
             startup_timeout=getattr(args, "vllm_startup_timeout", 300.0),
@@ -341,6 +344,18 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
             'gptoss_include_reasoning',
             defaults.get('gptoss_include_reasoning', getattr(args, 'gptoss_include_reasoning', True))
         ))
+        gptoss_responses_max_retries = int(agent_def.get(
+            'gptoss_responses_max_retries',
+            defaults.get('gptoss_responses_max_retries', getattr(args, 'gptoss_responses_max_retries', 3))
+        ))
+        gptoss_retry_backoff_base_s = float(agent_def.get(
+            'gptoss_retry_backoff_base_s',
+            defaults.get('gptoss_retry_backoff_base_s', getattr(args, 'gptoss_retry_backoff_base_s', 1.0))
+        ))
+        gptoss_retry_backoff_max_s = float(agent_def.get(
+            'gptoss_retry_backoff_max_s',
+            defaults.get('gptoss_retry_backoff_max_s', getattr(args, 'gptoss_retry_backoff_max_s', 16.0))
+        ))
         
         # Generate unique agent ID: scaffold_modelname_NNN
         model_short = get_model_short_name(model)
@@ -370,6 +385,9 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
             gptoss_prompt_mode=gptoss_prompt_mode,
             gptoss_reasoning_effort=gptoss_reasoning_effort,
             gptoss_include_reasoning=gptoss_include_reasoning,
+            gptoss_responses_max_retries=gptoss_responses_max_retries,
+            gptoss_retry_backoff_base_s=gptoss_retry_backoff_base_s,
+            gptoss_retry_backoff_max_s=gptoss_retry_backoff_max_s,
         )
         
         # GPT-OSS Harmony tool calling: only when using vLLM + enable_tools + gpt-oss weights.
@@ -417,7 +435,9 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
                 start_date=args.sim_start_date
             )
         else:
-            raise ValueError(f"Unknown scaffold: {scaffold}. Only 'basic', 'allQ', 'allqd', and 'og' are supported.")
+            raise ValueError(
+                f"Unknown scaffold: {scaffold}. Only 'basic', 'allQ', 'allqd', and 'og' are supported."
+            )
         
         agents.append(agent)
         print(f"  Created agent: {agent_id} ({provider}:{model}) [Scaffold: {scaffold}]")
@@ -481,6 +501,12 @@ def main():
                        help="Model ID for OpenRouter (e.g., 'xiaomi/mimo-v2-flash:free')")
     parser.add_argument("--max_model_len", type=int, default=32768,
                        help="Max context length for VLLM (default 32768)")
+    parser.add_argument("--agent_max_model_len", type=int, default=None,
+                       help="Max context length for agent vLLM only (defaults to --max_model_len)")
+    parser.add_argument("--matcher_max_model_len", type=int, default=None,
+                       help="Max context length for matcher vLLM only (defaults to --max_model_len)")
+    parser.add_argument("--embedding_max_model_len", type=int, default=None,
+                       help="Max context length for embedding vLLM only (defaults to --max_model_len)")
     parser.add_argument("--no_inference", action="store_true",
                        help="Run without LLM (for testing setup)")
     
@@ -505,6 +531,12 @@ def main():
                        help="Request reasoning content in GPT-OSS Responses output")
     parser.add_argument("--no_gptoss_include_reasoning", action="store_true",
                        help="Disable reasoning content in GPT-OSS Responses output")
+    parser.add_argument("--gptoss_responses_max_retries", type=int, default=3,
+                       help="Max retries for GPT-OSS /v1/responses calls (default 3)")
+    parser.add_argument("--gptoss_retry_backoff_base_s", type=float, default=1.0,
+                       help="Base backoff seconds for GPT-OSS responses retries (default 1.0)")
+    parser.add_argument("--gptoss_retry_backoff_max_s", type=float, default=16.0,
+                       help="Max backoff seconds for GPT-OSS responses retries (default 16.0)")
 
     # vLLM runtime settings (when provider == vllm in config)
     parser.add_argument("--vllm_gpu_mem", type=float, default=0.3,
@@ -781,7 +813,10 @@ def main():
         matcher_rope_scaling = getattr(args, "matcher_rope_scaling", None)
         if matcher_rope_scaling is None:
             matcher_rope_scaling = getattr(args, "rope_scaling", None)
-        matcher_provider = VLLMInference(args.matcher, max_model_len=args.max_model_len, 
+        matcher_max_model_len = getattr(args, "matcher_max_model_len", None)
+        if matcher_max_model_len is None:
+            matcher_max_model_len = args.max_model_len
+        matcher_provider = VLLMInference(args.matcher, max_model_len=matcher_max_model_len, 
                                           gpu_memory_utilization=args.matcher_gpu_mem,
                                           startup_timeout=getattr(args, "vllm_startup_timeout", 300.0),
                                           rope_scaling=matcher_rope_scaling,
@@ -815,9 +850,12 @@ def main():
                 embedding_rope_scaling = getattr(args, "embedding_rope_scaling", None)
                 if embedding_rope_scaling is None:
                     embedding_rope_scaling = getattr(args, "rope_scaling", None)
+                embedding_max_model_len = getattr(args, "embedding_max_model_len", None)
+                if embedding_max_model_len is None:
+                    embedding_max_model_len = args.max_model_len
                 embedding_model = VLLMInference(
                     args.embedding_model,
-                    max_model_len=args.max_model_len,
+                    max_model_len=embedding_max_model_len,
                     gpu_memory_utilization=args.embedding_gpu_mem,
                     startup_timeout=getattr(args, "vllm_startup_timeout", 300.0),
                     rope_scaling=embedding_rope_scaling,
@@ -875,10 +913,13 @@ def main():
         
         if args.provider == "vllm":
             from inference.vllm import VLLMInference
-            print(f"Loading VLLM model: {args.model_path} (max_model_len={args.max_model_len})")
+            agent_max_model_len = getattr(args, "agent_max_model_len", None)
+            if agent_max_model_len is None:
+                agent_max_model_len = args.max_model_len
+            print(f"Loading VLLM model: {args.model_path} (max_model_len={agent_max_model_len})")
             inference_provider = VLLMInference(
                 args.model_path,
-                max_model_len=args.max_model_len,
+                max_model_len=agent_max_model_len,
                 tensor_parallel_size=getattr(args, "vllm_tensor_parallel_size", 1),
                 startup_timeout=getattr(args, "vllm_startup_timeout", 300.0),
                 rope_scaling=getattr(args, "rope_scaling", None),
@@ -924,6 +965,9 @@ def main():
             gptoss_prompt_mode=args.gptoss_prompt_mode,
             gptoss_reasoning_effort=args.gptoss_reasoning_effort,
             gptoss_include_reasoning=args.gptoss_include_reasoning,
+            gptoss_responses_max_retries=args.gptoss_responses_max_retries,
+            gptoss_retry_backoff_base_s=args.gptoss_retry_backoff_base_s,
+            gptoss_retry_backoff_max_s=args.gptoss_retry_backoff_max_s,
         )
         
         if args.scaffold == 'basic':

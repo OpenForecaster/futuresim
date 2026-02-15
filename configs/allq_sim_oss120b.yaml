@@ -22,7 +22,7 @@ resources:
   disk_gb: 80
   bid: 35
   # H100 only; keep i103 excluded.
-  requirements: "TARGET.CUDACapability >= 9.0 && TARGET.CUDAGlobalMemoryMb > 70000 && TARGET.Machine =!= \"i103.internal.cluster.is.localnet\""
+  requirements: "TARGET.CUDACapability >= 9.0 && TARGET.CUDAGlobalMemoryMb > 90000 && TARGET.Machine =!= \"i103.internal.cluster.is.localnet\""
 
 # --- Data Paths ---
 dataset: "openforesight"
@@ -66,6 +66,11 @@ parallel: true
 defaults:
   provider: "vllm"
   scaffold: "allQ"
+  enable_memory: true
+  # Replay only parser-safe structured items between tool turns.
+  gptoss_replay_mode: "raw_recommended"
+  # Reserve room for reasoning + visible output (OpenAI recommendation: start around 25k).
+  gptoss_min_max_output_tokens: 25000
   max_actions: 10
   warmup_max_actions: 10
   temperature: 1.0

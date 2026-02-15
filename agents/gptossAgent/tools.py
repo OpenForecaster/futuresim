@@ -21,7 +21,10 @@ def build_action_tools(
             {
                 "type": "function",
                 "name": "query_df",
-                "description": "Run Python code to inspect the questions DataFrame. Use print(...) to show results.",
+                "description": (
+                    "Run Python code to inspect the questions DataFrame. Use print(...) to show results. "
+                    "Example: print(df[df['is_resolved'] == False][['qid','title']].head(10))"
+                ),
                 "strict": True,
                 "parameters": {
                     "type": "object",
@@ -42,7 +45,10 @@ def build_action_tools(
             {
                 "type": "function",
                 "name": "search_news",
-                "description": "Search the news article database for evidence.",
+                "description": (
+                    "Search the news article database for evidence. "
+                    "Example: search for 'Fed rate cut 2026 inflation'."
+                ),
                 "strict": True,
                 "parameters": {
                     "type": "object",
@@ -70,7 +76,11 @@ def build_action_tools(
         {
             "type": "function",
             "name": "submit_forecasts",
-            "description": "Submit forecasts for one or more questions.",
+            "description": (
+                "Submit forecasts for one or more questions. "
+                "Example payload: "
+                '{"forecasts":[{"qid":"Q123","outcomes":{"Candidate A":0.55,"Candidate B":0.35}}]}'
+            ),
             "strict": True,
             "parameters": {
                 "type": "object",
@@ -103,7 +113,7 @@ def build_action_tools(
         {
             "type": "function",
             "name": "next_day",
-            "description": "End the day (no more actions).",
+            "description": "End the day (no more actions). Example payload: {}",
             "strict": True,
             "parameters": {
                 "type": "object",
@@ -122,7 +132,10 @@ def build_memory_tools() -> List[Dict[str, Any]]:
         {
             "type": "function",
             "name": "update_memory",
-            "description": "Replace the agent memory with the provided text. Keep it concise.",
+            "description": (
+                "Replaces the agent memory with the provided text. Update with your learnings, strategies, insights, and observations for future days. Include anything you want to remember as this is the only context you will retain between days."
+                'Example payload: {"memory":"Key updates..."}'
+            ),
             "strict": True,
             "parameters": {
                 "type": "object",
@@ -154,6 +167,104 @@ def _extract_output_text(response_json: Dict[str, Any]) -> str:
     return "".join(chunks)
 
 
+def extract_assistant_messages(response_json: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Extract assistant message items with Harmony-like metadata when available.
+
+    Returns list of dicts:
+      {"role":"assistant","channel":str|None,"recipient":str|None,"content_type":str|None,"content":str}
+    """
+    messages: List[Dict[str, Any]] = []
+    for item in (response_json.get("output") or []):
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") != "message":
+            continue
+
+        content_chunks: List[str] = []
+        for c in (item.get("content") or []):
+            if not isinstance(c, dict):
+                continue
+            if c.get("type") in ("output_text", "text"):
+                t = c.get("text")
+                if isinstance(t, str):
+                    content_chunks.append(t)
+
+        content = "".join(content_chunks)
+        if not content:
+            continue
+        messages.append(
+            {
+                "role": "assistant",
+                "channel": item.get("channel") if isinstance(item.get("channel"), str) else None,
+                "recipient": item.get("recipient") if isinstance(item.get("recipient"), str) else None,
+                "content_type": item.get("content_type") if isinstance(item.get("content_type"), str) else None,
+                "content": content,
+            }
+        )
+    return messages
+
+
+def extract_output_items(response_json: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Return raw output items from a Responses payload for replay into next turn.
+    """
+    out: List[Dict[str, Any]] = []
+    for item in (response_json.get("output") or []):
+        if isinstance(item, dict):
+            out.append(item)
+    return out
+
+
+def extract_replay_items_for_tool_turn(response_json: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Build a strict, parser-safe replay slice for the next tool turn.
+
+    Keep only the item classes recommended for function-calling continuity:
+    - reasoning
+    - function_call
+    - function_call_output
+
+    We intentionally drop generic assistant message items because some vLLM builds
+    are brittle when replaying Harmony headers (recipient/constrain) from prior output.
+    """
+    out: List[Dict[str, Any]] = []
+    for item in (response_json.get("output") or []):
+        if not isinstance(item, dict):
+            continue
+        t = item.get("type")
+        if t == "reasoning":
+            out.append(item)
+            continue
+        if t == "function_call":
+            name = item.get("name")
+            arguments = item.get("arguments")
+            if not isinstance(name, str) or not isinstance(arguments, str):
+                continue
+            fc: Dict[str, Any] = {
+                "type": "function_call",
+                "name": name,
+                "arguments": arguments,
+            }
+            call_id = item.get("call_id")
+            if isinstance(call_id, str):
+                fc["call_id"] = call_id
+            out.append(fc)
+            continue
+        if t == "function_call_output":
+            out_item = {"type": "function_call_output"}
+            call_id = item.get("call_id")
+            output = item.get("output")
+            if isinstance(call_id, str):
+                out_item["call_id"] = call_id
+            if isinstance(output, str):
+                out_item["output"] = output
+            if "call_id" in out_item and "output" in out_item:
+                out.append(out_item)
+            continue
+    return out
+
+
 def extract_function_calls(response_json: Dict[str, Any]) -> List[Dict[str, Any]]:
     calls: List[Dict[str, Any]] = []
     for item in (response_json.get("output") or []):
@@ -169,7 +280,15 @@ def extract_function_calls(response_json: Dict[str, Any]) -> List[Dict[str, Any]
             args = json.loads(args_raw) if args_raw else {}
         except Exception:
             args = {}
-        calls.append({"name": name, "arguments": args})
+        call_id = item.get("call_id") or item.get("id")
+        calls.append(
+            {
+                "name": name,
+                "arguments": args,
+                "arguments_raw": args_raw,
+                "call_id": call_id if isinstance(call_id, str) else None,
+            }
+        )
     return calls
 
 
@@ -184,16 +303,67 @@ def extract_reasoning_text(response_json: Dict[str, Any]) -> str:
     for item in (response_json.get("output") or []):
         if not isinstance(item, dict):
             continue
-        if item.get("type") != "reasoning":
-            continue
-        for c in (item.get("content") or []):
-            if not isinstance(c, dict):
+        item_type = item.get("type")
+        if item_type == "reasoning":
+            for c in (item.get("content") or []):
+                if not isinstance(c, dict):
+                    continue
+                if c.get("type") in ("reasoning_text", "text"):
+                    t = c.get("text")
+                    if isinstance(t, str) and t:
+                        chunks.append(t)
+        elif item_type == "message":
+            # Some implementations expose analysis as assistant message channel.
+            channel = item.get("channel")
+            if channel != "analysis":
                 continue
-            if c.get("type") in ("reasoning_text", "text"):
-                t = c.get("text")
-                if isinstance(t, str) and t:
-                    chunks.append(t)
+            for c in (item.get("content") or []):
+                if not isinstance(c, dict):
+                    continue
+                if c.get("type") in ("output_text", "text", "reasoning_text"):
+                    t = c.get("text")
+                    if isinstance(t, str) and t:
+                        chunks.append(t)
     return "\n".join(chunks)
+
+
+def extract_reasoning_token_count(response_json: Dict[str, Any]) -> int:
+    """
+    Extract per-response reasoning token count from usage details when available.
+    """
+    usage = response_json.get("usage") or {}
+    if not isinstance(usage, dict):
+        return 0
+
+    # Responses-style usage
+    out_details = usage.get("output_tokens_details")
+    if isinstance(out_details, dict):
+        rt = out_details.get("reasoning_tokens")
+        if isinstance(rt, int):
+            return rt
+        try:
+            return int(rt)
+        except Exception:
+            pass
+
+    # ChatCompletions-style usage
+    comp_details = usage.get("completion_tokens_details")
+    if isinstance(comp_details, dict):
+        rt = comp_details.get("reasoning_tokens")
+        if isinstance(rt, int):
+            return rt
+        try:
+            return int(rt)
+        except Exception:
+            pass
+
+    rt = usage.get("reasoning_tokens")
+    if isinstance(rt, int):
+        return rt
+    try:
+        return int(rt)
+    except Exception:
+        return 0
 
 
 def response_to_action(

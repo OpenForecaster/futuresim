@@ -8,8 +8,30 @@ set -e
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 NEWS_PLEASE_DIR="$REPO_ROOT/data/news/news-please"
 PATCH_FILE="$REPO_ROOT/data/news/news-please.patch"
+VENV_ACTIVATE="$REPO_ROOT/fsim/bin/activate"
 
 echo "=== Setting up News Pipeline Dependencies ==="
+
+# 0. Activate project venv (required for dependency checks/install)
+if [ ! -f "$VENV_ACTIVATE" ]; then
+    echo "ERROR: Missing virtualenv at $VENV_ACTIVATE"
+    exit 2
+fi
+source "$VENV_ACTIVATE"
+
+# 1. Ensure language/tokenizer runtime dependency used by newspaper4k exists.
+# Missing this causes noisy extraction failures for Bengali pages.
+echo "Ensuring Python dependency indic-nlp-library is installed..."
+if python3 -c "import indicnlp" >/dev/null 2>&1; then
+    echo "  [SUCCESS] indic-nlp-library already available."
+else
+    if python3 -m pip install --quiet indic-nlp-library; then
+        echo "  [SUCCESS] Installed indic-nlp-library."
+    else
+        echo "ERROR: Failed to install indic-nlp-library in fsim."
+        exit 2
+    fi
+fi
 
 # 0. Ensure NLTK data is available (avoid downloads inside HTCondor jobs)
 echo "Ensuring NLTK tokenizer data (punkt_tab/punkt) is available..."
@@ -18,17 +40,18 @@ mkdir -p "$NLTK_DATA"
 if python3 "$REPO_ROOT/data/news/scripts/ensure_nltk_data.py"; then
     echo "  [SUCCESS] NLTK data ready."
 else
-    echo "  [WARNING] Could not ensure NLTK data. CCNews crawl may error with missing punkt_tab."
-    echo "            Try: source ~/forecast-sim/fsim/bin/activate && python3 $REPO_ROOT/data/news/scripts/ensure_nltk_data.py"
+    echo "ERROR: Could not ensure NLTK data. CCNews crawl will fail with missing punkt_tab."
+    echo "       Try: source ~/forecast-sim/fsim/bin/activate && python3 $REPO_ROOT/data/news/scripts/ensure_nltk_data.py"
+    exit 2
 fi
 
-# 1. Initialize submodule if needed
+# 2. Initialize submodule if needed
 if [ ! -d "$NEWS_PLEASE_DIR/.git" ]; then
     echo "Initializing news-please submodule..."
     git submodule update --init --recursive "$NEWS_PLEASE_DIR"
 fi
 
-# 2. Apply patch
+# 3. Apply patch
 echo "Checking patches..."
 cd "$NEWS_PLEASE_DIR"
 
