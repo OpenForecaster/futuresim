@@ -416,12 +416,18 @@ Example (if options are ["Candidate A", "Candidate B", "Candidate C"]):
         
         memory_section = ""
         if self._memory is not None:
-            memory_section = f"""## YOUR MEMORY FROM PREVIOUS DAYS
+            memory_content = self._memory.get()
+            if memory_content:
+                memory_section = f"""## YOUR MEMORY (reasoning, patterns, and insights from previous days)
 <memory>
-{self._memory.get()}
+{memory_content}
 </memory>
 
+Use the reasoning and insights above to inform today's forecasts. The DataFrame has your prediction outcomes for active questions (not resolved ones).
+
 """
+            else:
+                memory_section = ""
             memory_flow_note = "Note: After ending your day, you will be prompted to update your memory."
         else:
             memory_flow_note = ""
@@ -552,17 +558,16 @@ You have {self.config.max_actions} actions available. Begin."""
         memory_prompt = f"""End of day {current_date}. You can now update your memory.
 
 ## MEMORY UPDATE
-Your memory is the ONLY context you will retain tomorrow. Everything else (this conversation, 
-queries, forecasts) will be forgotten. Tomorrow you'll receive a fresh system prompt with 
-your memory included.
+Your memory is the ONLY thing that carries over to tomorrow. Everything else resets. Tomorrow you get: search over news articles and access to the DataFrame (active question predictions and ground truths for resolved ones, but NOT your predictions for resolved questions — those are deleted on resolution).
 
-Use memory to record:
-- Insights about recurring question patterns
-- Strategies that worked well or poorly
-- Important observations about data/trends
-- Notes about specific questions you're tracking
+Store things NOT recoverable from those tools:
+1. Reasoning behind predictions and how you did on resolved questions that might help with unresolved questions — once a question resolves, both your prediction and reasoning are lost from the DataFrame. Example: "Q149: PSG 0.70 because Sky Bet implied 55% and Inter eliminated in semis."
+2. Performance patterns — track your accuracy across resolved questions so you can calibrate. Example: "Bookmaker odds were correct 80% across 15 sports questions; I should weight them more."
+3. Non-obvious insights that search alone would not surface. Example: "'First country to X' questions almost always resolve to a major economy."
+4. Critical hard-to-find facts directly relevant to active questions. Example: "ECB next meeting June 5 — relevant to Q72, Q108."
 
-Keep it CONCISE (a few paragraphs max) as it consumes your context window.
+Do NOT store: general forecasting advice (already in your instructions), easily searchable facts, prediction outcomes without reasoning, or vague tracking lists without reasoning.
+Aim to keep memory under 2000 characters. Prioritize recent and high-impact items and drop stale entries about resolved questions you have already learned from.
 
 To update memory, include it after your reasoning:
 <reasoning>
