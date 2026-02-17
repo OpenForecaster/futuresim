@@ -27,7 +27,12 @@ python scripts/test_basic_agent.py \
 
 Notes:
 - The committed `uv.lock` is aligned to Linux `x86_64` on Python `3.12` (matching the current `fsim` stack).
-- PyTorch CUDA wheels are resolved via `tool.uv.sources` in `pyproject.toml`; collaborators only need `uv sync`.
+- PyTorch CUDA wheels are resolved via `tool.uv.sources` in `pyproject.toml`; collaborators can use plain `uv sync`.
+- FlashAttention is intentionally not installed by default because support depends on machine/CUDA/toolchain compatibility.
+- If you want FlashAttention, follow upstream instructions:
+  https://github.com/Dao-AILab/flash-attention#installation-and-features
+- Example install after activating `.venv`:
+  `MAX_JOBS=4 uv pip install --no-build-isolation flash-attn`
 
 ## Directory Structure
 

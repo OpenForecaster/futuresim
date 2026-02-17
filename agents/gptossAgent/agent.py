@@ -195,7 +195,7 @@ class GPTOSSBasicAgent(BasicAgent):
         Strict final-turn instruction for per-question loops.
         """
         return (
-            "FINAL ACTION (last chance): You have exactly 1 action remaining and MUST submit now.\n"
+            "FINAL ACTION (last chance): You have exactly 1 action remaining and MUST submit your best guess forecast now.\n"
             f"Target question ID: {target_qid}\n"
             "Call exactly one tool: submit_forecasts.\n"
             "Do NOT call query_df, search_news, or next_day.\n"

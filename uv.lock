@@ -809,16 +809,6 @@ wheels = [
 ]
 
 [[package]]
-name = "flash-attn"
-version = "2.8.3"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "einops", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "torch", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/3b/b2/8d76c41ad7974ee264754709c22963447f7f8134613fd9ce80984ed0dab7/flash_attn-2.8.3.tar.gz", hash = "sha256:1e71dd64a9e0280e0447b8a0c2541bad4bf6ac65bdeaa2f90e51a9e57de0370d", size = 8447812 }
-
-[[package]]
 name = "flashinfer-python"
 version = "0.5.3"
 source = { registry = "https://pypi.org/simple" }
@@ -921,7 +911,6 @@ dependencies = [
     { name = "faust-cchardet", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "feedparser", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "filelock", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "flash-attn", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "flashinfer-python", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "fonttools", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "frozenlist", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
@@ -1174,7 +1163,6 @@ requires-dist = [
     { name = "faust-cchardet", specifier = "==2.1.19" },
     { name = "feedparser", specifier = "==6.0.12" },
     { name = "filelock", specifier = "==3.20.3" },
-    { name = "flash-attn", specifier = "==2.8.3" },
     { name = "flashinfer-python", specifier = "==0.5.3" },
     { name = "fonttools", specifier = "==4.61.1" },
     { name = "frozenlist", specifier = "==1.8.0" },
