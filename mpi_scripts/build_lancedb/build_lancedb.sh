@@ -1,6 +1,7 @@
 #!/bin/bash
-# Build LanceDB index from articles and precomputed embeddings.
-# This is a CPU-only job but needs memory for loading embeddings.
+# Build LanceDB table from articles and embeddings (Stage 1/2).
+# This stage ingests data + creates scalar date index only.
+# Full-text / vector indices are built in build_index.sh (Stage 2/2).
 #
 # Run via: condor_submit_bid 15 build_lancedb.sub
 
@@ -12,6 +13,7 @@ source ~/.bashrc 2>/dev/null || true
 
 # Filelock fix for /is/cluster/fast
 export SOFT_FILELOCK=1
+export PYTHONUNBUFFERED=1
 
 # Paths
 REPO_DIR="/home/sgoel/forecast-sim"
@@ -30,18 +32,35 @@ END_DATE="2026-01-31"
 source ~/forecast-sim/fsim/bin/activate
 cd "$REPO_DIR"
 
-echo "Building LanceDB index..."
+SCALAR_INDEX_TIMEOUT_MINUTES="${SCALAR_INDEX_TIMEOUT_MINUTES:-30}"
+BUILD_SCALAR_INDEX="${BUILD_SCALAR_INDEX:-1}"
+
+echo "Building LanceDB table (stage 1/2)..."
 echo "Date range: $START_DATE to $END_DATE"
 echo "Model: $MODEL"
 echo "Output: $OUTPUT_DIR"
+echo "Scalar index timeout (minutes): $SCALAR_INDEX_TIMEOUT_MINUTES"
 
-python scripts/build_lancedb.py \
-    --start_date "$START_DATE" \
-    --end_date "$END_DATE" \
-    --model "$MODEL" \
-    --articles_dir "$ARTICLES_DIR" \
-    --embeddings_dir "$EMBEDDINGS_DIR" \
-    --output_dir "$OUTPUT_DIR" \
-    --overwrite
+if [[ "$BUILD_SCALAR_INDEX" == "1" ]]; then
+  echo "Scalar index on 'date': enabled"
+  SCALAR_FLAG=()
+else
+  echo "Scalar index on 'date': skipped (BUILD_SCALAR_INDEX=0)"
+  SCALAR_FLAG=(--skip_scalar_index)
+fi
 
-echo "LanceDB build complete!"
+ARGS=(
+  --start_date "$START_DATE"
+  --end_date "$END_DATE"
+  --model "$MODEL"
+  --articles_dir "$ARTICLES_DIR"
+  --embeddings_dir "$EMBEDDINGS_DIR"
+  --output_dir "$OUTPUT_DIR"
+  --skip_fts_index
+  --scalar_index_timeout_minutes "$SCALAR_INDEX_TIMEOUT_MINUTES"
+  --overwrite
+)
+
+python -u scripts/build_lancedb.py "${ARGS[@]}" "${SCALAR_FLAG[@]}"
+
+echo "LanceDB stage 1/2 complete (table + scalar index)."

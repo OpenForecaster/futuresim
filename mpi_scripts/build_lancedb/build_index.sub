@@ -1,4 +1,5 @@
-# HTCondor submit file for building LanceDB vector index on GPU
+# HTCondor submit file for LanceDB stage 2/2:
+# build FTS index (with positions by default) + optional IVF-PQ vector index.
 # Run with: condor_submit_bid 25 build_index.sub
 
 executable = /home/sgoel/forecast-sim/mpi_scripts/build_lancedb/build_index.sh
@@ -7,10 +8,11 @@ output = /is/cluster/fast/sgoel/logs/forecasting-sim/build_lancedb/index_$(Clust
 error = /is/cluster/fast/sgoel/logs/forecasting-sim/build_lancedb/index_$(Cluster).err
 log = /is/cluster/fast/sgoel/logs/forecasting-sim/build_lancedb/index_$(Cluster).log
 
+# FTS on very large tables is memory-heavy; keep this on high-memory nodes.
 request_cpus = 8
-request_memory = 64GB
-request_disk = 50GB
-request_gpus = 1
-requirements = TARGET.CUDACapability >= 8.0
+request_memory = 256GB
+request_disk = 100GB
+request_gpus = 0
+getenv = true
 
 queue

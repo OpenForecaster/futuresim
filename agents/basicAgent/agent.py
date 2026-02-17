@@ -273,6 +273,10 @@ class BasicAgent(BaseAgent):
                     print(f"  [{self.agent_id}] Forecast {f['qid']}: {outcomes_str}")
                 except Exception as e:
                     print(f"  [{self.agent_id}] Failed to submit {f['qid']}: {e}")
+
+            if submitted:
+                # Ensure later same-day df queries reflect newly submitted predictions.
+                self._query_handler.invalidate_cache()
             
             # Include submitted qids in log metadata
             submitted_qids = [f['qid'] for f in submitted]

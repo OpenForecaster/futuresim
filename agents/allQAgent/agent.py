@@ -65,7 +65,7 @@ class AllQAgent(BasicAgent):
             "Return exactly one submit action for this qid only:\n"
             f"<action type=\"submit\"><forecast qid=\"{target_qid}\">...</forecast></action>"
         )
-        
+
     def warmup(self, forecast_interface, current_date: date) -> None:
         """
         Execute warmup phase: predict on ALL active questions individually.
@@ -196,7 +196,7 @@ class AllQAgent(BasicAgent):
         """
         actions_remaining = self.config.warmup_max_actions
         final_submit_prompt_injected = False
-        
+
         while actions_remaining > 0:
             # Last-action guardrail: explicitly force a submit attempt.
             if actions_remaining == 1 and not final_submit_prompt_injected:

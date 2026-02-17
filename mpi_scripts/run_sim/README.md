@@ -9,9 +9,9 @@ Submit forecasting simulation jobs to HTCondor.
 echo 'OPENROUTER_API_KEY=your-key-here' > /home/sgoel/forecast-sim/.env
 ```
 
-2. Make sure LanceDB index is built (for search mode):
+2. Make sure LanceDB Stage 2 indices are built (for search mode):
 ```bash
-python scripts/build_lancedb_index.py
+python scripts/build_lancedb_index.py --build_fts --fts_with_position --force
 ```
 
 ## Usage

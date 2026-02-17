@@ -5,6 +5,12 @@ Multi-agent forecasting simulator where LLM agents predict on free-form question
 ## Quick Start
 
 ```bash
+# 0. Clone with submodules (or run submodule update in an existing clone)
+git clone --recurse-submodules <repo-url>
+cd forecast-sim
+# If already cloned:
+git submodule update --init --recursive
+
 # 1. Install dependencies (requires uv)
 uv sync
 ./data/news/scripts/setup_news_pipeline.sh  # Initialize news pipeline
@@ -28,6 +34,7 @@ python scripts/test_basic_agent.py \
 | `scripts/` | CLI scripts for running simulations |
 | `configs/` | YAML configuration files |
 | `data/` | Data fetchers and news pipeline |
+| `third_party/` | External code dependencies (e.g., SkyRL submodule) |
 | `mpi_scripts/` | HTCondor cluster job submission |
 | `notes/` | Design documentation and decisions |
 

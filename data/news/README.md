@@ -12,7 +12,8 @@ This pipeline downloads news articles from CommonCrawl News (CCNews) and process
 3. **Deduplication** - Remove duplicate articles based on title + content hash
 4. **Parquet Conversion** - Convert to daily-partitioned Parquet for efficient storage
 5. **Embedding** - Generate Qwen3-Embedding-8B embeddings for semantic search
-6. **LanceDB Index** - Build searchable index with vector + FTS capabilities
+6. **LanceDB Table + Scalar (Stage 1/2)** - Build article table and scalar date index only
+7. **LanceDB FTS (+ optional IVF-PQ) (Stage 2/2)** - Build full-text index (with positions) and optional vector optimization
 
 ## Quick Start: Update News (Aug 2025 - Jan 2026)
 
@@ -28,7 +29,8 @@ cd ~/forecast-sim
 ```
 
 `setup_news_pipeline.sh` also ensures required NLTK tokenizer data is present (e.g. `punkt_tab`),
-and installs `indic-nlp-library` in `fsim` to avoid newspaper4k extraction failures on Bengali pages.
+installs `indic-nlp-library` in `fsim` to avoid newspaper4k extraction failures on Bengali pages,
+and installs `tantivy` + `pylance` so Stage 2 can use Tantivy FTS backend for stable phrase indexing.
 If either setup step fails, the script exits non-zero.
 
 ### Step 0: Configure news-please
@@ -56,7 +58,7 @@ condor_q
 tail -f /fast/sgoel/logs/forecasting-sim/news/crawl/*.out
 ```
 
-### Step 2-6: Run Processing Pipeline
+### Step 2-7: Run Processing Pipeline
 
 After download completes, run each step sequentially:
 
@@ -82,10 +84,17 @@ python data/news/run_news_pipeline.py --step parquet
 python data/news/run_news_pipeline.py --step embed
 # Wait for completion (GPU job, takes hours)
 
-# Step 5: Build LanceDB index
+# Step 5: Build LanceDB table + scalar index only (Stage 1/2)
 python data/news/run_news_pipeline.py --step lancedb
 # Wait for completion
+
+# Step 6: Build/refresh FTS (with positions) + optional vector index (Stage 2/2)
+python data/news/run_news_pipeline.py --step lancedb_index
+# Wait for completion
 ```
+
+The pipeline injects default env settings for Stage 2 (`BUILD_FTS=1`, `FTS_WITH_POSITION=1`,
+`FTS_USE_TANTIVY=1`, and `TANTIVY_INDEX_ROOT=~/forecasting/lancedb_tantivy_indices`).
 
 ### Alternative: Manual Jobs
 
@@ -100,9 +109,40 @@ python data/news/scripts/launch_parquet_conversion.py \
 # Embedding
 cd mpi_scripts/embed && python submit_job.py --gpus 1 --bid 25 --num_workers 8
 
-# LanceDB
+# LanceDB Stage 1/2 (table + scalar date index)
 condor_submit_bid 15 mpi_scripts/build_lancedb/build_lancedb.sub
+
+# LanceDB Stage 2/2 (FTS with positions + vector index)
+# Use Tantivy backend with external index files on /lustre to avoid /is lock issues.
+BUILD_FTS=1 FTS_WITH_POSITION=1 FTS_USE_TANTIVY=1 \
+TANTIVY_INDEX_ROOT=/lustre/home/sgoel/forecasting/lancedb_tantivy_indices \
+BUILD_VECTOR_INDEX=1 \
+condor_submit_bid 25 mpi_scripts/build_lancedb/build_index.sub
+
+# Stage 2 alternative: FTS only (skip vector index)
+BUILD_FTS=1 FTS_WITH_POSITION=1 FTS_USE_TANTIVY=1 \
+TANTIVY_INDEX_ROOT=/lustre/home/sgoel/forecasting/lancedb_tantivy_indices \
+BUILD_VECTOR_INDEX=0 \
+condor_submit_bid 25 mpi_scripts/build_lancedb/build_index.sub
 ```
+
+### Collaborator setup note
+
+If collaborators are not on the MPI cluster, setup can differ by filesystem:
+1. If LanceDB table path supports lockfiles (typical local disk, many `/lustre` mounts), Tantivy can write FTS in-table directly.
+2. If LanceDB table path does not support lockfiles (for example `/is/cluster/fast` on this cluster), keep `FTS_USE_TANTIVY=1` and set `TANTIVY_INDEX_ROOT` to a lock-capable path (for example under `$HOME` or `/lustre`).
+3. The one-line pipeline command (`--step lancedb_index`) already sets a safe default `TANTIVY_INDEX_ROOT` under `~/forecasting/`.
+
+### Important dependency note
+
+`lancedb_index` does **not** run before embedding, and it is not an embedding dependency.
+Correct order is:
+1. `embed`
+2. `lancedb` (table + scalar date index only)
+3. `lancedb_index` (FTS with positions + optional vector optimization)
+
+If `lancedb_index` fails, do **not** rerun ingest by default. Embeddings and table data are
+usually already complete after `lancedb`; rerun only Stage 2 (`lancedb_index`).
 
 ## Directory Structure
 

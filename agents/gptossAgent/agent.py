@@ -229,13 +229,23 @@ class GPTOSSBasicAgent(BasicAgent):
                 )
                 final_submit_prompt_injected = True
 
+            # Hard-enforce final submit in per-question loops by exposing only the
+            # submit tool. Keep tool_choice="auto" because vLLM Harmony rejects
+            # non-auto tool_choice values.
+            force_final_submit_turn = target_qid is not None and actions_remaining == 1
+            effective_tools = tools
+            if force_final_submit_turn:
+                submit_only = [t for t in tools if t.get("name") == "submit_forecasts"]
+                if submit_only:
+                    effective_tools = submit_only
+
             model_input_payload = self._build_model_input_for_logging(instructions=instructions, conversation=conversation)
             try:
                 with self._timer.track("llm"):
                     resp_json = self._call_responses_with_retries(
                         instructions=instructions,
                         conversation=conversation,
-                        tools=tools,
+                        tools=effective_tools,
                         sampling_params=self.config.sampling_params,
                     )
             except Exception as e:
@@ -413,7 +423,7 @@ class GPTOSSBasicAgent(BasicAgent):
             if current_max < min_output:
                 sp["max_tokens"] = min_output
         sp["tools"] = tools
-        sp["tool_choice"] = "auto"  # vLLM Harmony requires this
+        sp["tool_choice"] = "auto"
 
         overrides: Dict[str, Any] = {
             # Keep the model from trying to emit many tool calls at once.
@@ -764,6 +774,9 @@ class GPTOSSBasicAgent(BasicAgent):
                     submitted.append(f)
                 except Exception as e:
                     pass
+            if submitted:
+                # Ensure later same-day df queries reflect newly submitted predictions.
+                self._query_handler.invalidate_cache()
             feedback = f"Submitted {len(submitted)} forecast(s). Actions remaining: {actions_remaining}"
         else:
             feedback = f"SUBMIT ERROR: {parsed.error or 'No valid forecasts'}\n\nActions remaining: {actions_remaining}"

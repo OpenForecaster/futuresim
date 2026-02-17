@@ -19,6 +19,10 @@ Usage:
 import argparse
 import os
 import sys
+import gc
+import queue
+import traceback
+import multiprocessing as mp
 from datetime import date, datetime, timedelta, time
 from pathlib import Path
 from typing import List, Dict, Optional
@@ -40,6 +44,26 @@ DEFAULT_ARTICLES_DIR = "/is/cluster/fast/sgoel/forecasting/news/deduped_articles
 DEFAULT_EMBEDDINGS_DIR = "/is/cluster/fast/sgoel/forecasting/news/deduped_articles/embeddings"
 DEFAULT_OUTPUT_DIR = "/is/cluster/fast/sgoel/forecasting/news/deduped_articles/lance"
 DEFAULT_MODEL = "Qwen3-Embedding-8B"
+
+
+def list_tables(db) -> List[str]:
+    """Compatibility wrapper for LanceDB table listing."""
+    if hasattr(db, "list_tables"):
+        tables = db.list_tables()
+        # LanceDB 0.26.x returns a ListTablesResponse object, older versions may return list[str].
+        if isinstance(tables, list):
+            return tables
+        if hasattr(tables, "tables"):
+            return list(tables.tables or [])
+        try:
+            return list(tables)
+        except TypeError:
+            pass
+    return db.table_names()
+
+
+def table_exists(db, table_name: str) -> bool:
+    return table_name in list_tables(db)
 
 
 def parse_args():
@@ -96,7 +120,37 @@ def parse_args():
         "--overwrite", action="store_true",
         help="Overwrite existing LanceDB table"
     )
+    parser.add_argument(
+        "--skip_scalar_index", action="store_true",
+        help="Skip scalar index creation on 'date' after ingest"
+    )
+    parser.add_argument(
+        "--skip_fts_index", action="store_true",
+        help="Skip full-text index creation on 'content' after ingest"
+    )
+    fts_position_group = parser.add_mutually_exclusive_group()
+    fts_position_group.add_argument(
+        "--fts_with_position",
+        dest="fts_with_position",
+        action="store_true",
+        help="Enable position indexing for FTS (default)",
+    )
+    fts_position_group.add_argument(
+        "--no_fts_with_position",
+        dest="fts_with_position",
+        action="store_false",
+        help="Disable phrase-position indexing for FTS (lower memory usage)",
+    )
+    parser.add_argument(
+        "--scalar_index_timeout_minutes", type=int, default=30,
+        help="Timeout in minutes for scalar index build subprocess (0 disables timeout)"
+    )
+    parser.add_argument(
+        "--fts_index_timeout_minutes", type=int, default=240,
+        help="Timeout in minutes for FTS index build subprocess (0 disables timeout)"
+    )
     
+    parser.set_defaults(fts_with_position=True)
     return parser.parse_args()
 
 
@@ -232,11 +286,68 @@ def create_lancedb_table(db, table_name: str, records: List[Dict], has_embedding
     # LanceDB will infer schema from first batch
     # For subsequent batches, it will validate against existing schema
     
-    if table_name in db.table_names():
+    if table_exists(db, table_name):
         table = db.open_table(table_name)
         table.add(records)
     else:
         db.create_table(table_name, records)
+
+
+def _index_worker(db_path: str, table_name: str, step: str, fts_with_position: bool, result_queue) -> None:
+    """Run a single index step in an isolated process."""
+    try:
+        db = lancedb.connect(db_path)
+        table = db.open_table(table_name)
+        if step == "scalar_date":
+            table.create_scalar_index("date", replace=True)
+        elif step == "fts":
+            table.create_fts_index("content", with_position=fts_with_position, replace=True)
+        else:
+            raise ValueError(f"Unknown index step: {step}")
+        result_queue.put(("ok", ""))
+    except Exception:
+        result_queue.put(("error", traceback.format_exc()))
+        raise
+
+
+def run_index_step_with_timeout(
+    db_path: Path,
+    table_name: str,
+    step: str,
+    timeout_minutes: int,
+    fts_with_position: bool = False,
+) -> tuple[bool, str]:
+    """Run index creation in a subprocess and enforce timeout."""
+    ctx = mp.get_context("spawn")
+    result_queue = ctx.Queue()
+    proc = ctx.Process(
+        target=_index_worker,
+        args=(str(db_path), table_name, step, fts_with_position, result_queue),
+        daemon=False,
+    )
+    proc.start()
+
+    timeout_seconds = None if timeout_minutes <= 0 else timeout_minutes * 60
+    proc.join(timeout_seconds)
+
+    if proc.is_alive():
+        proc.terminate()
+        proc.join(30)
+        if proc.is_alive():
+            proc.kill()
+            proc.join()
+        return False, f"timed out after {timeout_minutes} minute(s)"
+
+    try:
+        status, details = result_queue.get_nowait()
+    except queue.Empty:
+        status, details = ("error", f"index subprocess exited with code {proc.exitcode}")
+
+    if proc.exitcode == 0 and status == "ok":
+        return True, ""
+    if details:
+        return False, details.strip()
+    return False, f"index subprocess exited with code {proc.exitcode}"
 
 
 def main():
@@ -258,7 +369,7 @@ def main():
     table_name = "articles"
     
     # Handle overwrite
-    if args.overwrite and table_name in db.table_names():
+    if args.overwrite and table_exists(db, table_name):
         print(f"  Dropping existing table '{table_name}'")
         db.drop_table(table_name)
     
@@ -308,24 +419,54 @@ def main():
     if batch_records:
         print(f"  Inserting final batch of {len(batch_records)} records...")
         create_lancedb_table(db, table_name, batch_records, has_embeddings)
+        batch_records = []
     
     print(f"\nDone! Created {total_chunks} chunks in {db_path}/{table_name}")
+    gc.collect()
     
-    # Create FTS index for keyword search
-    if table_name in db.table_names():
-        print("Creating full-text search index...")
-        table = db.open_table(table_name)
-        try:
-            # Enable position indexing to support phrase queries (e.g. "quoted text")
-            table.create_fts_index("content", with_position=True, replace=True)
-            print("FTS index created successfully (with positions)")
-            
-            # Create scalar index on date for pre-filtering in vector search
-            print("Creating scalar index on 'date' column...")
-            table.create_scalar_index("date", replace=True)
-            print("Scalar index on 'date' created successfully")
-        except Exception as e:
-            print(f"Warning: Could not create indices: {e}")
+    # Build indices in isolated subprocesses to avoid deadlocks/hangs in the main ingest process.
+    if table_exists(db, table_name):
+        if args.skip_scalar_index:
+            print("Skipping scalar index on 'date' (--skip_scalar_index)")
+        else:
+            print(
+                f"Creating scalar index on 'date' (timeout: {args.scalar_index_timeout_minutes} min)...",
+                flush=True,
+            )
+            ok, err = run_index_step_with_timeout(
+                db_path=db_path,
+                table_name=table_name,
+                step="scalar_date",
+                timeout_minutes=args.scalar_index_timeout_minutes,
+            )
+            if ok:
+                print("Scalar index on 'date' created successfully")
+            else:
+                print(f"Warning: Scalar index creation failed: {err}")
+
+        if args.skip_fts_index:
+            print("Skipping full-text index on 'content' (--skip_fts_index)")
+        else:
+            print(
+                "Creating full-text search index on 'content' "
+                f"(with_position={args.fts_with_position}, timeout: {args.fts_index_timeout_minutes} min)...",
+                flush=True,
+            )
+            ok, err = run_index_step_with_timeout(
+                db_path=db_path,
+                table_name=table_name,
+                step="fts",
+                timeout_minutes=args.fts_index_timeout_minutes,
+                fts_with_position=args.fts_with_position,
+            )
+            if ok:
+                mode = "with positions" if args.fts_with_position else "without positions"
+                print(f"FTS index created successfully ({mode})")
+            else:
+                print(
+                    "Warning: FTS index creation failed. "
+                    f"Hybrid/keyword search may be unavailable until this is built separately. Details: {err}"
+                )
     
     # Save config for LanceDB store
     config = {

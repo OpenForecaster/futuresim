@@ -119,7 +119,12 @@ class LanceDBSearchTool(BaseSearchTool):
                     if search_type == "semantic":
                         results = self._table.search(query_embedding)
                     else:  # hybrid - use separate vector() and text()
-                        results = self._table.search(query_type="hybrid").vector(query_embedding).text(query)
+                        try:
+                            results = self._table.search(query_type="hybrid").vector(query_embedding).text(query)
+                        except Exception as e:
+                            # Hybrid requires FTS. If FTS index is missing/broken, keep retrieval alive via semantic search.
+                            print(f"[LanceDB] Hybrid search unavailable, falling back to semantic search: {e}")
+                            results = self._table.search(query_embedding)
             
             if where:
                 # Use prefilter=False consistently across search modes for reproducibility.

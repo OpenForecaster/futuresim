@@ -33,6 +33,21 @@ else
     fi
 fi
 
+# 1b. Ensure optional Tantivy FTS dependencies are available.
+# We use this backend for more stable phrase-position indexing on very large tables.
+echo "Ensuring Tantivy FTS dependencies (tantivy + pylance) are installed..."
+if python3 -c "import tantivy, lance" >/dev/null 2>&1; then
+    echo "  [SUCCESS] tantivy and pylance already available."
+else
+    if python3 -m pip install --quiet tantivy pylance; then
+        echo "  [SUCCESS] Installed tantivy and pylance."
+    else
+        echo "ERROR: Failed to install tantivy/pylance in fsim."
+        echo "       Run manually: source ~/forecast-sim/fsim/bin/activate && pip install tantivy pylance"
+        exit 2
+    fi
+fi
+
 # 0. Ensure NLTK data is available (avoid downloads inside HTCondor jobs)
 echo "Ensuring NLTK tokenizer data (punkt_tab/punkt) is available..."
 export NLTK_DATA="${NLTK_DATA:-$REPO_ROOT/fsim/nltk_data}"
