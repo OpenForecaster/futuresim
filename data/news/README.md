@@ -13,7 +13,7 @@ This pipeline downloads news articles from CommonCrawl News (CCNews) and process
 4. **Parquet Conversion** - Convert to daily-partitioned Parquet for efficient storage
 5. **Embedding** - Generate Qwen3-Embedding-8B embeddings for semantic search
 6. **LanceDB Table + Scalar (Stage 1/2)** - Build article table and scalar date index only
-7. **LanceDB FTS (+ optional IVF-PQ) (Stage 2/2)** - Build full-text index (with positions) and optional vector optimization
+7. **LanceDB FTS + IVF-PQ (Stage 2/2)** - Build full-text index (with positions) and vector optimization
 
 ## Quick Start: Update News (Aug 2025 - Jan 2026)
 
@@ -88,13 +88,15 @@ python data/news/run_news_pipeline.py --step embed
 python data/news/run_news_pipeline.py --step lancedb
 # Wait for completion
 
-# Step 6: Build/refresh FTS (with positions) + optional vector index (Stage 2/2)
+# Step 6: Build/refresh FTS (with positions) + vector index (Stage 2/2 default)
 python data/news/run_news_pipeline.py --step lancedb_index
 # Wait for completion
 ```
 
-The pipeline injects default env settings for Stage 2 (`BUILD_FTS=1`, `FTS_WITH_POSITION=1`,
-`FTS_USE_TANTIVY=1`, and `TANTIVY_INDEX_ROOT=~/forecasting/lancedb_tantivy_indices`).
+The pipeline forces Stage 2 defaults (`BUILD_FTS=1`, `FTS_WITH_POSITION=1`,
+`FTS_USE_TANTIVY=1`, `BUILD_VECTOR_INDEX=1`, and
+`TANTIVY_INDEX_ROOT=~/forecasting/lancedb_tantivy_indices`) so stale shell env vars
+cannot accidentally disable vector indexing.
 
 ### Alternative: Manual Jobs
 
@@ -139,7 +141,7 @@ If collaborators are not on the MPI cluster, setup can differ by filesystem:
 Correct order is:
 1. `embed`
 2. `lancedb` (table + scalar date index only)
-3. `lancedb_index` (FTS with positions + optional vector optimization)
+3. `lancedb_index` (FTS with positions + vector optimization)
 
 If `lancedb_index` fails, do **not** rerun ingest by default. Embeddings and table data are
 usually already complete after `lancedb`; rerun only Stage 2 (`lancedb_index`).

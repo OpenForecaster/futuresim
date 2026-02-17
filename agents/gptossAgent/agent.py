@@ -48,15 +48,26 @@ def _to_responses_input(conversation: List[Dict[str, Any]]) -> List[Dict[str, An
             blocks.append({"type": "input_text", "text": str(content)})
         item: Dict[str, Any] = {"role": role, "content": blocks}
 
+        # Some vLLM /v1/responses builds reject assistant headers containing
+        # function recipients ("to=functions.*"). Treat those as malformed
+        # echoes and drop them from replay context.
+        recipient = m.get("recipient")
+        recipient_str = recipient.strip() if isinstance(recipient, str) else None
+        if (
+            role == "assistant"
+            and isinstance(recipient_str, str)
+            and recipient_str.startswith("functions.")
+        ):
+            continue
+
         name = m.get("name")
         if isinstance(name, str) and name.strip():
             item["name"] = name.strip()
         channel = m.get("channel")
         if isinstance(channel, str) and channel.strip():
             item["channel"] = channel.strip()
-        recipient = m.get("recipient")
-        if isinstance(recipient, str) and recipient.strip():
-            item["recipient"] = recipient.strip()
+        if isinstance(recipient_str, str) and recipient_str:
+            item["recipient"] = recipient_str
         content_type = m.get("content_type")
         if isinstance(content_type, str) and content_type.strip():
             item["content_type"] = content_type.strip()
@@ -630,22 +641,6 @@ class GPTOSSBasicAgent(BasicAgent):
                     "role": "assistant",
                     "channel": "commentary" if tool_calls else "final",
                     "content": assistant_text.strip(),
-                }
-            )
-
-        # Keep explicit assistant tool-call messages in the transcript.
-        for tc in tool_calls:
-            name = tc.get("name")
-            args_raw = tc.get("arguments_raw")
-            if not isinstance(name, str) or not isinstance(args_raw, str):
-                continue
-            conversation.append(
-                {
-                    "role": "assistant",
-                    "channel": "commentary",
-                    "recipient": f"functions.{name}",
-                    "content_type": "json",
-                    "content": args_raw,
                 }
             )
 

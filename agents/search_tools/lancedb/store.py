@@ -2,6 +2,7 @@
 
 import os
 import json
+import re
 from datetime import date
 from pathlib import Path
 from typing import List, Optional, Dict, Any
@@ -100,9 +101,77 @@ class LanceDBSearchTool(BaseSearchTool):
             where_clauses.append(f"date >= timestamp '{min_date.isoformat()}T00:00:00'")
         where = " AND ".join(where_clauses) if where_clauses else None
         
+        def _execute(results_builder):
+            if where:
+                # Use prefilter=False consistently across search modes for reproducibility.
+                # In current LanceDB hybrid, prefilter=True is wired incorrectly.
+                results_builder = results_builder.where(where, prefilter=False)
+            return results_builder.limit(max_results).to_list()
+
+        def _sanitize_fts_query(q: str, *, keep_quotes: bool = True) -> str:
+            # Tantivy parser treats some punctuation as operators and can throw
+            # Syntax Error for plain-language strings like "St. Peter's ...".
+            allowed = r'[^\w\s"]+' if keep_quotes else r"[^\w\s]+"
+            cleaned = re.sub(allowed, " ", q or "")
+            cleaned = re.sub(r"\s+", " ", cleaned).strip()
+            return cleaned
+
+        def _build_fts_retry_candidates(q: str) -> List[str]:
+            """Build progressively safer fallback queries for strict FTS parsers."""
+            candidates: List[str] = []
+            seen = set()
+
+            def _add(s: str) -> None:
+                s2 = (s or "").strip()
+                if not s2 or s2 in seen:
+                    return
+                seen.add(s2)
+                candidates.append(s2)
+
+            # Pass 1: punctuation-cleaned, keep phrase quotes.
+            cleaned_keep_quotes = _sanitize_fts_query(q, keep_quotes=True)
+            _add(cleaned_keep_quotes)
+
+            # Pass 2: if quotes are unbalanced, drop all quotes.
+            if cleaned_keep_quotes.count('"') % 2 != 0:
+                _add(cleaned_keep_quotes.replace('"', " "))
+
+            # Pass 3: fully quote-free cleaned query.
+            _add(_sanitize_fts_query(q, keep_quotes=False))
+
+            # Pass 4: strict token fallback (most parser-safe).
+            tokens = re.findall(r"\w+", q or "")
+            _add(" ".join(tokens))
+
+            return candidates
+
         try:
             if search_type == "keyword":
-                results = self._table.search(query, query_type="fts")
+                try:
+                    results = self._table.search(query, query_type="fts")
+                    rows = _execute(results)
+                except Exception as e:
+                    if "Syntax Error:" in str(e):
+                        retry_err: Optional[Exception] = None
+                        for q2 in _build_fts_retry_candidates(query):
+                            if q2 == (query or "").strip():
+                                continue
+                            print(f"[LanceDB] Retrying FTS with sanitized query: {q2}")
+                            try:
+                                results = self._table.search(q2, query_type="fts")
+                                rows = _execute(results)
+                                break
+                            except Exception as e2:
+                                retry_err = e2
+                                if "Syntax Error:" in str(e2):
+                                    continue
+                                raise
+                        else:
+                            if retry_err:
+                                raise retry_err
+                            raise
+                    else:
+                        raise
             else:
                 # Lazy load embedding model if needed
                 self._load_embedding_model()
@@ -118,19 +187,35 @@ class LanceDBSearchTool(BaseSearchTool):
                         return []
                     if search_type == "semantic":
                         results = self._table.search(query_embedding)
+                        rows = _execute(results)
                     else:  # hybrid - use separate vector() and text()
                         try:
                             results = self._table.search(query_type="hybrid").vector(query_embedding).text(query)
+                            rows = _execute(results)
                         except Exception as e:
-                            # Hybrid requires FTS. If FTS index is missing/broken, keep retrieval alive via semantic search.
+                            if "Syntax Error:" in str(e):
+                                retry_err: Optional[Exception] = None
+                                for q2 in _build_fts_retry_candidates(query):
+                                    if q2 == (query or "").strip():
+                                        continue
+                                    print(f"[LanceDB] Retrying hybrid with sanitized query: {q2}")
+                                    try:
+                                        results = self._table.search(query_type="hybrid").vector(query_embedding).text(q2)
+                                        rows = _execute(results)
+                                        return self._to_results(rows)
+                                    except Exception as e2:
+                                        retry_err = e2
+                                        if "Syntax Error:" in str(e2):
+                                            continue
+                                        print(f"[LanceDB] Sanitized hybrid retry failed, falling back to semantic search: {e2}")
+                                        break
+                                if retry_err and "Syntax Error:" in str(retry_err):
+                                    print(f"[LanceDB] Sanitized hybrid retries exhausted, falling back to semantic search: {retry_err}")
+                            # Hybrid can fail due to FTS parser/runtime issues (e.g., punctuation-heavy queries).
+                            # Keep retrieval alive via semantic-only search.
                             print(f"[LanceDB] Hybrid search unavailable, falling back to semantic search: {e}")
                             results = self._table.search(query_embedding)
-            
-            if where:
-                # Use prefilter=False consistently across search modes for reproducibility.
-                # In current LanceDB hybrid, prefilter=True is wired incorrectly.
-                results = results.where(where, prefilter=False)
-            rows = results.limit(max_results).to_list()
+                            rows = _execute(results)
             return self._to_results(rows)
         except Exception as e:
             print(f"[LanceDB] Search failed ({search_type}): {e}")

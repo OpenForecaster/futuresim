@@ -186,6 +186,12 @@ def extract_assistant_messages(response_json: Dict[str, Any]) -> List[Dict[str, 
             continue
         if item.get("type") != "message":
             continue
+        recipient = item.get("recipient")
+        recipient_str = recipient.strip() if isinstance(recipient, str) else None
+        if isinstance(recipient_str, str) and recipient_str.startswith("functions."):
+            # Tool calls should arrive as `function_call` output items.
+            # Skip assistant message echoes that mimic "to=functions.*" headers.
+            continue
 
         content_chunks: List[str] = []
         for c in (item.get("content") or []):
@@ -203,7 +209,7 @@ def extract_assistant_messages(response_json: Dict[str, Any]) -> List[Dict[str, 
             {
                 "role": "assistant",
                 "channel": item.get("channel") if isinstance(item.get("channel"), str) else None,
-                "recipient": item.get("recipient") if isinstance(item.get("recipient"), str) else None,
+                "recipient": recipient_str,
                 "content_type": item.get("content_type") if isinstance(item.get("content_type"), str) else None,
                 "content": content,
             }
