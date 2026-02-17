@@ -176,9 +176,26 @@ class AllQAgent(BasicAgent):
         Add reminder about initial predictions to standard instructions.
         """
         base_instructions = super()._build_instructions(current_date)
-        
+
+        predicted_count = 0
+        active_count = 0
+        fi = getattr(self, "_forecast_interface", None)
+        if fi is not None and hasattr(fi, "questions"):
+            questions = fi.questions or {}
+            if isinstance(questions, dict):
+                active_count = len(questions)
+        if fi is not None and hasattr(fi, "get_agent_predictions"):
+            preds = fi.get_agent_predictions(self.agent_id)
+            if isinstance(preds, dict):
+                predicted_count = len(preds)
+
         if self.warmed_up or (self.start_date and current_date > self.start_date):
-            reminder = "\n\nIMPORTANT: You have already made initial predictions on ALL active questions during Day 0. Now focus on UPDATING these predictions if new information is available or if you missed something."
+            reminder = (
+                "\n\nIMPORTANT: You currently have predictions on "
+                f"{predicted_count} out of {active_count} active questions. "
+                "You can both update past predictions if new information became available, "
+                "or make new ones."
+            )
             # Insert before "You have {max_actions} actions..."
             if "You have" in base_instructions:
                 base_instructions = base_instructions.replace("You have", reminder + "\n\nYou have", 1)
@@ -196,10 +213,12 @@ class AllQAgent(BasicAgent):
         """
         actions_remaining = self.config.warmup_max_actions
         final_submit_prompt_injected = False
+        final_submit_retry_used = False
 
         while actions_remaining > 0:
+            is_final_turn = actions_remaining == 1
             # Last-action guardrail: explicitly force a submit attempt.
-            if actions_remaining == 1 and not final_submit_prompt_injected:
+            if is_final_turn and not final_submit_prompt_injected:
                 messages.append({"role": "user", "content": self._build_final_submit_instruction(target_qid)})
                 final_submit_prompt_injected = True
 
@@ -208,17 +227,23 @@ class AllQAgent(BasicAgent):
                 response, usage = self.inference.chat(messages, self.config.sampling_params)
             
             if not response or not response.strip():
+                if is_final_turn and not final_submit_retry_used:
+                    final_submit_retry_used = True
+                    continue
                 print(f"  [{self.agent_id}] Empty response in warmup, skipping Q.")
                 break
                 
             reasoning = usage.get("_reasoning_content") if usage else None
             self._timer.record_tokens(usage)
-            messages.append({"role": "assistant", "content": response})
 
             # singleans mode: accept <answer>/<probability> tags and submit a single-outcome forecast.
             if getattr(self.config, "singleans", False):
                 answer, prob, err = parse_answer_probability(response)
                 if err:
+                    if is_final_turn and not final_submit_retry_used:
+                        final_submit_retry_used = True
+                        continue
+                    messages.append({"role": "assistant", "content": response})
                     actions_remaining -= 1
                     self._log_action(
                         forecast_interface,
@@ -240,6 +265,7 @@ class AllQAgent(BasicAgent):
                     messages.append({"role": "user", "content": feedback})
                     continue
 
+                messages.append({"role": "assistant", "content": response})
                 parsed = ParsedAction(
                     action_type="submit",
                     code=None,
@@ -260,6 +286,20 @@ class AllQAgent(BasicAgent):
             
             # Parse
             parsed = parse_action(response, self.config.max_outcomes_per_question)
+            valid_forecasts = []
+            if parsed.action_type == "submit" and parsed.forecasts:
+                valid_forecasts = [f for f in parsed.forecasts if f.get("qid") == target_qid]
+
+            has_valid_final_submit = (
+                parsed.action_type == "submit"
+                and bool(valid_forecasts)
+                and self._forecasts_within_probability_bounds(valid_forecasts)
+            )
+            if is_final_turn and not final_submit_retry_used and not has_valid_final_submit:
+                final_submit_retry_used = True
+                continue
+
+            messages.append({"role": "assistant", "content": response})
             
             if parsed.action_type == "next":
                 # In warmup, 'next' isn't really appropriate as we want them to submit.
@@ -285,12 +325,9 @@ class AllQAgent(BasicAgent):
             
             elif parsed.action_type == "submit":
                 # Enforce strict single-QID submission
-                valid_forecasts = []
                 if parsed.forecasts:
                     for f in parsed.forecasts:
-                        if f['qid'] == target_qid:
-                            valid_forecasts.append(f)
-                        else:
+                        if f['qid'] != target_qid:
                             print(f"  [{self.agent_id}] Ignoring submission for {f['qid']} (target: {target_qid})")
                 
                 # Replace with filtered list
@@ -316,6 +353,30 @@ class AllQAgent(BasicAgent):
                     messages, forecast_interface, response, parsed, actions_remaining, 
                     qid=target_qid, reasoning=reasoning
                 )
+
+    @staticmethod
+    def _forecasts_within_probability_bounds(forecasts: List[Dict[str, Any]]) -> bool:
+        """
+        Validate forecast payload structure against environment probability constraints.
+        """
+        if not forecasts:
+            return False
+        for f in forecasts:
+            outcomes = f.get("outcomes")
+            if not isinstance(outcomes, dict) or not outcomes:
+                return False
+            total = 0.0
+            for p in outcomes.values():
+                try:
+                    pv = float(p)
+                except Exception:
+                    return False
+                if pv < 0.0 or pv > 1.0:
+                    return False
+                total += pv
+            if total > 1.0 + 1e-6:
+                return False
+        return True
 
     def _format_forecast_dict(self, outcomes: Optional[Dict[str, float]]) -> str:
         """Compact, stable formatting for probability dicts in prompts."""

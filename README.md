@@ -25,6 +25,10 @@ python scripts/test_basic_agent.py \
     --end_date 2025-04-05
 ```
 
+Notes:
+- The committed `uv.lock` is aligned to Linux `x86_64` on Python `3.12` (matching the current `fsim` stack).
+- PyTorch CUDA wheels are resolved via `tool.uv.sources` in `pyproject.toml`; collaborators only need `uv sync`.
+
 ## Directory Structure
 
 | Directory | Description |

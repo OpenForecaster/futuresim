@@ -231,6 +231,7 @@ class GPTOSSBasicAgent(BasicAgent):
         reasoning_effort = str(getattr(self.config, "gptoss_reasoning_effort", "medium") or "medium").strip().lower()
         include_reasoning = bool(getattr(self.config, "gptoss_include_reasoning", True))
         final_submit_prompt_injected = False
+        final_submit_retry_used = False
 
         while actions_remaining > 0:
             # Last-action guardrail for per-question runs: force a submit attempt.
@@ -262,6 +263,12 @@ class GPTOSSBasicAgent(BasicAgent):
             except Exception as e:
                 if self._is_fatal_inference_failure(e):
                     raise RuntimeError(f"Fatal inference failure in action loop: {e}") from e
+                if force_final_submit_turn:
+                    if not final_submit_retry_used:
+                        final_submit_retry_used = True
+                        continue
+                    # Final turn retry already used: end this question attempt without submission.
+                    break
                 actions_remaining -= 1
                 err_msg = f"LLM ERROR after retries: {e}"
                 self._log_harmony_action(
@@ -312,6 +319,22 @@ class GPTOSSBasicAgent(BasicAgent):
             if "reasoning_tokens" not in usage and reasoning_tokens_turn > 0:
                 usage["reasoning_tokens"] = reasoning_tokens_turn
             self._timer.record_tokens(usage)
+
+            valid_final_forecasts: List[Dict[str, Any]] = []
+            has_valid_final_submit = False
+            if parsed is not None and parsed.action_type == "submit" and parsed.forecasts:
+                valid_final_forecasts = list(parsed.forecasts)
+                if target_qid is not None:
+                    valid_final_forecasts = [f for f in valid_final_forecasts if f.get("qid") == target_qid]
+                has_valid_final_submit = bool(valid_final_forecasts) and self._forecasts_within_probability_bounds(
+                    valid_final_forecasts
+                )
+            if force_final_submit_turn and not has_valid_final_submit:
+                if not final_submit_retry_used:
+                    final_submit_retry_used = True
+                    continue
+                # Final turn retry already used: end this question attempt without submission.
+                break
 
             # Persist assistant side of the turn in Harmony-like structure.
             self._append_assistant_turns(
@@ -515,6 +538,27 @@ class GPTOSSBasicAgent(BasicAgent):
         if tool_calls:
             parts.append("TOOL_CALLS:\n" + json.dumps(tool_calls[:3], indent=2, sort_keys=True))
         return "\n\n".join(parts).strip()
+
+    @staticmethod
+    def _forecasts_within_probability_bounds(forecasts: List[Dict[str, Any]]) -> bool:
+        if not forecasts:
+            return False
+        for forecast in forecasts:
+            outcomes = forecast.get("outcomes")
+            if not isinstance(outcomes, dict) or not outcomes:
+                return False
+            total = 0.0
+            for prob in outcomes.values():
+                try:
+                    value = float(prob)
+                except Exception:
+                    return False
+                if value < 0.0 or value > 1.0:
+                    return False
+                total += value
+            if total > 1.0 + 1e-6:
+                return False
+        return True
 
     def _log_harmony_action(
         self,
