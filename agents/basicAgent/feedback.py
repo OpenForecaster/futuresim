@@ -2,7 +2,7 @@
 FeedbackHandler: Computes and formatting daily feedback for the agent.
 """
 
-from typing import Dict, Any, List, Set, Optional
+from typing import Dict, Any, List, Set, Optional, Callable
 from datetime import date
 from collections import defaultdict
 
@@ -17,8 +17,9 @@ from environment.ansmatching import AnswerMatcher
 from environment.data_loader import Question
 
 class FeedbackHandler:
-    def __init__(self, agent_id: str):
+    def __init__(self, agent_id: str, timing_callback: Optional[Callable[[float], None]] = None):
         self.agent_id = agent_id
+        self._timing_callback = timing_callback
         
         # Cumulative metrics tracking
         self.total_brier_sum = 0.0
@@ -36,7 +37,11 @@ class FeedbackHandler:
         if self._matcher is None:
             # Create a matcher using the agent's inference provider
             # We use a mocked logger or None since we don't need to log matching details here
-            self._matcher = AnswerMatcher(inference_provider, logger=None)
+            self._matcher = AnswerMatcher(
+                inference_provider,
+                logger=None,
+                timing_callback=self._timing_callback
+            )
         return self._matcher
         
     def generate_feedback(self, 

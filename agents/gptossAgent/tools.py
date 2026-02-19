@@ -380,6 +380,8 @@ def extract_reasoning_token_count(response_json: Dict[str, Any]) -> int:
 
 def response_to_action(
     response_json: Dict[str, Any],
+    *,
+    tool_calls: Optional[List[Dict[str, Any]]] = None,
 ) -> Tuple[Optional[ParsedAction], str, List[Dict[str, Any]]]:
     """
     Convert a Responses payload into (ParsedAction|None, assistant_text, tool_calls).
@@ -387,7 +389,8 @@ def response_to_action(
     We prefer the first function_call item as "the action" for this turn.
     """
     assistant_text = _extract_output_text(response_json) or ""
-    tool_calls = extract_function_calls(response_json)
+    if tool_calls is None:
+        tool_calls = extract_function_calls(response_json)
     if not tool_calls:
         return None, assistant_text, tool_calls
 

@@ -91,10 +91,6 @@ def parse_args():
     
     # Processing
     parser.add_argument(
-        "--batch_size", type=int, default=32,
-        help="Batch size for embedding (default: 32)"
-    )
-    parser.add_argument(
         "--worker_id", type=int, default=0,
         help="Worker ID for parallel processing (0-indexed)"
     )
@@ -201,7 +197,7 @@ def load_embedding_model(model_path: str):
     return LLM(model=model_path, convert="embed", trust_remote_code=True)
 
 
-def embed_texts(texts: List[str], model, batch_size: int = 512) -> np.ndarray:
+def embed_texts(texts: List[str], model) -> np.ndarray:
     """Embed texts using vLLM.
     
     Per official Qwen3-Embedding docs: NO instruction prefix for documents.
@@ -328,7 +324,7 @@ def main():
             continue
         
         print(f"  Embedding...")
-        embeddings = embed_texts(chunk_texts, model, args.batch_size)
+        embeddings = embed_texts(chunk_texts, model)
         print(f"  Embedding shape: {embeddings.shape}")
         
         # Save config on first successful embedding (worker 0 only)

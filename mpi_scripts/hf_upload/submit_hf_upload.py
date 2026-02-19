@@ -22,8 +22,12 @@ def main() -> None:
     parser.add_argument("--progress_secs", type=int, default=60)
     parser.add_argument(
         "--stage_root",
-        default=str(Path.home() / "hf_upload_staging"),
-        help="Root directory for per-job staging copies.",
+        default="",
+        help=(
+            "Root directory for per-job staging copies. "
+            "If unset, run_hf_upload.sh defaults to $_CONDOR_SCRATCH_DIR/hf_upload_staging "
+            "inside the execute node."
+        ),
     )
     parser.add_argument(
         "--stage_path",
@@ -65,10 +69,11 @@ def main() -> None:
         f"HF_UPLOAD_NUM_WORKERS={args.num_workers}",
         f"HF_UPLOAD_INCLUDE_GLOB={args.include}",
         f"HF_UPLOAD_PROGRESS_SECS={args.progress_secs}",
-        f"HF_UPLOAD_STAGE_ROOT={args.stage_root}",
         f"HF_UPLOAD_VERIFY_REMOTE={0 if args.no_verify_remote else 1}",
         f"HF_UPLOAD_DELETE_STAGE_ON_SUCCESS={0 if args.keep_stage else 1}",
     ]
+    if args.stage_root:
+        env_parts.append(f"HF_UPLOAD_STAGE_ROOT={args.stage_root}")
     if args.stage_path:
         env_parts.append(f"HF_UPLOAD_STAGE_PATH={args.stage_path}")
     if args.exclude:

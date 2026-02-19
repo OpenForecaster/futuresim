@@ -5,6 +5,7 @@ Tracks timing metrics for:
 - LLM calls
 - Search actions  
 - DataFrame queries
+- Matcher calls
 - Daily totals
 
 Usage:
@@ -118,9 +119,10 @@ class AgentTimer:
     - llm: LLM inference calls
     - search: Search operations
     - df_query: DataFrame query execution
+    - matcher: Answer matcher LLM calls
     """
     
-    CATEGORIES = ["llm", "search", "df_query"]
+    CATEGORIES = ["llm", "search", "df_query", "matcher"]
     
     def __init__(self):
         from threading import Lock

@@ -6,8 +6,9 @@ Key rule: More specific predictions match less specific ground truth,
 but vaguer predictions do NOT match more specific ground truth.
 """
 
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Callable
 import re
+import time
 
 
 class AnswerMatcher:
@@ -19,22 +20,43 @@ class AnswerMatcher:
     but rejecting vaguer ones.
     """
     
-    def __init__(self, inference_provider, logger=None, cache_path: str = None):
+    def __init__(
+        self,
+        inference_provider,
+        logger=None,
+        cache_path: str = None,
+        timing_callback: Optional[Callable[[float], None]] = None
+    ):
         """
         Args:
             inference_provider: Object with chat(messages, sampling_params) method.
             logger: Optional SimLogger for logging matcher decisions.
             cache_path: Optional path to save/load persistent cache (JSON).
+            timing_callback: Optional callback(duration_seconds) for matcher latency.
         """
         self.inference = inference_provider
         self.logger = logger
         self.cache_path = cache_path
+        self._timing_callback = timing_callback
+        self._timing_count = 0
+        self._timing_total_seconds = 0.0
         
         # Simple cache: (predicted, ground_truth, qid) -> bool
         self._cache: Dict[tuple, bool] = {}
         
         if cache_path:
             self.load_cache(cache_path)
+
+    def _record_timing(self, duration: float) -> None:
+        """Record matcher call timing and forward to optional callback."""
+        self._timing_count += 1
+        self._timing_total_seconds += duration
+        if self._timing_callback:
+            try:
+                self._timing_callback(duration)
+            except Exception:
+                # Timing callback should never break matcher correctness.
+                pass
     
     def load_cache(self, path: str):
         """Load cache from a JSON file."""
@@ -111,14 +133,20 @@ Ground truth (actual answer): "{ground_truth}"
 
 Does the predicted outcome match the ground truth? Rules:
 - YES if predictions are semantically equivalent (same meaning, different wording)
-- YES if predicted outcome is MORE SPECIFIC than ground truth (e.g., "David Raya" matches "Raya")
+- YES if predicted outcome is MORE SPECIFIC than ground truth (e.g. "David Raya" matches "Raya")
+- NO if predicted outcome contains generic text like "Unknown" or "Answer 1"
 - NO if predicted outcome is VAGUER/MORE GENERAL than ground truth (e.g., "a goalkeeper" does NOT match "David Raya")
 - NO if they refer to different things
 
+Essentially, you have to grade whether the forecaster correctly predicted the ground truth answer for the question.
 Answer strictly "Yes" or "No"."""
 
         messages = [{"role": "user", "content": prompt}]
-        response, _ = self.inference.chat(messages, {"temperature": 0.0, "max_tokens": 10})
+        started = time.perf_counter()
+        try:
+            response, _ = self.inference.chat(messages, {"temperature": 0.0, "max_tokens": 10})
+        finally:
+            self._record_timing(time.perf_counter() - started)
         
         is_equiv = "yes" in response.lower()
         
@@ -192,7 +220,11 @@ If no match exists, respond with "None".
 Answer:"""
 
         messages = [{"role": "user", "content": prompt}]
-        response_text, _ = self.inference.chat(messages, {"temperature": 0.0, "max_tokens": 10})
+        started = time.perf_counter()
+        try:
+            response_text, _ = self.inference.chat(messages, {"temperature": 0.0, "max_tokens": 10})
+        finally:
+            self._record_timing(time.perf_counter() - started)
         response = response_text.strip()
         
         # Parse result
@@ -229,6 +261,11 @@ Answer:"""
         """Get statistics about answer matching."""
         return {
             "cache_size": len(self._cache),
+            "matcher_count": self._timing_count,
+            "matcher_total_seconds": round(self._timing_total_seconds, 3),
+            "matcher_avg_seconds": round(
+                self._timing_total_seconds / self._timing_count, 3
+            ) if self._timing_count > 0 else 0.0,
         }
     
     def clear(self):

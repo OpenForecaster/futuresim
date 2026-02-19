@@ -95,4 +95,4 @@ query text here
 
 Agent timing stats saved to: `<agent_dir>/timing_stats.jsonl`
 
-Fields: `llm_count`, `llm_avg_seconds`, `search_count`, `search_avg_seconds`, `df_query_count`, `df_query_avg_seconds`, `day_total_seconds`
+Fields: `llm_count`, `llm_avg_seconds`, `search_count`, `search_avg_seconds`, `df_query_count`, `df_query_avg_seconds`, `matcher_count`, `matcher_avg_seconds`, `day_total_seconds`

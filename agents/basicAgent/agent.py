@@ -44,6 +44,9 @@ class BasicAgent(BaseAgent):
                  search_tool=None):
         super().__init__(agent_id, inference_provider, model_name)
         self.config = config or AgentConfig()
+
+        # Timing utilities for performance analysis
+        self._timer = AgentTimer()
         
         # Handlers
         self._memory = BasicMemory(agent_id, self.config.memory_dir) if self.config.enable_memory else None
@@ -54,10 +57,10 @@ class BasicAgent(BaseAgent):
             article_max_chars=self.config.article_max_chars,
             search_cutoff_days=self.config.search_cutoff_days
         )
-        self._feedback_handler = FeedbackHandler(agent_id)
-        
-        # Timing utilities for performance analysis
-        self._timer = AgentTimer()
+        self._feedback_handler = FeedbackHandler(
+            agent_id,
+            timing_callback=self._record_matcher_timing
+        )
         
     def act(self, 
             doc_interface,  # Not used in BasicAgent
@@ -122,6 +125,37 @@ class BasicAgent(BaseAgent):
     # =========================================================================
     # Action Loop
     # =========================================================================
+
+    @staticmethod
+    def _build_final_submit_instruction() -> str:
+        """
+        Build a strict last-action instruction that forces a submit attempt.
+        """
+        return (
+            "FINAL ACTION (last chance): You have exactly 1 action remaining and MUST submit now.\n"
+            "Do NOT use query, search, or next.\n"
+            "Return exactly one submit action:\n"
+            "<action type=\"submit\">...</action>\n"
+            "Submit forecasts for one or more active question ids.\n"
+            "Use concrete outcomes and probabilities (sum <= 1.0)."
+        )
+
+    @staticmethod
+    def _is_valid_final_submit(parsed) -> bool:
+        if parsed is None or parsed.action_type != "submit":
+            return False
+        return bool(list(parsed.forecasts or []))
+
+    @staticmethod
+    def _final_submit_invalid_reason(parsed) -> str:
+        if parsed is None:
+            return "No action detected."
+        if parsed.action_type != "submit":
+            got = parsed.action_type if parsed.action_type else "none"
+            return f"Expected submit action, got '{got}'."
+        if not list(parsed.forecasts or []):
+            return parsed.error or "No valid forecasts were parsed."
+        return parsed.error or "Invalid submit payload."
     
     def _run_action_loop(self, messages: List[Dict], forecast_interface) -> List[Dict]:
         """
@@ -131,14 +165,84 @@ class BasicAgent(BaseAgent):
         """
         actions_remaining = self.config.max_actions
         all_forecasts = []
+        final_submit_prompt_injected = False
+        final_submit_retry_used = False
         
         while actions_remaining > 0:
+            is_final_turn = actions_remaining == 1
+            if is_final_turn and not final_submit_prompt_injected:
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": self._build_final_submit_instruction(),
+                    }
+                )
+                final_submit_prompt_injected = True
+
             # Get agent response (track LLM time)
-            with self._timer.track("llm"):
-                response, usage = self.inference.chat(messages, self.config.sampling_params)
+            try:
+                with self._timer.track("llm"):
+                    response, usage = self.inference.chat(messages, self.config.sampling_params)
+            except Exception as e:
+                if is_final_turn:
+                    if not final_submit_retry_used:
+                        final_submit_retry_used = True
+                        self._log_action(
+                            forecast_interface,
+                            messages,
+                            "",
+                            "final_submit_llm_error_retry",
+                            actions_remaining,
+                            error=str(e),
+                        )
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": (
+                                    f"LLM error on your final action: {e}\n"
+                                    "You still have exactly 1 action remaining and MUST submit now using:\n"
+                                    "<action type=\"submit\">...</action>\n"
+                                    "Do NOT use query, search, or next.\n\n"
+                                    f"Actions remaining: {actions_remaining}"
+                                ),
+                            }
+                        )
+                        continue
+                    self._log_action(
+                        forecast_interface,
+                        messages,
+                        "",
+                        "final_submit_llm_error_end",
+                        actions_remaining,
+                        error=str(e),
+                    )
+                    break
+                raise
             
             # Handle empty response (API failure with graceful fallback)
             if not response or not response.strip():
+                if is_final_turn and not final_submit_retry_used:
+                    final_submit_retry_used = True
+                    self._log_action(
+                        forecast_interface,
+                        messages,
+                        response or "",
+                        "final_submit_empty_retry",
+                        actions_remaining,
+                    )
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "No response detected on your final action. "
+                                "You still have exactly 1 action remaining and MUST submit now using:\n"
+                                "<action type=\"submit\">...</action>\n"
+                                "Do NOT use query, search, or next.\n\n"
+                                f"Actions remaining: {actions_remaining}"
+                            ),
+                        }
+                    )
+                    continue
                 print(f"  [{self.agent_id}] Empty LLM response (API failure?), ending turn")
                 self._log_action(forecast_interface, messages, response or "", "api_failure", actions_remaining)
                 break
@@ -153,6 +257,43 @@ class BasicAgent(BaseAgent):
             
             # Parse and handle the action
             parsed = parse_action(response, self.config.max_outcomes_per_question)
+
+            if is_final_turn and not self._is_valid_final_submit(parsed):
+                invalid_reason = self._final_submit_invalid_reason(parsed)
+                if not final_submit_retry_used:
+                    final_submit_retry_used = True
+                    self._log_action(
+                        forecast_interface,
+                        messages,
+                        response,
+                        "final_submit_invalid_retry",
+                        actions_remaining,
+                        error=invalid_reason,
+                        reasoning=reasoning,
+                    )
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                f"FINAL ACTION REQUIRED: {invalid_reason}\n"
+                                "You still have exactly 1 action remaining. Submit now using exactly one:\n"
+                                "<action type=\"submit\">...</action>\n"
+                                "Do NOT use query, search, or next.\n\n"
+                                f"Actions remaining: {actions_remaining}"
+                            ),
+                        }
+                    )
+                    continue
+                self._log_action(
+                    forecast_interface,
+                    messages,
+                    response,
+                    "final_submit_invalid_end",
+                    actions_remaining,
+                    error=invalid_reason,
+                    reasoning=reasoning,
+                )
+                break
             
             if parsed.action_type == "next":
                 self._log_action(forecast_interface, messages, response, "next_day", actions_remaining, reasoning=reasoning)
@@ -327,6 +468,10 @@ class BasicAgent(BaseAgent):
         if actions_remaining == 0:
             feedback += "\n\nNo more actions available. Your day ends now."
         return feedback
+
+    def _record_matcher_timing(self, duration: float) -> None:
+        """Record answer matcher latency in timing stats."""
+        self._timer.record("matcher", duration)
     
     # =========================================================================
     # Instructions & Memory
@@ -536,12 +681,12 @@ When ready to move on, use <action type="next"/> to end your day.
 
 ## SUBMISSION RULES
 - qid must be from an active (is_resolved=False) question you saw in query results
-- One forecast per QID per submit action (can submit multiple times for different questions)
+- In one submit action, include at most one <forecast ...> block per qid (no duplicate qids in the same submission).
+- You can submit again in later turns to update that qid.
 - Max {self.config.max_outcomes_per_question} outcomes per question.
 - Outcome names must be REAL predicted answers (e.g., person names, locations, numbers)
 - NEVER use placeholders like "Unknown", "TBD", "Other", "N/A" - these ALWAYS hurt your score
 - Probabilities must sum to ≤ 1.0
-- Submit at least one forecast before ending your day
 
 ---
 

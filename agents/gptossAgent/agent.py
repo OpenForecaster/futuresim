@@ -5,7 +5,7 @@ import hashlib
 import random
 import time
 from datetime import date
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from agents.basicAgent.agent import BasicAgent
 from agents.allQAgent.agent import AllQAgent
@@ -175,10 +175,7 @@ class GPTOSSBasicAgent(BasicAgent):
         return (
             f"{prefix}\n\n"
             "## RESPONSE FORMAT\n"
-            "Use function tools only (no XML tags).\n"
-            "- Call exactly ONE tool per turn.\n"
-            "- Do not output <reasoning> or <action> tags.\n"
-            "- Tool signatures, constraints, and examples are defined in the tool schema.\n\n"
+            "Use function tools as defined in the tool schema, following the signatures, constraints and following the format in examples. You can call one tool per turn.\n\n"
             "## INTERACTION FLOW\n"
             f"You have {self.config.max_actions} actions per day. Each query/search/submit consumes 1 action.\n"
             "When ready to move on, call `next_day()`.\n\n"
@@ -186,7 +183,7 @@ class GPTOSSBasicAgent(BasicAgent):
             "- You may call `submit_forecasts` multiple times in a single day until actions run out.\n"
             "- One `submit_forecasts` call may include forecasts for multiple question IDs.\n"
             "- You may update earlier same-day forecasts by submitting again for the same qid.\n"
-            "- In peer-scoring mode, broader accurate coverage improves total score.\n"
+            "- Broader accurate coverage generally improves total score.\n"
         )
 
     @staticmethod
@@ -264,6 +261,22 @@ class GPTOSSBasicAgent(BasicAgent):
                 if self._is_fatal_inference_failure(e):
                     raise RuntimeError(f"Fatal inference failure in action loop: {e}") from e
                 if force_final_submit_turn:
+                    will_retry = not final_submit_retry_used
+                    self._log_harmony_action(
+                        forecast_interface=forecast_interface,
+                        conversation=conversation,
+                        rendered_response=f"LLM ERROR on forced final submit turn: {e}",
+                        phase="llm_error_final_submit",
+                        actions_remaining=actions_remaining,
+                        qid=target_qid,
+                        prompt_mode=prompt_mode,
+                        reasoning_effort=reasoning_effort,
+                        include_reasoning=include_reasoning,
+                        error=str(e),
+                        final_submit_retry_used=final_submit_retry_used,
+                        will_retry=will_retry,
+                        prompt_override=model_input_payload,
+                    )
                     if not final_submit_retry_used:
                         final_submit_retry_used = True
                         continue
@@ -292,7 +305,20 @@ class GPTOSSBasicAgent(BasicAgent):
                 )
                 continue
 
-            parsed, assistant_text, tool_calls = response_to_action(resp_json)
+            raw_tool_calls = extract_function_calls(resp_json)
+            allowed_tool_names = {
+                t.get("name")
+                for t in effective_tools
+                if isinstance(t, dict) and isinstance(t.get("name"), str)
+            }
+            tool_calls = self._normalize_tool_calls(
+                raw_tool_calls,
+                allowed_tool_names=allowed_tool_names,
+            )
+            parsed, assistant_text, tool_calls = response_to_action(
+                resp_json,
+                tool_calls=tool_calls,
+            )
             reasoning_text = extract_reasoning_text(resp_json)
             assistant_messages = extract_assistant_messages(resp_json)
             replay_items = extract_replay_items_for_tool_turn(resp_json)
@@ -330,6 +356,27 @@ class GPTOSSBasicAgent(BasicAgent):
                     valid_final_forecasts
                 )
             if force_final_submit_turn and not has_valid_final_submit:
+                rendered = self._render_turn_for_logging(assistant_text, tool_calls)
+                will_retry = not final_submit_retry_used
+                self._log_harmony_action(
+                    forecast_interface=forecast_interface,
+                    conversation=conversation,
+                    rendered_response=rendered,
+                    phase="llm_final_submit_invalid",
+                    actions_remaining=actions_remaining,
+                    qid=target_qid,
+                    prompt_mode=prompt_mode,
+                    reasoning_effort=reasoning_effort,
+                    include_reasoning=include_reasoning,
+                    reasoning=reasoning_text if reasoning_text else None,
+                    reasoning_tokens=reasoning_tokens_turn,
+                    status=status,
+                    incomplete_reason=incomplete_reason,
+                    usage=usage,
+                    final_submit_retry_used=final_submit_retry_used,
+                    will_retry=will_retry,
+                    prompt_override=model_input_payload,
+                )
                 if not final_submit_retry_used:
                     final_submit_retry_used = True
                     continue
@@ -591,6 +638,104 @@ class GPTOSSBasicAgent(BasicAgent):
             "input": _to_responses_input(conversation),
         }
         return json.dumps(payload, ensure_ascii=False)
+
+    @staticmethod
+    def _extract_tool_name_candidates(raw_name: Any, allowed_tool_names: Set[str]) -> List[str]:
+        if not isinstance(raw_name, str) or not allowed_tool_names:
+            return []
+
+        text = raw_name.strip()
+        if not text:
+            return []
+
+        ordered: List[str] = []
+        seen: Set[str] = set()
+
+        def add(name: str) -> None:
+            if name in allowed_tool_names and name not in seen:
+                seen.add(name)
+                ordered.append(name)
+
+        stripped_prefix = text
+        if stripped_prefix.startswith("functions."):
+            stripped_prefix = stripped_prefix.split(".", 1)[1].strip()
+
+        stripped_harmony = stripped_prefix
+        if "<|" in stripped_harmony:
+            stripped_harmony = stripped_harmony.split("<|", 1)[0].strip()
+
+        stripped_suffix = stripped_harmony.rstrip("]})\"' ")
+
+        variants = [text, stripped_prefix, stripped_harmony, stripped_suffix]
+        variants_lower = [v.lower() for v in variants if isinstance(v, str) and v]
+
+        for tool_name in sorted(allowed_tool_names):
+            tool_lower = tool_name.lower()
+            if any(tool_lower in v for v in variants_lower):
+                add(tool_name)
+
+        return ordered
+
+    @classmethod
+    def _normalize_tool_call(
+        cls,
+        tool_call: Dict[str, Any],
+        *,
+        allowed_tool_names: Set[str],
+    ) -> Dict[str, Any]:
+        if not isinstance(tool_call, dict) or not allowed_tool_names:
+            return tool_call
+
+        raw_name = tool_call.get("name")
+        args = tool_call.get("arguments")
+        raw_candidates = cls._extract_tool_name_candidates(raw_name, allowed_tool_names)
+
+        nested_name = args.get("name") if isinstance(args, dict) else None
+        nested_candidates = cls._extract_tool_name_candidates(nested_name, allowed_tool_names)
+
+        all_candidates: List[str] = []
+        for cand in raw_candidates + nested_candidates:
+            if cand not in all_candidates:
+                all_candidates.append(cand)
+
+        if len(all_candidates) > 1:
+            # Ambiguous tool identity: reject this call by forcing an unknown name.
+            rejected = dict(tool_call)
+            rejected["raw_name"] = raw_name
+            rejected["name"] = "__ambiguous_tool_name__"
+            return rejected
+
+        if len(all_candidates) == 0:
+            return tool_call
+
+        chosen = all_candidates[0]
+        normalized = dict(tool_call)
+        normalized["raw_name"] = raw_name
+        normalized["name"] = chosen
+
+        if isinstance(args, dict):
+            nested_args = args.get("arguments")
+            if isinstance(nested_args, dict) and set(nested_candidates) == {chosen}:
+                normalized["arguments"] = nested_args
+            elif isinstance(args.get(chosen), dict):
+                normalized["arguments"] = args.get(chosen)
+
+        return normalized
+
+    @classmethod
+    def _normalize_tool_calls(
+        cls,
+        tool_calls: List[Dict[str, Any]],
+        *,
+        allowed_tool_names: Set[str],
+    ) -> List[Dict[str, Any]]:
+        if not allowed_tool_names:
+            return tool_calls
+        out: List[Dict[str, Any]] = []
+        for tc in tool_calls:
+            if isinstance(tc, dict):
+                out.append(cls._normalize_tool_call(tc, allowed_tool_names=allowed_tool_names))
+        return out
 
     @staticmethod
     def _append_tool_output_message(
@@ -910,7 +1055,16 @@ Current memory length: {len(self._memory)} characters"""
             usage["reasoning_tokens"] = reasoning_tokens_turn
         self._timer.record_tokens(usage)
 
-        tool_calls = extract_function_calls(resp_json)
+        raw_tool_calls = extract_function_calls(resp_json)
+        allowed_tool_names = {
+            t.get("name")
+            for t in tools
+            if isinstance(t, dict) and isinstance(t.get("name"), str)
+        }
+        tool_calls = self._normalize_tool_calls(
+            raw_tool_calls,
+            allowed_tool_names=allowed_tool_names,
+        )
         assistant_messages = extract_assistant_messages(resp_json)
         self._append_assistant_turns(
             conversation=conversation,
@@ -1037,7 +1191,5 @@ class GPTOSSAllQAgent(AllQAgent, GPTOSSBasicAgent):
         return (
             f"{prefix}\n\n"
             "## RESPONSE FORMAT\n"
-            "Use function tools only (no XML tags).\n"
-            "- Call exactly ONE tool per turn.\n"
-            "- Tool signatures, constraints, and examples are defined in the tool schema.\n"
+            "Use function tools as defined in the tool schema, following the signatures, constraints and following the format in examples. You can call one tool per turn.\n"
         )
