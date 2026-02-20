@@ -29,7 +29,7 @@ class BasicAgent(BaseAgent):
        - query: Execute Python code to explore the DataFrame
        - search: Search news articles for context (if enabled)
        - get_article: Retrieve full article content
-       - submit: Submit forecasts for one or more questions
+       - submit: Submit a forecast for exactly one question
        - next: End the current day and proceed to next
     3. Updates memory at end of day (always, regardless of how day ended)
     
@@ -126,37 +126,6 @@ class BasicAgent(BaseAgent):
     # Action Loop
     # =========================================================================
 
-    @staticmethod
-    def _build_final_submit_instruction() -> str:
-        """
-        Build a strict last-action instruction that forces a submit attempt.
-        """
-        return (
-            "FINAL ACTION (last chance): You have exactly 1 action remaining and MUST submit now.\n"
-            "Do NOT use query, search, or next.\n"
-            "Return exactly one submit action:\n"
-            "<action type=\"submit\">...</action>\n"
-            "Submit forecasts for one or more active question ids.\n"
-            "Use concrete outcomes and probabilities (sum <= 1.0)."
-        )
-
-    @staticmethod
-    def _is_valid_final_submit(parsed) -> bool:
-        if parsed is None or parsed.action_type != "submit":
-            return False
-        return bool(list(parsed.forecasts or []))
-
-    @staticmethod
-    def _final_submit_invalid_reason(parsed) -> str:
-        if parsed is None:
-            return "No action detected."
-        if parsed.action_type != "submit":
-            got = parsed.action_type if parsed.action_type else "none"
-            return f"Expected submit action, got '{got}'."
-        if not list(parsed.forecasts or []):
-            return parsed.error or "No valid forecasts were parsed."
-        return parsed.error or "Invalid submit payload."
-    
     def _run_action_loop(self, messages: List[Dict], forecast_interface) -> List[Dict]:
         """
         Main action loop: process agent responses until actions exhausted or day ended.
@@ -165,84 +134,26 @@ class BasicAgent(BaseAgent):
         """
         actions_remaining = self.config.max_actions
         all_forecasts = []
-        final_submit_prompt_injected = False
-        final_submit_retry_used = False
         
         while actions_remaining > 0:
-            is_final_turn = actions_remaining == 1
-            if is_final_turn and not final_submit_prompt_injected:
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": self._build_final_submit_instruction(),
-                    }
-                )
-                final_submit_prompt_injected = True
-
             # Get agent response (track LLM time)
             try:
                 with self._timer.track("llm"):
                     response, usage = self.inference.chat(messages, self.config.sampling_params)
             except Exception as e:
-                if is_final_turn:
-                    if not final_submit_retry_used:
-                        final_submit_retry_used = True
-                        self._log_action(
-                            forecast_interface,
-                            messages,
-                            "",
-                            "final_submit_llm_error_retry",
-                            actions_remaining,
-                            error=str(e),
-                        )
-                        messages.append(
-                            {
-                                "role": "user",
-                                "content": (
-                                    f"LLM error on your final action: {e}\n"
-                                    "You still have exactly 1 action remaining and MUST submit now using:\n"
-                                    "<action type=\"submit\">...</action>\n"
-                                    "Do NOT use query, search, or next.\n\n"
-                                    f"Actions remaining: {actions_remaining}"
-                                ),
-                            }
-                        )
-                        continue
-                    self._log_action(
-                        forecast_interface,
-                        messages,
-                        "",
-                        "final_submit_llm_error_end",
-                        actions_remaining,
-                        error=str(e),
-                    )
-                    break
-                raise
+                print(f"  [{self.agent_id}] LLM error: {e}, ending turn")
+                self._log_action(
+                    forecast_interface,
+                    messages,
+                    "",
+                    "llm_error",
+                    actions_remaining,
+                    error=str(e),
+                )
+                break
             
             # Handle empty response (API failure with graceful fallback)
             if not response or not response.strip():
-                if is_final_turn and not final_submit_retry_used:
-                    final_submit_retry_used = True
-                    self._log_action(
-                        forecast_interface,
-                        messages,
-                        response or "",
-                        "final_submit_empty_retry",
-                        actions_remaining,
-                    )
-                    messages.append(
-                        {
-                            "role": "user",
-                            "content": (
-                                "No response detected on your final action. "
-                                "You still have exactly 1 action remaining and MUST submit now using:\n"
-                                "<action type=\"submit\">...</action>\n"
-                                "Do NOT use query, search, or next.\n\n"
-                                f"Actions remaining: {actions_remaining}"
-                            ),
-                        }
-                    )
-                    continue
                 print(f"  [{self.agent_id}] Empty LLM response (API failure?), ending turn")
                 self._log_action(forecast_interface, messages, response or "", "api_failure", actions_remaining)
                 break
@@ -257,43 +168,6 @@ class BasicAgent(BaseAgent):
             
             # Parse and handle the action
             parsed = parse_action(response, self.config.max_outcomes_per_question)
-
-            if is_final_turn and not self._is_valid_final_submit(parsed):
-                invalid_reason = self._final_submit_invalid_reason(parsed)
-                if not final_submit_retry_used:
-                    final_submit_retry_used = True
-                    self._log_action(
-                        forecast_interface,
-                        messages,
-                        response,
-                        "final_submit_invalid_retry",
-                        actions_remaining,
-                        error=invalid_reason,
-                        reasoning=reasoning,
-                    )
-                    messages.append(
-                        {
-                            "role": "user",
-                            "content": (
-                                f"FINAL ACTION REQUIRED: {invalid_reason}\n"
-                                "You still have exactly 1 action remaining. Submit now using exactly one:\n"
-                                "<action type=\"submit\">...</action>\n"
-                                "Do NOT use query, search, or next.\n\n"
-                                f"Actions remaining: {actions_remaining}"
-                            ),
-                        }
-                    )
-                    continue
-                self._log_action(
-                    forecast_interface,
-                    messages,
-                    response,
-                    "final_submit_invalid_end",
-                    actions_remaining,
-                    error=invalid_reason,
-                    reasoning=reasoning,
-                )
-                break
             
             if parsed.action_type == "next":
                 self._log_action(forecast_interface, messages, response, "next_day", actions_remaining, reasoning=reasoning)
@@ -398,6 +272,7 @@ class BasicAgent(BaseAgent):
         """Handle submit action. Returns (updated actions_remaining, list of submitted forecasts)."""
         submitted = []
         actions_remaining -= 1  # Always consume action
+        dropped_forecasts = 0
         
         # For logging: use provided qid, or infer from forecasts
         log_qid = qid
@@ -405,6 +280,11 @@ class BasicAgent(BaseAgent):
             log_qid = parsed.forecasts[0]['qid']
         
         if parsed.forecasts:
+            # Enforce single-qid submit: one <forecast ...> block per submit action.
+            if len(parsed.forecasts) > 1:
+                dropped_forecasts = len(parsed.forecasts) - 1
+                parsed.forecasts = [parsed.forecasts[0]]
+
             for f in parsed.forecasts:
                 try:
                     pred = PredictionSubmission(question_id=f['qid'], outcomes=f['outcomes'])
@@ -423,8 +303,13 @@ class BasicAgent(BaseAgent):
             submitted_qids = [f['qid'] for f in submitted]
             self._log_action(forecast_interface, messages, response, "submit", 
                            actions_remaining, qid=log_qid, submitted_qids=submitted_qids,
-                           num_forecasts=len(submitted), reasoning=reasoning)
-            feedback = f"Submitted {len(submitted)} forecast(s). Actions remaining: {actions_remaining}"
+                           num_forecasts=len(submitted), dropped_forecasts=dropped_forecasts, reasoning=reasoning)
+            if submitted:
+                feedback = f"Submitted forecast for qid={submitted[0]['qid']}. Actions remaining: {actions_remaining}"
+                if dropped_forecasts > 0:
+                    feedback += f"\nIgnored {dropped_forecasts} extra forecast block(s); submit exactly one qid per action."
+            else:
+                feedback = f"SUBMIT ERROR: No valid forecast submitted.\n\nActions remaining: {actions_remaining}"
         else:
             # Parse error - still consumed action
             self._log_action(forecast_interface, messages, response, "submit_error",
@@ -479,38 +364,102 @@ class BasicAgent(BaseAgent):
     # Prompt Helpers
     # =========================================================================
 
-    def _get_scoring_section(self) -> str:
-        """Get scoring description - single vs multi-agent mode."""
-        if self.config.single_agent_mode:
-            return f"""## SCORING (Brier Score)
+    @staticmethod
+    def _render_key_mechanics(
+        mechanics: Dict[str, str],
+        drop_keys: Optional[set[str]] = None,
+    ) -> str:
+        """Render numbered key mechanics, preserving insertion order."""
+        drop = drop_keys or set()
+        lines = [text for key, text in mechanics.items() if key not in drop]
+        return "\n".join(f"{idx}. {line}" for idx, line in enumerate(lines, start=1))
+
+    def _build_binary_brier_scoring_section(
+        self,
+        *,
+        include_peer_summary: bool = True,
+        drop_mechanics: Optional[set[str]] = None,
+    ) -> str:
+        """Build binary Brier scoring text with optional mechanic filtering."""
+        is_multi_agent = not self.config.single_agent_mode
+        show_peer = is_multi_agent and include_peer_summary
+
+        peer_text = ""
+        if show_peer:
+            peer_text = """
+- **Peer Score (relative ranking)**: Your score is compared against the crowd by subtracting the average score of other agents (baseline 0 if you are the only predictor)."""
+
+        mechanics: Dict[str, str] = {
+            "accuracy_calibration": "**Accuracy + Calibration**: Assign probabilities that reflect true likelihood.",
+            "binary_outcomes": "**Binary Outcomes**: Use exact outcomes \"Yes\" and \"No\".",
+            "time_weighted": "**Time-Weighted**: The score is summed over all days the prediction was held, so early predictions have higher weight.",
+            "question_count": "**Prediction-Count Incentive**: Scores are summed (not averaged) across all questions you predict on.",
+        }
+        if show_peer:
+            mechanics["relative_performance"] = (
+                "**Relative Performance (multi-agent)**: Final scoring is relative, "
+                "so you have to outperform the market aggregate to gain positive peer score."
+            )
+
+        mechanics_text = self._render_key_mechanics(mechanics, drop_mechanics)
+        return f"""## SCORING (Brier Score, Binary)
+You are evaluated on **Brier Score** for binary Yes/No questions.
+- Let p = your predicted probability for **Yes**.
+- Let y = 1 if the resolved outcome is **Yes**, else 0.
+- **Brier Score = (p - y)^2**.
+- **Lower is better** (0 is perfect, 1 is worst).{peer_text}
+
+Key Mechanics:
+{mechanics_text}
+"""
+
+    def _build_brier_skill_scoring_section(
+        self,
+        *,
+        include_peer_summary: bool = True,
+        drop_mechanics: Optional[set[str]] = None,
+    ) -> str:
+        """Build Brier Skill scoring text with optional mechanic filtering."""
+        is_multi_agent = not self.config.single_agent_mode
+        show_peer = is_multi_agent and include_peer_summary
+
+        section_title = "Time-Weighted Peer Score (Brier-Skill Based)" if show_peer else "Brier Skill Score"
+        peer_text = ""
+        if show_peer:
+            peer_text = """
+- **Peer Score**: For each snapshot, your Brier Skill Score is compared to the crowd by subtracting the average of other agents' Brier Skill Scores (baseline 0 if you are the only predictor)."""
+
+        mechanics: Dict[str, str] = {
+            "accuracy_calibration": "**Accuracy + Calibration**: Assign high probability to the TRUE outcome and keep probabilities well-calibrated.",
+            "time_weighted": "**Time-Weighted**: The score is summed over all days the prediction was held, so early predictions have higher weight.",
+            "question_count": "**Prediction-Count Incentive**: Scores are summed (not averaged) across all questions you predict on.",
+            "max_outcomes": f"**Max Outcomes**: Submit at most {self.config.max_outcomes_per_question} outcomes per question.",
+            "no_placeholders": "**No Placeholders**: \"Unknown\", \"TBD\", \"Other\" hurt your score. Be specific.",
+        }
+        if show_peer:
+            mechanics["relative_performance"] = (
+                "**Relative Performance (multi-agent)**: Final scoring is relative, "
+                "so you have to outperform the market aggregate to gain positive peer score."
+            )
+
+        mechanics_text = self._render_key_mechanics(mechanics, drop_mechanics)
+        return f"""## SCORING ({section_title})
+You have to output a distribution of (outcome, probability) pairs for each question you make a forecast on.
 You are evaluated on **Brier Skill Score** = 1 - Σ(pᵢ - yᵢ)² summed over all outcomes.
 - pᵢ = your probability for outcome i
 - yᵢ = 1 if outcome i is TRUE, 0 otherwise
-- **Higher is better**: 1.0 = perfect, 0.0 = no skill, negative = worse than uniform.
+- **Higher is better**: 1.0 = perfect, 0.0 = no skill, negative = worse than uniform.{peer_text}
 
 Key Mechanics:
-1. **Accuracy**: Assign high probability to the TRUE outcome, low to others.
-2. **Calibration**: Your probabilities should reflect true frequencies.
-3. **Coverage**: Predict on as many questions as you can assess.
-4. **Max Outcomes**: Submit at most {self.config.max_outcomes_per_question} outcomes per question.
-5. **No Placeholders**: "Unknown", "TBD", "Other" hurt your score. Be specific.
+{mechanics_text}
 """
-        else:
-            return f"""## SCORING (Time-Weighted Peer Score)
-You are evaluated on your **Time-Weighted Peer Score**.
-- **Peer Score**: How much better your forecast is compared to the crowd (average of other agents). 
-  - If you are the only predictor, you are compared against a baseline of 0.
-- **Time-Weighted**: Your score is accumulated over time.
-  - **Incentive**: Predict **early** and **accurately**, and on **more** questions. If you hold a prediction better than the crowd on D days, your improvement multiples D times!
 
-Key Mechanics:
-1. **Accuracy**: Brier score (squared error). Assign probability to the TRUE outcome.
-2. **Relative Performance**: You gain points by being more accurate than the market average.
-3. **Speed**: Establish a good position early to maximize the duration of your high score.
-4. **Number of predictions**: Your score is accumulated (summed, not averaged!) across all questions you predict on
-5. **Max Outcomes**: You can submit at most {self.config.max_outcomes_per_question} outcomes per question.
-6. **No Placeholders**: "Unknown", "TBD", "Other" are detrimental. Predict specific outcomes.
-"""
+    def _get_scoring_section(self) -> str:
+        """Get scoring description - single vs multi-agent mode."""
+        source_name = getattr(getattr(self, "_forecast_interface", None), "source_name", "openforesight")
+        if source_name == "metaculus_binary":
+            return self._build_binary_brier_scoring_section()
+        return self._build_brier_skill_scoring_section()
     
     def _get_data_notes(self) -> str:
         """Get notes about DataFrame columns - conditional on agent mode."""
@@ -650,7 +599,7 @@ IMPORTANT:
 - Only ONE <action> block allowed per turn.
 - For "search", this means only 1 search query per turn.
 - For "query", you can write complex multi-step Python code in one block.
-- For "submit", you can include multiple <forecast> items in one block.
+- For "submit", include exactly one <forecast ...> block (one qid only).
 
 ## ACTION TYPES
 
@@ -662,7 +611,7 @@ print(df[df['is_resolved'] == False][['qid', 'title', 'answer_type']].head())
 </action>
 Use `print()` to ensure you see output. We are not executing in a jupyter notebook, so .head() preview alone can be unreliable.
 {search_section}
-### {submit_num}. Submit Forecasts
+### {submit_num}. Submit Forecast
 <action type="submit">
 <forecast qid="QUESTION_ID">
   <outcome name="Answer1" prob="0.5"/>
@@ -681,7 +630,7 @@ When ready to move on, use <action type="next"/> to end your day.
 
 ## SUBMISSION RULES
 - qid must be from an active (is_resolved=False) question you saw in query results
-- In one submit action, include at most one <forecast ...> block per qid (no duplicate qids in the same submission).
+- In one submit action, include exactly one <forecast ...> block for one qid.
 - You can submit again in later turns to update that qid.
 - Max {self.config.max_outcomes_per_question} outcomes per question.
 - Outcome names must be REAL predicted answers (e.g., person names, locations, numbers)

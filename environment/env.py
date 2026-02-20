@@ -16,6 +16,8 @@ from .scoring import (
 from .ansmatching import AnswerMatcher
 
 
+DAILY_METRICS_HEADER = "date,agent_id,avg_brier,peer_score,tw_peer_score,accuracy,exp_acc,total_predictions\n"
+
 
 class SimLogger:
     """
@@ -39,7 +41,7 @@ class SimLogger:
         self.metrics_path = os.path.join(output_dir, "daily_metrics.csv")
         self.metrics_file = open(self.metrics_path, mode)
         if not append:
-            self.metrics_file.write("date,agent_id,avg_brier,peer_score,tw_peer_score,accuracy,total_predictions\n")
+            self.metrics_file.write(DAILY_METRICS_HEADER)
         
         self._matcher_lock = Lock()
         self.matcher_file = open(os.path.join(output_dir, "matcher.jsonl"), mode)
@@ -102,7 +104,7 @@ class SimLogger:
     def log_daily_metrics(self, sim_date: date, metrics_list: List[Dict[str, Any]]):
         with self._metrics_lock:
             for m in metrics_list:
-                row = f"{sim_date},{m['agent_id']},{m['avg_brier']:.4f},{m['peer_score']:.4f},{m['tw_peer_score']:.4f},{m['accuracy']:.2f},{m['total_predictions']}\n"
+                row = f"{sim_date},{m['agent_id']},{m['avg_brier']:.4f},{m['peer_score']:.4f},{m['tw_peer_score']:.4f},{m['accuracy']:.2f},{m['exp_acc']:.4f},{m['total_predictions']}\n"
                 self.metrics_file.write(row)
             self.metrics_file.flush()
         
@@ -333,6 +335,7 @@ class SimulationEnvironment:
         # Additional metrics for final summary
         self.agent_raw_brier: Dict[str, float] = {}  # Sum of raw Brier scores (last pred only)
         self.agent_snapshot_peer: Dict[str, float] = {}  # Sum of peer scores at resolution (not time-weighted)
+        self.agent_exp_acc_sum: Dict[str, float] = {}  # Sum of P(true outcome) across resolved questions
         
         # Track resolved questions for agent learning
         self.resolved_questions: List[Question] = []
@@ -350,6 +353,7 @@ class SimulationEnvironment:
         self.agent_questions[agent.agent_id] = 0
         self.agent_raw_brier[agent.agent_id] = 0.0
         self.agent_snapshot_peer[agent.agent_id] = 0.0
+        self.agent_exp_acc_sum[agent.agent_id] = 0.0
         
     def run(self):
         print(f"Simulation: {self.current_date} to {self.end_date} (Resume: {bool(self.resume_dir)})")
@@ -449,6 +453,7 @@ class SimulationEnvironment:
         self.agent_questions = {agent.agent_id: 0 for agent in self.agents}
         self.agent_raw_brier = {agent.agent_id: 0.0 for agent in self.agents}
         self.agent_snapshot_peer = {agent.agent_id: 0.0 for agent in self.agents}
+        self.agent_exp_acc_sum = {agent.agent_id: 0.0 for agent in self.agents}
         self.resolved_questions = []
         self.prediction_histories = {}
         self.q_pool.reset()
@@ -457,7 +462,7 @@ class SimulationEnvironment:
         metrics_path = os.path.join(self.output_dir, "daily_metrics.csv")
         self.logger.metrics_file.close()
         with open(metrics_path, 'w') as f:
-            f.write("date,agent_id,avg_brier,peer_score,tw_peer_score,accuracy,total_predictions\n")
+            f.write(DAILY_METRICS_HEADER)
         self.logger.metrics_file = open(metrics_path, 'a')
         
         # 3. Rebuild prediction histories from actions.jsonl (don't process resolutions yet)
@@ -629,11 +634,47 @@ class SimulationEnvironment:
 
         return self._normalize_outcome(best_outcome) == self._normalize_outcome(ground_truth)
 
+    def _get_truth_probability_mass(
+        self,
+        pred: DailyPrediction,
+        ground_truth: str,
+        question_id: Optional[str] = None,
+        question_title: Optional[str] = None
+    ) -> float:
+        """
+        Return total probability assigned to outcomes that match the ground truth.
+        Returns 0.0 when no matching outcome is present.
+        """
+        if not pred or not pred.outcomes or not ground_truth:
+            return 0.0
+
+        truth_norm = self._normalize_outcome(ground_truth)
+        prob_sum = 0.0
+        for outcome, prob in pred.outcomes.items():
+            is_match = False
+            if outcome == ground_truth:
+                is_match = True
+            elif self.matcher:
+                is_match = self.matcher.is_equivalent(
+                    outcome,
+                    ground_truth,
+                    question_id=question_id,
+                    question_title=question_title,
+                    match_type="check_guess"
+                )
+            else:
+                is_match = self._normalize_outcome(outcome) == truth_norm
+
+            if is_match:
+                prob_sum += prob
+
+        return prob_sum
+
     def _compute_daily_active_scores(self, active_questions: List[Question]):
         """
         Compute daily scores only for the currently active questions.
         Uses FUTURE ground truth to assess current performance.
-        Includes Brier score, Peer score, TW-Peer score, and Accuracy.
+        Includes Brier score, Peer score, TW-Peer score, Accuracy, and Exp-Accuracy.
         """
         active_stats = {}
 
@@ -696,6 +737,12 @@ class SimulationEnvironment:
                         question_id=q.qid,
                         question_title=q.title
                     )
+                    truth_prob = self._get_truth_probability_mass(
+                        pred,
+                        q.ground_truth_answer,
+                        question_id=q.qid,
+                        question_title=q.title
+                    )
                     
                     # Aggregate stats
                     if aid not in active_stats:
@@ -704,6 +751,7 @@ class SimulationEnvironment:
                             'peer_sum': 0.0,
                             'tw_peer_sum': 0.0,
                             'correct_count': 0,
+                            'truth_prob_sum': 0.0,
                             'count': 0
                         }
                     
@@ -711,6 +759,7 @@ class SimulationEnvironment:
                     active_stats[aid]['peer_sum'] += snapshot_peers.get(aid, 0.0)
                     active_stats[aid]['tw_peer_sum'] += tw_peers.get(aid, 0.0)
                     active_stats[aid]['correct_count'] += 1 if is_accurate else 0
+                    active_stats[aid]['truth_prob_sum'] += truth_prob
                     active_stats[aid]['count'] += 1
                     
         return active_stats
@@ -731,6 +780,7 @@ class SimulationEnvironment:
             resolved_tw_peer = self.agent_scores.get(aid, 0.0)
             resolved_correct = self.agent_correct.get(aid, 0)
             resolved_count = self.agent_questions.get(aid, 0)
+            resolved_truth_prob = self.agent_exp_acc_sum.get(aid, 0.0)
             
             # Active stats
             agent_active = active_stats.get(aid, {
@@ -738,6 +788,7 @@ class SimulationEnvironment:
                 'peer_sum': 0.0, 
                 'tw_peer_sum': 0.0, 
                 'correct_count': 0,
+                'truth_prob_sum': 0.0,
                 'count': 0
             })
             
@@ -746,10 +797,12 @@ class SimulationEnvironment:
             total_peer_sum = resolved_snapshot_peer + agent_active['peer_sum']
             total_tw_peer_sum = resolved_tw_peer + agent_active['tw_peer_sum']
             total_correct = resolved_correct + agent_active['correct_count']
+            total_truth_prob = resolved_truth_prob + agent_active['truth_prob_sum']
             total_count = resolved_count + agent_active['count']
             
             avg_brier = total_brier_sum / total_count if total_count > 0 else 0.0
             accuracy = (total_correct / total_count * 100) if total_count > 0 else 0.0
+            exp_acc = total_truth_prob / total_count if total_count > 0 else 0.0
             
             metrics_list.append({
                 'agent_id': aid,
@@ -757,6 +810,7 @@ class SimulationEnvironment:
                 'peer_score': total_peer_sum,
                 'tw_peer_score': total_tw_peer_sum,
                 'accuracy': accuracy,
+                'exp_acc': exp_acc,
                 'total_predictions': total_count
             })
             
@@ -874,6 +928,12 @@ class SimulationEnvironment:
                     continue
 
                 self.agent_questions[agent_id] = self.agent_questions.get(agent_id, 0) + 1
+                self.agent_exp_acc_sum[agent_id] = self.agent_exp_acc_sum.get(agent_id, 0.0) + self._get_truth_probability_mass(
+                    pred,
+                    q.ground_truth_answer,
+                    question_id=q.qid,
+                    question_title=q.title
+                )
                 if self._is_top_choice_correct(
                     pred,
                     q.ground_truth_answer,
@@ -998,6 +1058,12 @@ class SimulationEnvironment:
                             self.agent_questions[aid] = self.agent_questions.get(aid, 0) + 1
                             pred = final_snapshot.get(aid)
                             if pred and ground_truth:
+                                self.agent_exp_acc_sum[aid] = self.agent_exp_acc_sum.get(aid, 0.0) + self._get_truth_probability_mass(
+                                    pred,
+                                    ground_truth,
+                                    question_id=qid,
+                                    question_title=question_title
+                                )
                                 if self._is_top_choice_correct(
                                     pred,
                                     ground_truth,

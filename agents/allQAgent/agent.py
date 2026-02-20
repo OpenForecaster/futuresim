@@ -42,7 +42,7 @@ class AllQAgent(BasicAgent):
         )
         return any(marker in msg for marker in fatal_markers)
 
-    def _build_final_submit_instruction(self, target_qid: str) -> str:
+    def _build_warmup_final_submit_instruction(self, target_qid: str) -> str:
         """
         Build a strict, last-action instruction that forces a submission attempt.
         This is injected as an extra user turn when only one action remains.
@@ -65,6 +65,15 @@ class AllQAgent(BasicAgent):
             "Return exactly one submit action for this qid only:\n"
             f"<action type=\"submit\"><forecast qid=\"{target_qid}\">...</forecast></action>"
         )
+
+    @staticmethod
+    def _with_actions_remaining(content: str, actions_remaining: int) -> str:
+        """Ensure user-feedback messages explicitly carry the remaining-action count."""
+        if "Actions remaining:" in content:
+            return content
+        if content.endswith("\n"):
+            return f"{content}Actions remaining: {actions_remaining}"
+        return f"{content}\n\nActions remaining: {actions_remaining}"
 
     def warmup(self, forecast_interface, current_date: date) -> None:
         """
@@ -219,7 +228,12 @@ class AllQAgent(BasicAgent):
             is_final_turn = actions_remaining == 1
             # Last-action guardrail: explicitly force a submit attempt.
             if is_final_turn and not final_submit_prompt_injected:
-                messages.append({"role": "user", "content": self._build_final_submit_instruction(target_qid)})
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": self._build_warmup_final_submit_instruction(target_qid),
+                    }
+                )
                 final_submit_prompt_injected = True
 
             # Get response
@@ -262,7 +276,12 @@ class AllQAgent(BasicAgent):
                         f"Parser error: {err}\n\nActions remaining: {actions_remaining}"
                     )
                     feedback = self._add_exhaustion_warning(feedback, actions_remaining)
-                    messages.append({"role": "user", "content": feedback})
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": self._with_actions_remaining(feedback, actions_remaining),
+                        }
+                    )
                     continue
 
                 messages.append({"role": "assistant", "content": response})
@@ -311,11 +330,16 @@ class AllQAgent(BasicAgent):
             
             elif parsed.action_type == "query":
                 # Queries are disabled in warmup (no DataFrame access)
+                actions_remaining -= 1
                 self._log_action(forecast_interface, messages, response, "warmup_query_disabled",
                                actions_remaining, qid=target_qid, reasoning=reasoning)
                 feedback = "Error: Database queries are not available in this per-question focused mode. Please use search or submit your forecast."
-                messages.append({"role": "user", "content": feedback})
-                actions_remaining -= 1
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": self._with_actions_remaining(feedback, actions_remaining),
+                    }
+                )
             
             elif parsed.action_type == "search":
                 actions_remaining = self._handle_search(
@@ -342,11 +366,16 @@ class AllQAgent(BasicAgent):
                     break 
                 else:
                     # If no valid forecasts, warn agent
+                    actions_remaining -= 1
                     self._log_action(forecast_interface, messages, response, "warmup_submit_wrong_qid",
                                    actions_remaining, qid=target_qid, reasoning=reasoning)
                     feedback = f"Error: You must submit a forecast for question {target_qid}. You submitted for different IDs or none."
-                    messages.append({"role": "user", "content": feedback})
-                    actions_remaining -= 1
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": self._with_actions_remaining(feedback, actions_remaining),
+                        }
+                    )
                 
             else:
                 actions_remaining = self._handle_invalid(
@@ -384,6 +413,42 @@ class AllQAgent(BasicAgent):
             return "None"
         items = sorted(outcomes.items(), key=lambda kv: (-kv[1], kv[0]))
         return "{" + ", ".join(f"{k}: {v:.3f}" for k, v in items) + "}"
+
+    def _get_warmup_source_name(self, forecast_interface=None) -> str:
+        """Resolve source name for warmup/allqd prompts."""
+        source_name = None
+        if forecast_interface is not None:
+            source_name = getattr(forecast_interface, "source_name", None)
+        if not source_name:
+            fi = getattr(self, "_forecast_interface", None)
+            source_name = getattr(fi, "source_name", None) if fi is not None else None
+        return (source_name or "openforesight").lower()
+
+    def _get_warmup_scoring_section(self, forecast_interface=None) -> str:
+        """
+        Dataset-conditional scoring instructions for warmup/allqd prompts.
+
+        - metaculus_binary: keep legacy binary raw-Brier wording
+        - all other datasets: mirror BasicAgent scoring section
+        """
+        if self._get_warmup_source_name(forecast_interface) == "metaculus_binary":
+            return """## SCORING (Brier Score)
+For this initial phase, you are evaluated strictly on **Brier Score** (accuracy).
+- **Brier Score**: Measures the squared difference between your predicted probability and the actual outcome (0 or 1).
+- **Goal**: Assign high probability to the TRUE outcome and low probability to FALSE outcomes.
+- Minimize your Brier score (lower is better).
+
+Key Mechanics:
+1. **Brier Score**: You are scored on the squared difference between your predicted probabilities and the resolution (0 or 1).
+2. **Distribution**: You must submit a list of (Outcome, Probability) pairs.
+3. **Max Outcomes**: You can submit at most {self.config.max_outcomes_per_question} outcomes per question. Focus on the most likely ones.
+4. **No Placeholders**: "Unknown", "TBD", "Other" are detrimental. Predict specific outcomes.
+"""
+
+        return self._build_brier_skill_scoring_section(
+            include_peer_summary=False,
+            drop_mechanics={"time_weighted", "question_count"},
+        )
 
     def _build_warmup_system_prompt(self, current_date: date, q, forecast_interface=None) -> str:
         """
@@ -437,6 +502,7 @@ You can search for recent news to inform your forecast.
 """
 
         # Detailed instructions as requested, based on BasicAgent but stripped of memory/peer score
+        scoring_section = self._get_warmup_scoring_section(forecast_interface)
         return f"""You are a forecasting agent. Today is {current_date}. 
 Target Question: {q.title} (ID: {q.qid})
 
@@ -445,17 +511,7 @@ Resolution Criteria: {q.resolution_criteria}
 Answer Type: {q.answer_type}
 {existing_section}
 
-## SCORING (Brier Score)
-For this initial phase, you are evaluated strictly on **Brier Score** (accuracy).
-- **Brier Score**: Measures the squared difference between your predicted probability and the actual outcome (0 or 1).
-- **Goal**: Assign high probability to the TRUE outcome and low probability to FALSE outcomes.
-- Minimize your Brier score (lower is better).
-
-Key Mechanics:
-1. **Brier Score**: You are scored on the squared difference between your predicted probabilities and the resolution (0 or 1).
-2. **Distribution**: You must submit a list of (Outcome, Probability) pairs. 
-3. **Max Outcomes**: You can submit at most {self.config.max_outcomes_per_question} outcomes per question. Focus on the most likely ones.
-4. **No Placeholders**: "Unknown", "TBD", "Other" are detrimental. Predict specific outcomes.
+{scoring_section}
 
 ## ACTIONS
 You have {self.config.warmup_max_actions} actions to research and forecast this question.

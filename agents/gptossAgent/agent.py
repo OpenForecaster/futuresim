@@ -181,9 +181,9 @@ class GPTOSSBasicAgent(BasicAgent):
             "When ready to move on, call `next_day()`.\n\n"
             "## SUBMISSION RULES\n"
             "- You may call `submit_forecasts` multiple times in a single day until actions run out.\n"
-            "- One `submit_forecasts` call may include forecasts for multiple question IDs.\n"
+            "- Each `submit_forecasts` call must include exactly one forecast for exactly one qid.\n"
             "- You may update earlier same-day forecasts by submitting again for the same qid.\n"
-            "- Broader accurate coverage generally improves total score.\n"
+            "- Scoring incentives (including any time-weighting, peer-comparison, and accumulation across questions) are defined in the SCORING section above; prioritize calibrated, high-quality forecasts.\n"
         )
 
     @staticmethod
@@ -944,11 +944,16 @@ class GPTOSSBasicAgent(BasicAgent):
     ) -> Tuple[int, List[Dict[str, Any]]]:
         actions_remaining -= 1
         submitted: List[Dict[str, Any]] = []
+        dropped_forecasts = 0
 
         forecasts = list(parsed.forecasts or [])
         if target_qid is not None:
             # Warmup: enforce target qid.
             forecasts = [f for f in forecasts if f.get("qid") == target_qid]
+        # Enforce single-qid submit in all modes.
+        if len(forecasts) > 1:
+            dropped_forecasts = len(forecasts) - 1
+            forecasts = [forecasts[0]]
 
         if forecasts:
             for f in forecasts:
@@ -961,7 +966,15 @@ class GPTOSSBasicAgent(BasicAgent):
             if submitted:
                 # Ensure later same-day df queries reflect newly submitted predictions.
                 self._query_handler.invalidate_cache()
-            feedback = f"Submitted {len(submitted)} forecast(s). Actions remaining: {actions_remaining}"
+            feedback = (
+                f"Submitted forecast for qid={submitted[0]['qid']}. "
+                f"Actions remaining: {actions_remaining}"
+            )
+            if dropped_forecasts > 0:
+                feedback += (
+                    f"\nIgnored {dropped_forecasts} extra forecast item(s); "
+                    "submit exactly one qid per call."
+                )
         else:
             feedback = f"SUBMIT ERROR: {parsed.error or 'No valid forecasts'}\n\nActions remaining: {actions_remaining}"
 

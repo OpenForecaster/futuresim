@@ -77,7 +77,7 @@ def build_action_tools(
             "type": "function",
             "name": "submit_forecasts",
             "description": (
-                "Submit forecasts for one or more questions. "
+                "Submit exactly one forecast for exactly one question id. "
                 "Example payload: "
                 '{"forecasts":[{"qid":"Q123","outcomes":{"Candidate A":0.55,"Candidate B":0.35}}]}'
             ),
@@ -88,7 +88,9 @@ def build_action_tools(
                 "properties": {
                     "forecasts": {
                         "type": "array",
-                        "description": "A list of forecasts to submit.",
+                        "description": "Single-item list containing exactly one forecast.",
+                        "minItems": 1,
+                        "maxItems": 1,
                         "items": {
                             "type": "object",
                             "additionalProperties": False,
