@@ -22,7 +22,7 @@ Ground truth (actual answer): "{ground_truth}"
 Does the predicted outcome match the ground truth? Rules:
 - YES if predictions are semantically equivalent (same meaning, different wording)
 - YES if predicted outcome is MORE SPECIFIC than ground truth (e.g. "David Raya" matches "Raya")
-- NO if predicted outcome contains generic text like "Unknown" or "Answer 1"
+- NO if predicted outcome contains generic text like "Unknown" or "Answer 1" or "Option 1"
 - NO if predicted outcome is VAGUER/MORE GENERAL than ground truth (e.g., "a goalkeeper" does NOT match "David Raya")
 - NO if they refer to different things
 

@@ -36,12 +36,12 @@ warmup_parallelism: 64
 # --- Search Settings ---
 search_db: "/is/cluster/fast/sgoel/forecasting/news/deduped_articles/lance/Qwen3-Embedding-8B"
 embedding_model: "/is/cluster/fast/sgoel/models/Qwen3-Embedding-8B"
-embedding_gpu_mem: 0.4
+embedding_gpu_mem: 0.7
 
 # --- Answer Matching ---
-matching: "vllm"
-matcher: "/fast/rolmedo/models/qwen3-4b-it-2507"
-matcher_gpu_mem: 0.3
+matching: "openrouter"
+matcher: "deepseek/deepseek-v3.2"
+matcher_gpu_mem: 0.0
 
 # Shared max context used by vLLM (agent/matcher/embedding) in this runner.
 max_model_len: 32768
