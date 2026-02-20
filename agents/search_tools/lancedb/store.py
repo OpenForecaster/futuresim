@@ -110,11 +110,21 @@ class LanceDBSearchTool(BaseSearchTool):
 
         def _sanitize_fts_query(q: str, *, keep_quotes: bool = True) -> str:
             # Tantivy parser treats some punctuation as operators and can throw
-            # Syntax Error for plain-language strings like "St. Peter's ...".
+            # Syntax Error or unknown-field errors for strings like "St. Peter's ..."
+            # or field-style terms such as "site:example.com".
             allowed = r'[^\w\s"]+' if keep_quotes else r"[^\w\s]+"
             cleaned = re.sub(allowed, " ", q or "")
             cleaned = re.sub(r"\s+", " ", cleaned).strip()
             return cleaned
+
+        def _is_fts_parser_error(err: Exception) -> bool:
+            msg = str(err)
+            low = msg.lower()
+            return (
+                "syntax error:" in msg
+                or "field does not exist" in low
+                or "unknown field" in low
+            )
 
         def _build_fts_retry_candidates(q: str) -> List[str]:
             """Build progressively safer fallback queries for strict FTS parsers."""
@@ -151,7 +161,7 @@ class LanceDBSearchTool(BaseSearchTool):
                     results = self._table.search(query, query_type="fts")
                     rows = _execute(results)
                 except Exception as e:
-                    if "Syntax Error:" in str(e):
+                    if _is_fts_parser_error(e):
                         retry_err: Optional[Exception] = None
                         for q2 in _build_fts_retry_candidates(query):
                             if q2 == (query or "").strip():
@@ -163,7 +173,7 @@ class LanceDBSearchTool(BaseSearchTool):
                                 break
                             except Exception as e2:
                                 retry_err = e2
-                                if "Syntax Error:" in str(e2):
+                                if _is_fts_parser_error(e2):
                                     continue
                                 raise
                         else:
@@ -193,7 +203,7 @@ class LanceDBSearchTool(BaseSearchTool):
                             results = self._table.search(query_type="hybrid").vector(query_embedding).text(query)
                             rows = _execute(results)
                         except Exception as e:
-                            if "Syntax Error:" in str(e):
+                            if _is_fts_parser_error(e):
                                 retry_err: Optional[Exception] = None
                                 for q2 in _build_fts_retry_candidates(query):
                                     if q2 == (query or "").strip():
@@ -205,11 +215,11 @@ class LanceDBSearchTool(BaseSearchTool):
                                         return self._to_results(rows)
                                     except Exception as e2:
                                         retry_err = e2
-                                        if "Syntax Error:" in str(e2):
+                                        if _is_fts_parser_error(e2):
                                             continue
                                         print(f"[LanceDB] Sanitized hybrid retry failed, falling back to semantic search: {e2}")
                                         break
-                                if retry_err and "Syntax Error:" in str(retry_err):
+                                if retry_err and _is_fts_parser_error(retry_err):
                                     print(f"[LanceDB] Sanitized hybrid retries exhausted, falling back to semantic search: {retry_err}")
                             # Hybrid can fail due to FTS parser/runtime issues (e.g., punctuation-heavy queries).
                             # Keep retrieval alive via semantic-only search.

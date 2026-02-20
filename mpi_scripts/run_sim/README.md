@@ -11,7 +11,7 @@ echo 'OPENROUTER_API_KEY=your-key-here' > /home/sgoel/forecast-sim/.env
 
 2. Make sure LanceDB Stage 2 indices are built (for search mode):
 ```bash
-python scripts/build_lancedb_index.py --build_fts --fts_with_position --force
+python scripts/build_lancedb_index.py --build_fts --fts_with_position --skip_vector_index --force
 ```
 
 ## Usage

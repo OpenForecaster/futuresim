@@ -13,7 +13,7 @@ This pipeline downloads news articles from CommonCrawl News (CCNews) and process
 4. **Parquet Conversion** - Convert to daily-partitioned Parquet for efficient storage
 5. **Embedding** - Generate Qwen3-Embedding-8B embeddings for semantic search
 6. **LanceDB Table + Scalar (Stage 1/2)** - Build article table and scalar date index only
-7. **LanceDB FTS + IVF-PQ (Stage 2/2)** - Build full-text index (with positions) and vector optimization
+7. **LanceDB FTS (Stage 2/2 default)** - Build full-text index (with positions); vector optimization is optional
 
 ## Quick Start A: MPI Incremental Update (Aug 2025 - Jan 2026)
 
@@ -94,15 +94,15 @@ python data/news/run_news_pipeline.py --step embed
 python data/news/run_news_pipeline.py --step lancedb
 # Wait for completion
 
-# Step 6: Build/refresh FTS (with positions) + vector index (Stage 2/2 default)
+# Step 6: Build/refresh FTS (with positions). Vector index is optional.
 python data/news/run_news_pipeline.py --step lancedb_index
 # Wait for completion
 ```
 
 The pipeline forces Stage 2 defaults (`BUILD_FTS=1`, `FTS_WITH_POSITION=1`,
-`FTS_USE_TANTIVY=1`, `BUILD_VECTOR_INDEX=1`, and
+`FTS_USE_TANTIVY=1`, `BUILD_VECTOR_INDEX=0`, and
 `TANTIVY_INDEX_ROOT=~/forecasting/lancedb_tantivy_indices`) so stale shell env vars
-cannot accidentally disable vector indexing.
+cannot accidentally change the intended FTS-only launch mode.
 
 ## Quick Start B: External Collaborator (From Scratch, 2023-01-01+)
 
@@ -176,11 +176,12 @@ python scripts/build_lancedb.py \
   --skip_fts_index \
   --overwrite
 
-# Step 7: LanceDB stage 2/2 (FTS + vector)
+# Step 7: LanceDB stage 2/2 (FTS default; vector optional)
 python scripts/build_lancedb_index.py \
   --db_path "$LANCE_DIR/Qwen3-Embedding-8B" \
   --build_fts \
   --fts_with_position \
+  --skip_vector_index \
   --force
 ```
 
@@ -189,7 +190,7 @@ python scripts/build_lancedb_index.py \
 If you already have news artifacts on Hugging Face, you can skip expensive steps.
 
 `shash42/forecast-news-embeddings` stores a prebuilt LanceDB directory
-(`articles.lance` + `config.json`) for `Qwen3-Embedding-8B`.
+(`articles.lance`) for `Qwen3-Embedding-8B`.
 
 ```bash
 # Download prebuilt LanceDB directly
@@ -208,15 +209,14 @@ python scripts/build_lancedb_index.py \
   --build_fts \
   --fts_use_tantivy \
   --fts_with_position \
-  --num_partitions 4096 \
-  --num_sub_vectors 64 \
-  --metric cosine \
+  --skip_vector_index \
   --force
 ```
 
 Recommended collaborator rule:
 - Skip `embed` and `lancedb`.
 - Always run `lancedb_index` once after downloading from HF.
+- Rebuild vector index only if you explicitly need IVF-PQ optimization.
 
 Why: the original MPI build used an external Tantivy FTS symlink target, which is not
 portable as a simple dataset download. Rebuilding Stage 2 locally is simpler and reliable.
@@ -244,11 +244,11 @@ cd mpi_scripts/embed && python submit_job.py --gpus 1 --bid 25 --num_workers 8
 # LanceDB Stage 1/2 (table + scalar date index)
 condor_submit_bid 15 mpi_scripts/build_lancedb/build_lancedb.sub
 
-# LanceDB Stage 2/2 (FTS with positions + vector index)
+# LanceDB Stage 2/2 (FTS with positions, vector index skipped by default)
 # Use Tantivy backend with external index files on /lustre to avoid /is lock issues.
 BUILD_FTS=1 FTS_WITH_POSITION=1 FTS_USE_TANTIVY=1 \
 TANTIVY_INDEX_ROOT=/lustre/home/sgoel/forecasting/lancedb_tantivy_indices \
-BUILD_VECTOR_INDEX=1 \
+BUILD_VECTOR_INDEX=0 \
 condor_submit_bid 25 mpi_scripts/build_lancedb/build_index.sub
 ```
 
@@ -257,7 +257,7 @@ condor_submit_bid 25 mpi_scripts/build_lancedb/build_index.sub
 If collaborators are not on the MPI cluster, setup can differ by filesystem:
 1. If LanceDB table path supports lockfiles (typical local disk, many `/lustre` mounts), Tantivy can write FTS in-table directly.
 2. If LanceDB table path does not support lockfiles (for example `/is/cluster/fast` on this cluster), keep `FTS_USE_TANTIVY=1` and set `TANTIVY_INDEX_ROOT` to a lock-capable path (for example under `$HOME` or `/lustre`).
-3. The one-line pipeline command (`--step lancedb_index`) already sets a safe default `TANTIVY_INDEX_ROOT` under `~/forecasting/`.
+3. The one-line pipeline command (`--step lancedb_index`) already sets a safe default `TANTIVY_INDEX_ROOT` under `~/forecasting/` and runs FTS-only (`BUILD_VECTOR_INDEX=0`).
 
 ### Important dependency note
 
@@ -265,7 +265,7 @@ If collaborators are not on the MPI cluster, setup can differ by filesystem:
 Correct order is:
 1. `embed`
 2. `lancedb` (table + scalar date index only)
-3. `lancedb_index` (FTS with positions + vector optimization)
+3. `lancedb_index` (FTS with positions; optional vector optimization)
 
 If `lancedb_index` fails, do **not** rerun ingest by default. Embeddings and table data are
 usually already complete after `lancedb`; rerun only Stage 2 (`lancedb_index`).

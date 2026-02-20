@@ -8,7 +8,7 @@ This script submits HTCondor jobs for the full news processing pipeline:
 3. JSONL → Parquet conversion
 4. Embedding generation
 5. LanceDB table + scalar date index (stage 1/2)
-6. LanceDB FTS + IVF-PQ vector index (stage 2/2)
+6. LanceDB FTS refresh (stage 2/2; vector index optional)
 
 Since some steps depend on previous outputs, run this script multiple times
 after each step completes (check with condor_q).
@@ -29,7 +29,7 @@ Usage:
     # Step 5: Build LanceDB table + scalar date index only (after step 4 completes)
     python run_news_pipeline.py --step lancedb
 
-    # Step 6: Build/refresh FTS (with positions) + vector index
+    # Step 6: Build/refresh FTS (with positions). Vector index is optional.
     #         (after step 5 completes)
     python run_news_pipeline.py --step lancedb_index
     
@@ -273,7 +273,7 @@ def show_status():
             print("⚠ Missing")
             print("    Reason: no FTS index found; run --step lancedb_index")
 
-    print("\n  8. LanceDB vector index (required IVF-PQ):", end=" ")
+    print("\n  8. LanceDB vector index (optional IVF-PQ optimization):", end=" ")
     if not lancedb_ready:
         print("✗ Missing")
         print("    Reason: Step 6 output is not ready")
@@ -285,8 +285,8 @@ def show_status():
         elif flags["has_vector"]:
             print("✓ Ready")
         else:
-            print("⚠ Missing")
-            print("    Reason: no vector index found; run --step lancedb_index")
+            print("ℹ Optional / not built")
+            print("    Reason: stage 2 default is FTS-only (BUILD_VECTOR_INDEX=0)")
         print(f"    FTS present: {flags.get('has_fts', False)}")
 
     print("\n  NOTE: 'Ready' means present and not older than upstream dependencies.")
@@ -430,15 +430,15 @@ def run_lancedb_step():
         return False
     
     print(f"\nOutput will be in: {LANCEDB_DIR}")
-    print("Next: run --step lancedb_index for stage 2/2 (FTS + vector index).")
+    print("Next: run --step lancedb_index for stage 2/2 (FTS refresh; vector optional).")
     return True
 
 
 def run_lancedb_index_step():
-    """Step 6: Build LanceDB FTS + vector index (stage 2/2)."""
+    """Step 6: Build LanceDB FTS (stage 2/2, vector optional)."""
     import subprocess
 
-    print("\n=== Step 6: LanceDB Index Build (Stage 2/2: FTS + vector index) ===")
+    print("\n=== Step 6: LanceDB Index Build (Stage 2/2: FTS default, vector optional) ===")
 
     lancedb_model_dir = f"{LANCEDB_DIR}/Qwen3-Embedding-8B"
     if not check_dir_exists(lancedb_model_dir):
@@ -453,15 +453,14 @@ def run_lancedb_index_step():
 
     env = os.environ.copy()
     # Force stage-2 defaults for the one-line pipeline command.
-    # This avoids shell env leakage (e.g. BUILD_VECTOR_INDEX=0 from prior runs)
-    # accidentally disabling vector index creation.
+    # This avoids shell env leakage accidentally changing index mode.
     env["BUILD_FTS"] = "1"
     env["FTS_WITH_POSITION"] = "1"
     env["FTS_USE_TANTIVY"] = "1"
     env["TANTIVY_INDEX_ROOT"] = os.path.join(
         os.path.expanduser("~"), "forecasting", "lancedb_tantivy_indices"
     )
-    env["BUILD_VECTOR_INDEX"] = "1"
+    env["BUILD_VECTOR_INDEX"] = "0"
     env["NUM_PARTITIONS"] = "4096"
     env["NUM_SUB_VECTORS"] = "64"
     env["VECTOR_METRIC"] = "cosine"

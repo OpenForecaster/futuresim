@@ -11,6 +11,67 @@ import re
 import time
 
 
+def build_is_equivalent_prompt(predicted: str, ground_truth: str, question_title: str = None) -> str:
+    """Build the is_equivalent/check_guess matcher prompt."""
+    return f"""You are an objective judge of forecasting predictions.
+
+Question: "{question_title}"
+Predicted outcome: "{predicted}"
+Ground truth (actual answer): "{ground_truth}"
+
+Does the predicted outcome match the ground truth? Rules:
+- YES if predictions are semantically equivalent (same meaning, different wording)
+- YES if predicted outcome is MORE SPECIFIC than ground truth (e.g. "David Raya" matches "Raya")
+- NO if predicted outcome contains generic text like "Unknown" or "Answer 1"
+- NO if predicted outcome is VAGUER/MORE GENERAL than ground truth (e.g., "a goalkeeper" does NOT match "David Raya")
+- NO if they refer to different things
+
+Essentially, you have to grade whether the forecaster correctly predicted the ground truth answer for the question.
+Answer strictly "Yes" or "No"."""
+
+
+def parse_is_equivalent_response(response: str) -> bool:
+    """Parse matcher text output into a boolean equivalence decision."""
+    return "yes" in (response or "").lower()
+
+
+def build_find_match_prompt(candidate: str, existing_outcomes: List[str], question_title: str = None) -> str:
+    """Build the find_match matcher prompt."""
+    outcomes_list = "\n".join(f"{i + 1}. {o}" for i, o in enumerate(existing_outcomes))
+    question_line = f'Question: "{question_title}"\n\n' if question_title else ""
+    return f"""You are an objective judge of forecasting predictions.
+
+{question_line}New prediction: "{candidate}"
+
+Existing predictions:
+{outcomes_list}
+
+Does the new prediction match any of the existing predictions semantically?
+- Match if they mean the same thing or if new prediction is more specific
+- Do NOT match if new prediction is vaguer/more general
+
+If yes, respond with ONLY the number (e.g., "1" or "3").
+If no match exists, respond with "None".
+
+Answer:"""
+
+
+def parse_find_match_response(response_text: str, existing_outcomes: List[str]) -> Optional[str]:
+    """Parse matcher text output for find_match into a selected outcome or None."""
+    response = (response_text or "").strip()
+    if response.lower() == "none":
+        return None
+
+    numbers = re.findall(r"\d+", response)
+    if not numbers:
+        return None
+
+    idx = int(numbers[0]) - 1
+    if 0 <= idx < len(existing_outcomes):
+        return existing_outcomes[idx]
+    return None
+
+
 class AnswerMatcher:
     """
     Semantic matching of prediction outcomes using LLM.
@@ -125,21 +186,11 @@ class AnswerMatcher:
                            question_id: str = None, question_title: str = None,
                            match_type: str = "is_equivalent") -> bool:
         """Query LLM for semantic equivalence."""
-        prompt = f"""You are an objective judge of forecasting predictions.
-
-Question: "{question_title}"
-Predicted outcome: "{predicted}"
-Ground truth (actual answer): "{ground_truth}"
-
-Does the predicted outcome match the ground truth? Rules:
-- YES if predictions are semantically equivalent (same meaning, different wording)
-- YES if predicted outcome is MORE SPECIFIC than ground truth (e.g. "David Raya" matches "Raya")
-- NO if predicted outcome contains generic text like "Unknown" or "Answer 1"
-- NO if predicted outcome is VAGUER/MORE GENERAL than ground truth (e.g., "a goalkeeper" does NOT match "David Raya")
-- NO if they refer to different things
-
-Essentially, you have to grade whether the forecaster correctly predicted the ground truth answer for the question.
-Answer strictly "Yes" or "No"."""
+        prompt = build_is_equivalent_prompt(
+            predicted=predicted,
+            ground_truth=ground_truth,
+            question_title=question_title,
+        )
 
         messages = [{"role": "user", "content": prompt}]
         started = time.perf_counter()
@@ -148,7 +199,7 @@ Answer strictly "Yes" or "No"."""
         finally:
             self._record_timing(time.perf_counter() - started)
         
-        is_equiv = "yes" in response.lower()
+        is_equiv = parse_is_equivalent_response(response)
         
         if self.logger:
             input_data = {
@@ -200,24 +251,11 @@ Answer strictly "Yes" or "No"."""
             return None
         
         # Batch query for multiple outcomes
-        outcomes_list = "\n".join(f"{i+1}. {o}" for i, o in enumerate(existing_outcomes))
-        question_line = f'Question: "{question_title}"\n\n' if question_title else ""
-        
-        prompt = f"""You are an objective judge of forecasting predictions.
-
-{question_line}New prediction: "{candidate}"
-
-Existing predictions:
-{outcomes_list}
-
-Does the new prediction match any of the existing predictions semantically?
-- Match if they mean the same thing or if new prediction is more specific
-- Do NOT match if new prediction is vaguer/more general
-
-If yes, respond with ONLY the number (e.g., "1" or "3").
-If no match exists, respond with "None".
-
-Answer:"""
+        prompt = build_find_match_prompt(
+            candidate=candidate,
+            existing_outcomes=existing_outcomes,
+            question_title=question_title,
+        )
 
         messages = [{"role": "user", "content": prompt}]
         started = time.perf_counter()
@@ -225,19 +263,7 @@ Answer:"""
             response_text, _ = self.inference.chat(messages, {"temperature": 0.0, "max_tokens": 10})
         finally:
             self._record_timing(time.perf_counter() - started)
-        response = response_text.strip()
-        
-        # Parse result
-        match_result = None
-        if response.lower() != "none":
-            try:
-                numbers = re.findall(r'\d+', response)
-                if numbers:
-                    idx = int(numbers[0]) - 1
-                    if 0 <= idx < len(existing_outcomes):
-                        match_result = existing_outcomes[idx]
-            except Exception:
-                pass
+        match_result = parse_find_match_response(response_text, existing_outcomes)
         
         # Log
         if self.logger:
