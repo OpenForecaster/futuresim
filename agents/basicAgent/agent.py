@@ -399,7 +399,7 @@ class BasicAgent(BaseAgent):
         peer_text = ""
         if show_peer:
             peer_text = """
-- **Peer Score (relative ranking)**: Your score is compared against the crowd by subtracting the average score of other agents (baseline 0 if you are the only predictor)."""
+- **Peer Score (relative ranking)**: `100 × (avg others' Brier - your Brier)` (baseline 0 if you are the only predictor). Positive means better than peers."""
 
         mechanics: Dict[str, str] = {
             "accuracy_calibration": "**Accuracy + Calibration**: Assign probabilities that reflect true likelihood.",
@@ -529,7 +529,7 @@ Example (if options are ["Candidate A", "Candidate B", "Candidate C"]):
 {memory_content}
 </memory>
 
-Use the reasoning and insights above to inform today's forecasts. The DataFrame has your prediction outcomes for active questions (not resolved ones).
+Use the reasoning and insights above to inform today's forecasts. The DataFrame includes your latest predictions for active questions and your final prediction snapshot on resolved questions.
 
 """
             else:
@@ -572,7 +572,10 @@ You have access to a news article database. You can search it to gather informat
         
         return f"""You are a forecasting agent. Today is {current_date}. Your goal: make accurate probability predictions.
 
-{self._feedback_handler.format_feedback(self._feedback_handler.generate_feedback(self._forecast_interface, current_date, self.inference))}
+{self._feedback_handler.format_feedback(
+    self._feedback_handler.generate_feedback(self._forecast_interface, current_date, self.inference),
+    show_tw_peer=not self.config.single_agent_mode,
+)}
 
 {getattr(self._forecast_interface, 'source_context', '')}
 
@@ -664,10 +667,10 @@ You have {self.config.max_actions} actions available. Begin."""
         memory_prompt = f"""End of day {current_date}. You can now update your memory.
 
 ## MEMORY UPDATE
-Your memory is the ONLY thing that carries over to tomorrow. Everything else resets. Tomorrow you get: search over news articles and access to the DataFrame (active question predictions and ground truths for resolved ones, but NOT your predictions for resolved questions — those are deleted on resolution).
+Your memory is the ONLY thing that carries over to tomorrow. Everything else resets. Tomorrow you get: search over news articles and access to the DataFrame (active question predictions, resolved question ground truths, and your final predictions on resolved questions).
 
 Store things NOT recoverable from those tools:
-1. Reasoning behind predictions and how you did on resolved questions that might help with unresolved questions — once a question resolves, both your prediction and reasoning are lost from the DataFrame. Example: "Q149: PSG 0.70 because Sky Bet implied 55% and Inter eliminated in semis."
+1. Reasoning behind predictions and how you did on resolved questions that might help with unresolved questions — once a question resolves, your prediction remains visible in the dataframe, but your reasoning is never stored in the dataframe. Example: "Q149: PSG 0.70 because Sky Bet implied 55% and Inter eliminated in semis."
 2. Performance patterns — track your accuracy across resolved questions so you can calibrate. Example: "Bookmaker odds were correct 80% across 15 sports questions; I should weight them more."
 3. Non-obvious insights that search alone would not surface. Example: "'First country to X' questions almost always resolve to a major economy."
 4. Critical hard-to-find facts directly relevant to active questions. Example: "ECB next meeting June 5 — relevant to Q72, Q108."

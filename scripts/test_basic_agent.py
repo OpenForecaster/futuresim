@@ -1076,6 +1076,7 @@ def main():
                 env.current_date,
                 env.logger,
                 resolved_questions=env.resolved_questions,
+                resolved_agent_predictions=env.resolved_agent_predictions,
                 histories_lock=env._histories_lock,
                 market_csv_path=None  # No market CSV yet
             )

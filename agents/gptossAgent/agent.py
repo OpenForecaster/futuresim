@@ -183,7 +183,6 @@ class GPTOSSBasicAgent(BasicAgent):
             "- You may call `submit_forecasts` multiple times in a single day until actions run out.\n"
             "- Each `submit_forecasts` call must include exactly one forecast for exactly one qid.\n"
             "- You may update earlier same-day forecasts by submitting again for the same qid.\n"
-            "- Scoring incentives (including any time-weighting, peer-comparison, and accumulation across questions) are defined in the SCORING section above; prioritize calibrated, high-quality forecasts.\n"
         )
 
     @staticmethod
@@ -1008,10 +1007,10 @@ class GPTOSSBasicAgent(BasicAgent):
         memory_prompt = f"""End of day {current_date}. You can now update your memory.
 
 ## MEMORY UPDATE
-Your memory is the ONLY thing that carries over to tomorrow. Everything else resets. Tomorrow you get: search over news articles and access to the DataFrame (active question predictions and ground truths for resolved ones, but NOT your predictions for resolved questions — those are deleted on resolution).
+Your memory is the ONLY thing that carries over to tomorrow. Everything else resets. Tomorrow you get: search over news articles and access to the DataFrame (active question predictions, resolved question ground truths, and your final predictions on resolved questions).
 
 Store things NOT recoverable from those tools:
-1. Reasoning behind predictions and how you did on resolved questions that might help with unresolved questions — once a question resolves, both your prediction and reasoning are lost from the DataFrame. Example: "Q149: PSG 0.70 because Sky Bet implied 55% and Inter eliminated in semis."
+1. Reasoning behind predictions and how you did on resolved questions that might help with unresolved questions — once a question resolves, your prediction remains visible but your reasoning is lost from the DataFrame. Example: "Q149: PSG 0.70 because Sky Bet implied 55% and Inter eliminated in semis."
 2. Performance patterns — track your accuracy across resolved questions so you can calibrate. Example: "Bookmaker odds were correct 80% across 15 sports questions; I should weight them more."
 3. Non-obvious insights that search alone would not surface. Example: "'First country to X' questions almost always resolve to a major economy."
 4. Critical hard-to-find facts directly relevant to active questions. Example: "ECB next meeting June 5 — relevant to Q72, Q108."

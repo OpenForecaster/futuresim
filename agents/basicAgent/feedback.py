@@ -101,7 +101,7 @@ class FeedbackHandler:
             }
         }
 
-    def format_feedback(self, feedback_data: Dict[str, Any]) -> str:
+    def format_feedback(self, feedback_data: Dict[str, Any], show_tw_peer: bool = True) -> str:
         """Convert feedback dict to string for the prompt."""
         sections = []
         
@@ -112,7 +112,10 @@ class FeedbackHandler:
             for item in resolved:
                 lines.append(f"- \"{item['title']}\"")
                 lines.append(f"  Your prediction: {item['my_pred_outcome']} ({item['my_pred_prob']:.2f}) | Truth: {item['ground_truth']}")
-                lines.append(f"  Brier: {item['brier']:+.2f} | TW-Peer: {item['tw_peer']:+.2f}")
+                if show_tw_peer:
+                    lines.append(f"  Brier: {item['brier']:+.2f} | TW-Peer: {item['tw_peer']:+.2f}")
+                else:
+                    lines.append(f"  Brier: {item['brier']:+.2f}")
                 lines.append("") 
             sections.append("\n".join(lines))
         
@@ -124,11 +127,17 @@ class FeedbackHandler:
             m_lines.append(f"- Total Predictions: {metrics['total_predictions']} ({metrics['num_resolved']} resolved)")
             
             if metrics['num_resolved'] > 0:
-                m_lines.append(
-                    f"- accuracy: {metrics['accuracy']:.1f}% | "
-                    f"avg brier: {metrics['avg_brier']:.3f} | "
-                    f"time weighted peer: {metrics['tw_peer_score']:.2f}"
-                )
+                if show_tw_peer:
+                    m_lines.append(
+                        f"- accuracy: {metrics['accuracy']:.1f}% | "
+                        f"avg brier: {metrics['avg_brier']:.3f} | "
+                        f"time weighted peer: {metrics['tw_peer_score']:.2f}"
+                    )
+                else:
+                    m_lines.append(
+                        f"- accuracy: {metrics['accuracy']:.1f}% | "
+                        f"avg brier: {metrics['avg_brier']:.3f}"
+                    )
             else:
                 m_lines.append("- (Waiting for resolutions to compute scores)")
             

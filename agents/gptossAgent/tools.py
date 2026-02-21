@@ -136,7 +136,7 @@ def build_memory_tools() -> List[Dict[str, Any]]:
             "name": "update_memory",
             "description": (
                 "Replaces the agent memory with the provided text. This is the ONLY context you retain between days. "
-                "Tomorrow you have search and the DataFrame, but your predictions for resolved questions are deleted on resolution. "
+                "Tomorrow you have search and the DataFrame, including your final predictions for resolved questions. "
                 "Store: (1) reasoning behind predictions and how you did on resolved questions, "
                 "(2) performance/calibration patterns across resolutions, "
                 "(3) non-obvious insights that search alone would not surface, "

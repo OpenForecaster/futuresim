@@ -190,15 +190,18 @@ class AllQAgent(BasicAgent):
 
         predicted_count = 0
         active_count = 0
+        active_qids = set()
         fi = getattr(self, "_forecast_interface", None)
         if fi is not None and hasattr(fi, "questions"):
             questions = fi.questions or {}
             if isinstance(questions, dict):
                 active_count = len(questions)
+                active_qids = set(questions.keys())
         if fi is not None and hasattr(fi, "get_agent_predictions"):
             preds = fi.get_agent_predictions(self.agent_id)
             if isinstance(preds, dict):
-                predicted_count = len(preds)
+                # Count predictions only for currently active questions.
+                predicted_count = sum(1 for qid in preds.keys() if qid in active_qids)
 
         if self.warmed_up or (self.start_date and current_date > self.start_date):
             reminder = (

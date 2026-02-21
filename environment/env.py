@@ -11,7 +11,7 @@ from .data_loader import QuestionPool, Question
 from .scoring import (
     DailyPrediction, PredictionHistory, 
     compute_aggregate, resolve_question,
-    DEFAULT_SCORER
+    DEFAULT_SCORER, BinaryBrierScorer
 )
 from .ansmatching import AnswerMatcher
 
@@ -315,7 +315,12 @@ class SimulationEnvironment:
         self.source_context = self.q_pool.fetcher.get_prompt_context()
         self.source_name = self.q_pool.fetcher.source_name
         
-        self.scorer = DEFAULT_SCORER
+        source_key = str(self.source_name or "").lower()
+        if source_key == "metaculus_binary":
+            # Keep scoring consistent with binary Brier prompt wording.
+            self.scorer = BinaryBrierScorer()
+        else:
+            self.scorer = DEFAULT_SCORER
         
         # Track prediction history per question
         self.prediction_histories: Dict[str, PredictionHistory] = {}
@@ -341,6 +346,9 @@ class SimulationEnvironment:
         self.resolved_questions: List[Question] = []
         # Authoritative per-resolution summaries for agent-facing feedback prompts.
         self.resolution_events: List[Dict[str, Any]] = []
+        # Final per-agent predictions for resolved questions.
+        # Shape: {qid: {agent_id: {"outcomes": {...}, "date": date}}}
+        self.resolved_agent_predictions: Dict[str, Dict[str, Dict[str, Any]]] = {}
         
         self.market_csv_path: Optional[str] = None
         
@@ -459,6 +467,7 @@ class SimulationEnvironment:
         self.agent_exp_acc_sum = {agent.agent_id: 0.0 for agent in self.agents}
         self.resolved_questions = []
         self.resolution_events = []
+        self.resolved_agent_predictions = {}
         self.prediction_histories = {}
         self.q_pool.reset()
         
@@ -618,6 +627,23 @@ class SimulationEnvironment:
             return None, 0.0
         outcome, prob = max(pred.outcomes.items(), key=lambda kv: kv[1])
         return outcome, float(prob)
+
+    def _store_resolved_final_predictions(
+        self,
+        qid: str,
+        final_snapshot: Dict[str, DailyPrediction],
+    ) -> None:
+        """Persist each agent's final snapshot for a resolved question."""
+        per_agent: Dict[str, Dict[str, Any]] = {}
+        for agent_id, pred in (final_snapshot or {}).items():
+            if not pred:
+                continue
+            per_agent[str(agent_id)] = {
+                "outcomes": dict(pred.outcomes or {}),
+                "date": pred.day,
+            }
+        if per_agent:
+            self.resolved_agent_predictions[str(qid)] = per_agent
 
     def _is_top_choice_correct(
         self,
@@ -939,6 +965,7 @@ class SimulationEnvironment:
             self.logger,
             resolved_questions=self.resolved_questions,
             resolution_events=self.resolution_events,
+            resolved_agent_predictions=self.resolved_agent_predictions,
             histories_lock=self._histories_lock,
             market_csv_path=self.market_csv_path,
         )
@@ -967,6 +994,7 @@ class SimulationEnvironment:
                 self.logger,
                 resolved_questions=self.resolved_questions,
                 resolution_events=self.resolution_events,
+                resolved_agent_predictions=self.resolved_agent_predictions,
                 histories_lock=self._histories_lock,
                 market_csv_path=self.market_csv_path,
             )
@@ -992,19 +1020,25 @@ class SimulationEnvironment:
             
     def _resolve_question(self, q: Question):
         """Resolve a question and compute final scores."""
-        from .scoring import BrierScorer, compute_snapshot_peer_scores
+        from .scoring import compute_snapshot_peer_scores
         
         history = self.prediction_histories.get(q.qid)
         if not history or not history.predictions:
             return
             
         # Resolve and compute time-weighted scores
-        result = resolve_question(history, q.ground_truth_answer, self.matcher,
-                                  question_title=q.title)
+        result = resolve_question(
+            history,
+            q.ground_truth_answer,
+            self.matcher,
+            scorer=self.scorer,
+            question_title=q.title,
+        )
         
         # Compute snapshot scores (last prediction only, not time-weighted)
         final_snapshot = history.get_all_current_predictions()
-        scorer = BrierScorer()
+        self._store_resolved_final_predictions(q.qid, final_snapshot)
+        scorer = self.scorer
         
         # Raw Brier scores (per agent, not peer)
         raw_brier_scores = {}
@@ -1116,6 +1150,7 @@ class SimulationEnvironment:
             
         last_date = self.current_date
         records_processed = 0
+        self.resolved_agent_predictions = {}
         
         dates_seen = set()
         
@@ -1175,6 +1210,8 @@ class SimulationEnvironment:
 
                         history = self.prediction_histories.get(qid) if qid else None
                         final_snapshot = history.get_all_current_predictions() if history else {}
+                        if qid:
+                            self._store_resolved_final_predictions(qid, final_snapshot)
                         
                         # Restore raw_brier and snapshot_peer if available (new format)
                         raw_brier = record.get("raw_brier", {})
@@ -1284,6 +1321,7 @@ class SimForecastInterface:
                  logger: SimLogger,
                  resolved_questions: List[Question] = None,
                  resolution_events: List[Dict[str, Any]] = None,
+                 resolved_agent_predictions: Dict[str, Dict[str, Dict[str, Any]]] = None,
                  histories_lock: Lock = None,
                  market_csv_path: str = None):
         self.questions = {q.qid: q for q in questions}
@@ -1294,6 +1332,7 @@ class SimForecastInterface:
         self.current_agent_id: Optional[str] = None
         self.resolved_questions = resolved_questions or []
         self.resolution_events = resolution_events or []
+        self._resolved_agent_predictions = resolved_agent_predictions or {}
         self._histories_lock = histories_lock or Lock()
         self._market_csv_path = market_csv_path
         self._day_complete = False
@@ -1351,19 +1390,30 @@ class SimForecastInterface:
     
     def get_agent_predictions(self, agent_id: str) -> Dict[str, Dict]:
         """
-        Get an agent's current predictions for all questions.
+        Get an agent's latest predictions for active and resolved questions.
         
         Returns dict: {qid: {'outcomes': {...}, 'date': date}}
         Used by DfInterface to populate my_prediction columns.
         """
         result = {}
-        for qid, history in self.histories.items():
-            pred = history.get_latest_prediction(agent_id)
-            if pred:
-                result[qid] = {
-                    'outcomes': pred.outcomes,
-                    'date': pred.day
-                }
+        with self._histories_lock:
+            # Resolved snapshots captured by the environment at resolution time.
+            for qid, by_agent in self._resolved_agent_predictions.items():
+                record = (by_agent or {}).get(agent_id)
+                if isinstance(record, dict):
+                    result[qid] = {
+                        'outcomes': dict(record.get('outcomes') or {}),
+                        'date': record.get('date')
+                    }
+
+            # Active histories remain source-of-truth for unresolved questions.
+            for qid, history in self.histories.items():
+                pred = history.get_latest_prediction(agent_id)
+                if pred:
+                    result[qid] = {
+                        'outcomes': pred.outcomes,
+                        'date': pred.day
+                    }
         return result
     
     def log_model_output(self, prompt: str, response: str, 
