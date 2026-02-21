@@ -134,8 +134,6 @@ class BasicAgent(BaseAgent):
         """
         actions_remaining = self.config.max_actions
         all_forecasts = []
-        final_submit_prompt_injected = False
-        final_submit_retry_used = False
         empty_retries = 0
         max_empty_retries = 2
         
@@ -157,30 +155,7 @@ class BasicAgent(BaseAgent):
                 break
             
             # Handle empty response (API failure with graceful fallback)
-            is_final_turn = actions_remaining == 1
             if not response or not response.strip():
-                if is_final_turn and not final_submit_retry_used:
-                    final_submit_retry_used = True
-                    self._log_action(
-                        forecast_interface,
-                        messages,
-                        response or "",
-                        "final_submit_empty_retry",
-                        actions_remaining,
-                    )
-                    messages.append(
-                        {
-                            "role": "user",
-                            "content": (
-                                "No response detected on your final action. "
-                                "You still have exactly 1 action remaining and MUST submit now using:\n"
-                                "<action type=\"submit\">...</action>\n"
-                                "Do NOT use query, search, or next.\n\n"
-                                f"Actions remaining: {actions_remaining}"
-                            ),
-                        }
-                    )
-                    continue
                 # Retry empty responses a few times before giving up
                 if empty_retries < max_empty_retries:
                     empty_retries += 1

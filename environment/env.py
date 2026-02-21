@@ -349,13 +349,14 @@ class SimulationEnvironment:
         
     def add_agent(self, agent):
         self.agents.append(agent)
-        self.agent_scores[agent.agent_id] = 0.0
-        self.agent_correct[agent.agent_id] = 0
-        self.agent_wrong[agent.agent_id] = 0
-        self.agent_questions[agent.agent_id] = 0
-        self.agent_raw_brier[agent.agent_id] = 0.0
-        self.agent_snapshot_peer[agent.agent_id] = 0.0
-        self.agent_exp_acc_sum[agent.agent_id] = 0.0
+        # Preserve restored resume stats if they were reconstructed before agents were added.
+        self.agent_scores.setdefault(agent.agent_id, 0.0)
+        self.agent_correct.setdefault(agent.agent_id, 0)
+        self.agent_wrong.setdefault(agent.agent_id, 0)
+        self.agent_questions.setdefault(agent.agent_id, 0)
+        self.agent_raw_brier.setdefault(agent.agent_id, 0.0)
+        self.agent_snapshot_peer.setdefault(agent.agent_id, 0.0)
+        self.agent_exp_acc_sum.setdefault(agent.agent_id, 0.0)
         
     def run(self):
         print(f"Simulation: {self.current_date} to {self.end_date} (Resume: {bool(self.resume_dir)})")

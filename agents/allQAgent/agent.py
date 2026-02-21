@@ -47,19 +47,8 @@ class AllQAgent(BasicAgent):
         Build a strict, last-action instruction that forces a submission attempt.
         This is injected as an extra user turn when only one action remains.
 
-        When target_qid is provided (warmup), the prompt targets a single question.
-        When target_qid is None (daily act loop), it prompts for all active questions.
+        This is warmup-only and always targets a single question id.
         """
-        if target_qid is None:
-            # Daily loop: submit for any/all active questions
-            return (
-                "FINAL ACTION (last chance): You have exactly 1 action remaining and must submit now.\n"
-                "Do NOT use search, query, or next.\n"
-                "Return a submit action with forecasts for active questions you haven't predicted yet:\n"
-                "<action type=\"submit\"><forecast qid=\"...\">...</forecast></action>\n"
-                "Use concrete outcomes and probabilities (sum <= 1.0)."
-            )
-
         if getattr(self.config, "singleans", False):
             return (
                 "FINAL ACTION (last chance): You have exactly 1 action remaining and must submit now.\n"
