@@ -46,7 +46,20 @@ class AllQAgent(BasicAgent):
         """
         Build a strict, last-action instruction that forces a submission attempt.
         This is injected as an extra user turn when only one action remains.
+
+        When target_qid is provided (warmup), the prompt targets a single question.
+        When target_qid is None (daily act loop), it prompts for all active questions.
         """
+        if target_qid is None:
+            # Daily loop: submit for any/all active questions
+            return (
+                "FINAL ACTION (last chance): You have exactly 1 action remaining and must submit now.\n"
+                "Do NOT use search, query, or next.\n"
+                "Return a submit action with forecasts for active questions you haven't predicted yet:\n"
+                "<action type=\"submit\"><forecast qid=\"...\">...</forecast></action>\n"
+                "Use concrete outcomes and probabilities (sum <= 1.0)."
+            )
+
         if getattr(self.config, "singleans", False):
             return (
                 "FINAL ACTION (last chance): You have exactly 1 action remaining and must submit now.\n"
@@ -223,6 +236,8 @@ class AllQAgent(BasicAgent):
         actions_remaining = self.config.warmup_max_actions
         final_submit_prompt_injected = False
         final_submit_retry_used = False
+        empty_retries = 0
+        max_empty_retries = 2  # retry up to 2 times on empty responses mid-loop
 
         while actions_remaining > 0:
             is_final_turn = actions_remaining == 1
@@ -239,16 +254,29 @@ class AllQAgent(BasicAgent):
             # Get response
             with self._timer.track("llm"):
                 response, usage = self.inference.chat(messages, self.config.sampling_params)
-            
+
             if not response or not response.strip():
                 if is_final_turn and not final_submit_retry_used:
                     final_submit_retry_used = True
                     continue
-                print(f"  [{self.agent_id}] Empty response in warmup, skipping Q.")
+                # Retry empty responses a few times before giving up
+                if empty_retries < max_empty_retries:
+                    empty_retries += 1
+                    print(f"  [{self.agent_id}] Empty response in warmup (retry {empty_retries}/{max_empty_retries})")
+                    continue
+                print(f"  [{self.agent_id}] Empty response in warmup after {max_empty_retries} retries, skipping Q.")
+                self._log_action(
+                    forecast_interface, messages, response or "", "warmup_empty_skip",
+                    actions_remaining, qid=target_qid,
+                )
                 break
                 
+            # Successful response — reset empty retry counter
+            empty_retries = 0
+
             reasoning = usage.get("_reasoning_content") if usage else None
             self._timer.record_tokens(usage)
+            self._timer.record_cost(usage.get("cost", 0), "llm")
 
             # singleans mode: accept <answer>/<probability> tags and submit a single-outcome forecast.
             if getattr(self.config, "singleans", False):

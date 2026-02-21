@@ -134,6 +134,10 @@ class BasicAgent(BaseAgent):
         """
         actions_remaining = self.config.max_actions
         all_forecasts = []
+        final_submit_prompt_injected = False
+        final_submit_retry_used = False
+        empty_retries = 0
+        max_empty_retries = 2
         
         while actions_remaining > 0:
             # Get agent response (track LLM time)
@@ -153,17 +157,49 @@ class BasicAgent(BaseAgent):
                 break
             
             # Handle empty response (API failure with graceful fallback)
+            is_final_turn = actions_remaining == 1
             if not response or not response.strip():
-                print(f"  [{self.agent_id}] Empty LLM response (API failure?), ending turn")
+                if is_final_turn and not final_submit_retry_used:
+                    final_submit_retry_used = True
+                    self._log_action(
+                        forecast_interface,
+                        messages,
+                        response or "",
+                        "final_submit_empty_retry",
+                        actions_remaining,
+                    )
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "No response detected on your final action. "
+                                "You still have exactly 1 action remaining and MUST submit now using:\n"
+                                "<action type=\"submit\">...</action>\n"
+                                "Do NOT use query, search, or next.\n\n"
+                                f"Actions remaining: {actions_remaining}"
+                            ),
+                        }
+                    )
+                    continue
+                # Retry empty responses a few times before giving up
+                if empty_retries < max_empty_retries:
+                    empty_retries += 1
+                    print(f"  [{self.agent_id}] Empty LLM response, retrying ({empty_retries}/{max_empty_retries})")
+                    continue
+                print(f"  [{self.agent_id}] Empty LLM response after {max_empty_retries} retries, ending turn")
                 self._log_action(forecast_interface, messages, response or "", "api_failure", actions_remaining)
                 break
             
+            # Successful response — reset empty retry counter
+            empty_retries = 0
+
             # Extract reasoning
             reasoning = usage.get("_reasoning_content") if usage else None
 
-            # Record token usage
+            # Record token usage and cost
             self._timer.record_tokens(usage)
-            
+            self._timer.record_cost(usage.get("cost", 0), "llm")
+
             messages.append({"role": "assistant", "content": response})
             
             # Parse and handle the action
@@ -354,9 +390,10 @@ class BasicAgent(BaseAgent):
             feedback += "\n\nNo more actions available. Your day ends now."
         return feedback
 
-    def _record_matcher_timing(self, duration: float) -> None:
-        """Record answer matcher latency in timing stats."""
+    def _record_matcher_timing(self, duration: float, cost: float = 0) -> None:
+        """Record answer matcher latency and cost in timing stats."""
         self._timer.record("matcher", duration)
+        self._timer.record_cost(cost, "matcher")
     
     # =========================================================================
     # Instructions & Memory
@@ -677,6 +714,7 @@ Current memory length: {len(self._memory)} characters"""
         messages.append({"role": "user", "content": memory_prompt})
         response, usage = self.inference.chat(messages, self.config.sampling_params)
         self._timer.record_tokens(usage)
+        self._timer.record_cost(usage.get("cost", 0), "llm")
         messages.append({"role": "assistant", "content": response})
         
         reasoning = usage.get("_reasoning_content") if usage else None

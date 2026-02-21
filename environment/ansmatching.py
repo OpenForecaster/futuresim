@@ -86,14 +86,14 @@ class AnswerMatcher:
         inference_provider,
         logger=None,
         cache_path: str = None,
-        timing_callback: Optional[Callable[[float], None]] = None
+        timing_callback: Optional[Callable[[float, float], None]] = None
     ):
         """
         Args:
             inference_provider: Object with chat(messages, sampling_params) method.
             logger: Optional SimLogger for logging matcher decisions.
             cache_path: Optional path to save/load persistent cache (JSON).
-            timing_callback: Optional callback(duration_seconds) for matcher latency.
+            timing_callback: Optional callback(duration_seconds, cost_usd) for matcher latency/cost.
         """
         self.inference = inference_provider
         self.logger = logger
@@ -108,13 +108,13 @@ class AnswerMatcher:
         if cache_path:
             self.load_cache(cache_path)
 
-    def _record_timing(self, duration: float) -> None:
+    def _record_timing(self, duration: float, cost: float = 0) -> None:
         """Record matcher call timing and forward to optional callback."""
         self._timing_count += 1
         self._timing_total_seconds += duration
         if self._timing_callback:
             try:
-                self._timing_callback(duration)
+                self._timing_callback(duration, cost)
             except Exception:
                 # Timing callback should never break matcher correctness.
                 pass
@@ -193,13 +193,14 @@ class AnswerMatcher:
         )
 
         messages = [{"role": "user", "content": prompt}]
+        usage = {}
         started = time.perf_counter()
         duration = 0.0
         try:
-            response, _ = self.inference.chat(messages, {"temperature": 0.0, "max_tokens": 10})
+            response, usage = self.inference.chat(messages, {"temperature": 0.0, "max_tokens": 10})
         finally:
             duration = time.perf_counter() - started
-            self._record_timing(duration)
+            self._record_timing(duration, usage.get("cost", 0))
         
         is_equiv = parse_is_equivalent_response(response)
         
@@ -261,13 +262,14 @@ class AnswerMatcher:
         )
 
         messages = [{"role": "user", "content": prompt}]
+        usage = {}
         started = time.perf_counter()
         duration = 0.0
         try:
-            response_text, _ = self.inference.chat(messages, {"temperature": 0.0, "max_tokens": 10})
+            response_text, usage = self.inference.chat(messages, {"temperature": 0.0, "max_tokens": 10})
         finally:
             duration = time.perf_counter() - started
-            self._record_timing(duration)
+            self._record_timing(duration, usage.get("cost", 0))
         match_result = parse_find_match_response(response_text, existing_outcomes)
         
         # Log

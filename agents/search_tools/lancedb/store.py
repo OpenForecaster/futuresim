@@ -118,8 +118,7 @@ class LanceDBSearchTool(BaseSearchTool):
             return cleaned
 
         def _is_fts_parser_error(err: Exception) -> bool:
-            msg = str(err)
-            low = msg.lower()
+            low = str(err).lower()
             return (
                 "syntax error:" in low
                 or "field does not exist" in low
@@ -217,13 +216,10 @@ class LanceDBSearchTool(BaseSearchTool):
                                         retry_err = e2
                                         if _is_fts_parser_error(e2):
                                             continue
-                                        print(f"[LanceDB] Sanitized hybrid retry failed, falling back to semantic search: {e2}")
                                         break
-                                if retry_err and _is_fts_parser_error(retry_err):
-                                    print(f"[LanceDB] Sanitized hybrid retries exhausted, falling back to semantic search: {retry_err}")
-                            # Hybrid can fail due to FTS parser/runtime issues (e.g., punctuation-heavy queries).
-                            # Keep retrieval alive via semantic-only search.
-                            print(f"[LanceDB] Hybrid search unavailable, falling back to semantic search: {e}")
+                                # All retries exhausted or non-FTS error — fall through to semantic
+                            # Hybrid failed — keep retrieval alive via semantic-only search.
+                            print(f"[LanceDB] Hybrid search unavailable, falling back to semantic: {e}")
                             results = self._table.search(query_embedding)
                             rows = _execute(results)
             return self._to_results(rows)

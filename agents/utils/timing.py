@@ -73,6 +73,8 @@ class TokenStats:
     reasoning_tokens: int = 0
     cached_tokens: int = 0
     total_tokens: int = 0
+    llm_cost: float = 0.0
+    matcher_cost: float = 0.0
     
     def add(self, usage: Dict) -> None:
         """Add usage stats from an API response."""
@@ -100,12 +102,23 @@ class TokenStats:
         elif 'cached_tokens' in usage:
              self.cached_tokens += usage.get('cached_tokens', 0)
 
+    def add_cost(self, cost: float, category: str) -> None:
+        """Add cost from an API call to the appropriate category."""
+        if not cost:
+            return
+        if category == "matcher":
+            self.matcher_cost += cost
+        else:
+            self.llm_cost += cost
+
     def reset(self) -> None:
         self.prompt_tokens = 0
         self.completion_tokens = 0
         self.reasoning_tokens = 0
         self.cached_tokens = 0
         self.total_tokens = 0
+        self.llm_cost = 0.0
+        self.matcher_cost = 0.0
     
     def to_dict(self) -> Dict:
         return asdict(self)
@@ -174,6 +187,11 @@ class AgentTimer:
         """Record token usage stats."""
         with self._lock:
             self._tokens.add(usage)
+
+    def record_cost(self, cost: float, category: str = "llm") -> None:
+        """Record API call cost (USD) under a category ('llm' or 'matcher')."""
+        with self._lock:
+            self._tokens.add_cost(cost, category)
     
     def get_stats(self) -> Dict:
         """Get all timing statistics."""

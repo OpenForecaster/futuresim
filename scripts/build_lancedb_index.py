@@ -128,6 +128,12 @@ def main():
         help="Non-interactive mode: rebuild existing indices without prompt",
     )
     parser.add_argument(
+        "--accelerator",
+        default=None,
+        choices=["cuda"],
+        help="Use GPU accelerator for IVF-PQ vector index creation (e.g. 'cuda')",
+    )
+    parser.add_argument(
         "--tantivy_index_root",
         default=os.environ.get(
             "TANTIVY_INDEX_ROOT",
@@ -245,12 +251,16 @@ def main():
     print(f"  Metric: {args.metric}")
     print("This may take 30-60 minutes for 14M+ rows...")
     
-    table.create_index(
+    create_kwargs = dict(
         metric=args.metric,
         num_partitions=args.num_partitions,
         num_sub_vectors=args.num_sub_vectors,
-        replace=True  # Replace existing index if any
+        replace=True,
     )
+    if args.accelerator:
+        create_kwargs["accelerator"] = args.accelerator
+        print(f"  Accelerator: {args.accelerator}")
+    table.create_index(**create_kwargs)
     
     print("\n✅ Index created successfully!")
     final_indices = table.list_indices()

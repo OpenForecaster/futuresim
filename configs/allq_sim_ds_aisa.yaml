@@ -1,0 +1,55 @@
+# AllQAgent Simulation Configuration (AISA paths)
+# Usage: python aisa_scripts/run_sim/submit_sim_aisa.py --config configs/allq_sim_ds_aisa.yaml --runs 1
+#
+# Notes:
+# - Shared heavy assets (models/data/search/cache) are under /mnt/nfs/datasets_ac.
+# - Project outputs go under ./logs/ (relative to repo root).
+# - For Hugging Face Hub datasets, you can set dataset_path to "<org>/<dataset_name>" instead.
+
+# --- Simulation Meta ---
+sim_name: "allq_sim_deepseek_aisa"
+start_date: "2025-05-01" # Resolution window start
+end_date: "2025-08-23"   # Resolution window end
+lookback_days: 7         # Days before first resolution to start simulation
+search_cutoff_days: 0    # Cap on search date based on current date in sim
+split: "test"            # Dataset split: train, test, or validation
+
+# --- Data Paths ---
+dataset: "openforesight"
+dataset_path: "nikhilchandak/OpenForesight"
+dataset_cache: "/mnt/nfs/datasets_ac/cache/huggingface/datasets"
+min_forecasters: 10
+resolved_only: true
+output_base: "logs/current_sim"
+warmup_parallelism: 64
+
+# --- Search Settings ---
+# Leave search_db empty to disable search
+search_db: "/mnt/nfs/datasets_ac/news/deduped_articles/lance/Qwen3-Embedding-8B"
+embedding_model: "/mnt/nfs/datasets_ac/models/Qwen3-Embedding-8B"
+embedding_gpu_mem: 0.7
+
+# --- Answer Matching ---
+matching: "openrouter" # Options: "exact", "openrouter", "vllm"
+matcher: "deepseek/deepseek-v3.2"
+matcher_gpu_mem: 0.0
+max_model_len: 8192
+
+# --- Inference Defaults ---
+rate_limit: 32.0         # OpenRouter requests/second
+parallel: true
+
+# --- Agents Configuration ---
+defaults:
+  provider: "openrouter"
+  scaffold: "allQ"
+  max_actions: 10
+  warmup_max_actions: 10
+  temperature: 0.7
+  max_tokens: 2048
+  max_retries: 3
+  
+agents:
+  - model: "deepseek/deepseek-v3.2"
+    provider: "openrouter"
+    # You can override defaults here

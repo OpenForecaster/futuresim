@@ -300,12 +300,46 @@ class OpenRouterInference:
                     
                     content = data["choices"][0]["message"]["content"]
                     usage = data.get("usage", {})
-                    
+
                     # Extract reasoning if available
                     reasoning = data["choices"][0]["message"].get("reasoning")
                     if reasoning:
                         usage["_reasoning_content"] = reasoning
-                        
+
+                    finish_reason = data["choices"][0].get("finish_reason")
+                    if finish_reason:
+                        usage["_finish_reason"] = finish_reason
+
+                    # Treat null/empty content as retryable when reasoning exists
+                    if (not content or not content.strip()) and reasoning:
+                        last_error = Exception(
+                            f"Empty content with reasoning ({len(reasoning)} chars), finish_reason={finish_reason}"
+                        )
+                        if attempt < self.max_retries:
+                            delay = self._calculate_backoff(attempt)
+                            print(
+                                f"  [OpenRouter] Empty content (reasoning={len(reasoning)}c, "
+                                f"finish={finish_reason}), retrying in {delay:.1f}s "
+                                f"(attempt {attempt + 1}/{self.max_retries})"
+                            )
+                            time.sleep(delay)
+                            continue
+                        # Exhausted retries — fall through with the reasoning as content
+                        print(
+                            f"  [OpenRouter] Empty content persisted after {self.max_retries} retries, "
+                            f"using reasoning as content ({len(reasoning)} chars)"
+                        )
+                        return reasoning, usage
+
+                    # Log empty content without reasoning (unexpected)
+                    if not content or not content.strip():
+                        comp_tokens = usage.get("completion_tokens", "?")
+                        print(
+                            f"  [OpenRouter] Warning: empty content "
+                            f"(finish={finish_reason}, tokens={comp_tokens}, "
+                            f"reasoning={'yes' if reasoning else 'no'})"
+                        )
+
                     return content, usage
                 
                 # Rate limit or server error - retry (including 524 Cloudflare timeout)

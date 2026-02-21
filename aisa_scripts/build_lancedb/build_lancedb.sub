@@ -1,0 +1,19 @@
+# HTCondor submit file for LanceDB stage 1/2:
+# ingest table + scalar date index (no FTS / vector index in this stage)
+# Run with: condor_submit_bid 15 build_lancedb.sub
+
+executable = /home/sgoel/forecast-sim/mpi_scripts/build_lancedb/build_lancedb.sh
+
+output = /is/cluster/fast/sgoel/logs/forecasting-sim/build_lancedb/$(Cluster).out
+error = /is/cluster/fast/sgoel/logs/forecasting-sim/build_lancedb/$(Cluster).err
+log = /is/cluster/fast/sgoel/logs/forecasting-sim/build_lancedb/$(Cluster).log
+
+# CPU-only job, but needs memory for embedding ingestion.
+request_cpus = 8
+request_memory = 128GB
+request_disk = 50GB
+
+# No GPU needed for stage 1.
+request_gpus = 0
+
+queue
