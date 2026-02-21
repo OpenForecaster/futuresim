@@ -398,7 +398,35 @@ def response_to_action(
 
     call = tool_calls[0]
     name = call.get("name")
-    args = call.get("arguments") or {}
+    args = call.get("arguments")
+    if args is None:
+        args = {}
+
+    if not isinstance(name, str) or not name:
+        return (
+            ParsedAction(
+                action_type=None,
+                code=None,
+                forecasts=None,
+                query=None,
+                error=f"Malformed tool call: missing/invalid name ({name!r})",
+            ),
+            assistant_text,
+            tool_calls,
+        )
+
+    if not isinstance(args, dict):
+        return (
+            ParsedAction(
+                action_type=None,
+                code=None,
+                forecasts=None,
+                query=None,
+                error=f"Malformed tool call args for {name!r}: expected object, got {type(args).__name__}",
+            ),
+            assistant_text,
+            tool_calls,
+        )
 
     if name == "next_day":
         return ParsedAction(action_type="next", code=None, forecasts=None, query=None, error=None), assistant_text, tool_calls

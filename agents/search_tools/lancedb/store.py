@@ -121,7 +121,7 @@ class LanceDBSearchTool(BaseSearchTool):
             msg = str(err)
             low = msg.lower()
             return (
-                "syntax error:" in msg
+                "syntax error:" in low
                 or "field does not exist" in low
                 or "unknown field" in low
             )

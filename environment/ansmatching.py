@@ -194,10 +194,12 @@ class AnswerMatcher:
 
         messages = [{"role": "user", "content": prompt}]
         started = time.perf_counter()
+        duration = 0.0
         try:
             response, _ = self.inference.chat(messages, {"temperature": 0.0, "max_tokens": 10})
         finally:
-            self._record_timing(time.perf_counter() - started)
+            duration = time.perf_counter() - started
+            self._record_timing(duration)
         
         is_equiv = parse_is_equivalent_response(response)
         
@@ -213,7 +215,8 @@ class AnswerMatcher:
                 input_data["question_title"] = question_title
             self.logger.log_matcher(
                 input_data=input_data,
-                output_data={"response": response, "is_equivalent": is_equiv}
+                output_data={"response": response, "is_equivalent": is_equiv},
+                metadata={"duration_seconds": round(duration, 4)}
             )
             
         return is_equiv
@@ -259,10 +262,12 @@ class AnswerMatcher:
 
         messages = [{"role": "user", "content": prompt}]
         started = time.perf_counter()
+        duration = 0.0
         try:
             response_text, _ = self.inference.chat(messages, {"temperature": 0.0, "max_tokens": 10})
         finally:
-            self._record_timing(time.perf_counter() - started)
+            duration = time.perf_counter() - started
+            self._record_timing(duration)
         match_result = parse_find_match_response(response_text, existing_outcomes)
         
         # Log
@@ -278,20 +283,35 @@ class AnswerMatcher:
                 input_data["question_title"] = question_title
             self.logger.log_matcher(
                 input_data=input_data,
-                output_data={"response": response_text, "matched": match_result}
+                output_data={"response": response_text, "matched": match_result},
+                metadata={"duration_seconds": round(duration, 4)}
             )
         
         return match_result
     
     def get_stats(self) -> Dict:
         """Get statistics about answer matching."""
+        snapshot = self.get_timing_snapshot()
+        count = snapshot["matcher_count"]
+        total = snapshot["matcher_total_seconds"]
         return {
             "cache_size": len(self._cache),
-            "matcher_count": self._timing_count,
-            "matcher_total_seconds": round(self._timing_total_seconds, 3),
+            "matcher_count": count,
+            "matcher_total_seconds": round(total, 3),
             "matcher_avg_seconds": round(
-                self._timing_total_seconds / self._timing_count, 3
-            ) if self._timing_count > 0 else 0.0,
+                total / count, 3
+            ) if count > 0 else 0.0,
+        }
+
+    def get_timing_snapshot(self) -> Dict[str, float]:
+        """
+        Return raw matcher timing counters (no rounding).
+
+        Useful for computing per-day deltas from cumulative matcher stats.
+        """
+        return {
+            "matcher_count": int(self._timing_count),
+            "matcher_total_seconds": float(self._timing_total_seconds),
         }
     
     def clear(self):

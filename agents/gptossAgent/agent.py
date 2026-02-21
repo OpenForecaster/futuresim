@@ -944,6 +944,7 @@ class GPTOSSBasicAgent(BasicAgent):
     ) -> Tuple[int, List[Dict[str, Any]]]:
         actions_remaining -= 1
         submitted: List[Dict[str, Any]] = []
+        submit_errors: List[str] = []
         dropped_forecasts = 0
 
         forecasts = list(parsed.forecasts or [])
@@ -962,19 +963,22 @@ class GPTOSSBasicAgent(BasicAgent):
                     forecast_interface.submit_prediction(pred)
                     submitted.append(f)
                 except Exception as e:
-                    pass
+                    submit_errors.append(f"{f.get('qid', 'unknown_qid')}: {e}")
             if submitted:
                 # Ensure later same-day df queries reflect newly submitted predictions.
                 self._query_handler.invalidate_cache()
-            feedback = (
-                f"Submitted forecast for qid={submitted[0]['qid']}. "
-                f"Actions remaining: {actions_remaining}"
-            )
-            if dropped_forecasts > 0:
-                feedback += (
-                    f"\nIgnored {dropped_forecasts} extra forecast item(s); "
-                    "submit exactly one qid per call."
+                feedback = (
+                    f"Submitted forecast for qid={submitted[0]['qid']}. "
+                    f"Actions remaining: {actions_remaining}"
                 )
+                if dropped_forecasts > 0:
+                    feedback += (
+                        f"\nIgnored {dropped_forecasts} extra forecast item(s); "
+                        "submit exactly one qid per call."
+                    )
+            else:
+                detail = "; ".join(submit_errors) if submit_errors else "Forecast submission failed."
+                feedback = f"SUBMIT ERROR: {detail}\n\nActions remaining: {actions_remaining}"
         else:
             feedback = f"SUBMIT ERROR: {parsed.error or 'No valid forecasts'}\n\nActions remaining: {actions_remaining}"
 

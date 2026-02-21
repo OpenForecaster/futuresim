@@ -292,7 +292,8 @@ class AllQAgent(BasicAgent):
                     query=None,
                     error=None,
                 )
-                self._handle_submit(
+                # Only end this question if submission actually succeeded.
+                actions_remaining, submitted = self._handle_submit(
                     messages,
                     forecast_interface,
                     response,
@@ -301,7 +302,9 @@ class AllQAgent(BasicAgent):
                     qid=target_qid,
                     reasoning=reasoning,
                 )
-                break
+                if submitted:
+                    break
+                continue
             
             # Parse
             parsed = parse_action(response, self.config.max_outcomes_per_question)
@@ -358,12 +361,14 @@ class AllQAgent(BasicAgent):
                 parsed.forecasts = valid_forecasts
                 
                 if valid_forecasts:
-                    self._handle_submit(
+                    actions_remaining, submitted = self._handle_submit(
                         messages, forecast_interface, response, parsed, actions_remaining, 
                         qid=target_qid, reasoning=reasoning
                     )
-                    # End interaction immediately after successful submission
-                    break 
+                    # End interaction immediately after successful submission.
+                    if submitted:
+                        break
+                    continue
                 else:
                     # If no valid forecasts, warn agent
                     actions_remaining -= 1
