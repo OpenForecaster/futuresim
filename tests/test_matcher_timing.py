@@ -31,7 +31,7 @@ def test_matcher_timing_callback_called_only_for_uncached_llm_matches():
     inference = DummyInference(["Yes"])
     matcher = AnswerMatcher(
         inference,
-        timing_callback=lambda duration: durations.append(duration),
+        timing_callback=lambda duration, cost=0: durations.append(duration),
     )
 
     assert matcher.is_equivalent("alpha", "beta") is True
@@ -50,7 +50,7 @@ def test_find_match_records_timing_for_batch_match_call():
     inference = DummyInference(["2"])
     matcher = AnswerMatcher(
         inference,
-        timing_callback=lambda duration: durations.append(duration),
+        timing_callback=lambda duration, cost=0: durations.append(duration),
     )
 
     match = matcher.find_match("candidate", ["first", "second"])
