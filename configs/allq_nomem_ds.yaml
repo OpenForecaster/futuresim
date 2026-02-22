@@ -12,6 +12,8 @@ restart_from_day: "2025-04-25"
 sim_name: "allq_nomem_deepseek"
 start_date: "2025-05-01" # Resolution window start (kept for completeness; restart drives sim date)
 end_date: "2025-08-23"   # Resolution window end
+resolution_start: "2025-05-01"
+resolution_end: "2025-08-23"
 lookback_days: 7
 search_cutoff_days: 0
 split: "test"

@@ -10,6 +10,8 @@
 sim_name: "allq_sim_deepseek_aisa"
 start_date: "2025-05-01" # Resolution window start
 end_date: "2025-08-23"   # Resolution window end
+resolution_start: "2025-05-01"
+resolution_end: "2025-08-23"
 lookback_days: 7         # Days before first resolution to start simulation
 search_cutoff_days: 0    # Cap on search date based on current date in sim
 split: "test"            # Dataset split: train, test, or validation

@@ -2,6 +2,11 @@
 # Usage: python scripts/test_basic_agent.py --agents_config configs/agents_example.yaml
 
 # Global settings (optional, can be overridden per-agent)
+start_date: "2025-05-01"
+end_date: "2025-08-23"
+resolution_start: "2025-05-01"
+resolution_end: "2025-08-23"
+
 defaults:
   provider: openrouter
   scaffold: basic

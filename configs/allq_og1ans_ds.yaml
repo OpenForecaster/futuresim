@@ -16,7 +16,7 @@ split: "test"
 
 # Load questions across the full window, even though we only run Day 0.
 resolution_start: "2025-05-01"
-resolution_end: "2025-08-23"
+resolution_end: "2025-05-01"
 
 dataset: "openforesight"
 dataset_path: "/is/cluster/fast/sgoel/forecasting/qs/OpenForesight/data/"
@@ -54,4 +54,3 @@ defaults:
 agents:
   - model: "deepseek/deepseek-v3.2"
     provider: "openrouter"
-

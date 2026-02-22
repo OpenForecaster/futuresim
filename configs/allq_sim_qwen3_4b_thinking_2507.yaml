@@ -10,6 +10,8 @@
 sim_name: "allq_sim_qwen3_4b_thinking_2507"
 start_date: "2025-05-01"
 end_date: "2025-08-23"
+resolution_start: "2025-05-01"
+resolution_end: "2025-08-23"
 lookback_days: 7
 search_cutoff_days: 0
 split: "test"

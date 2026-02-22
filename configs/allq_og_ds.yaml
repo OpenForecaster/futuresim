@@ -14,7 +14,7 @@ split: "test"
 # Load questions that resolve in the same window as the standard allq runs,
 # but run the simulation for a single day only (Day 0).
 resolution_start: "2025-05-01"
-resolution_end: "2025-08-23"
+resolution_end: "2025-05-01"
 
 dataset: "openforesight"
 dataset_path: "/is/cluster/fast/sgoel/forecasting/qs/OpenForesight/data/"
