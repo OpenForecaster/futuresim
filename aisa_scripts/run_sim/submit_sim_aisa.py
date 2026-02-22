@@ -112,6 +112,7 @@ def submit_sim_job(
     qos: str | None = None,
     time_limit: str | None = None,
     constraint: str | None = None,
+    gpu_type: str | None = None,
     sbatch_args: list[str] | None = None,
     dry_run: bool = False,
 ) -> str:
@@ -157,7 +158,8 @@ def submit_sim_job(
     ]
 
     if gpus > 0:
-        sbatch_cmd += ["--gres", f"gpu:{gpus}"]
+        gres = f"gpu:{gpu_type}:{gpus}" if gpu_type else f"gpu:{gpus}"
+        sbatch_cmd += ["--gres", gres]
     if partition:
         sbatch_cmd += ["--partition", str(partition)]
     if account:
@@ -223,6 +225,7 @@ def main():
     parser.add_argument("--time", default=None, help="SLURM time limit (e.g. 2-00:00:00)")
     parser.add_argument("--partition", default=None, help="SLURM partition")
     parser.add_argument("--constraint", default=None, help="SLURM constraint")
+    parser.add_argument("--gpu_type", default=None, help="GPU type (e.g. A100, H100)")
     args = parser.parse_args()
 
     import yaml
@@ -256,6 +259,7 @@ def main():
     qos = resources.get("qos", base_config.get("qos"))
     time_limit = args.time or resources.get("time", base_config.get("time"))
     constraint = args.constraint or resources.get("constraint", base_config.get("constraint"))
+    gpu_type = args.gpu_type or resources.get("gpu_type", base_config.get("gpu_type"))
     sbatch_args = _coerce_sbatch_args(resources.get("sbatch_args", base_config.get("sbatch_args")))
 
     if resources.get("requirements") or base_config.get("requirements"):
@@ -293,6 +297,7 @@ def main():
             qos=qos,
             time_limit=time_limit,
             constraint=constraint,
+            gpu_type=gpu_type,
             sbatch_args=sbatch_args,
             dry_run=args.dry_run,
         )

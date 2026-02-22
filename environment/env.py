@@ -810,13 +810,14 @@ class SimulationEnvironment:
     def _get_env_matcher_timing_snapshot(self) -> Dict[str, float]:
         """Get cumulative matcher timing counters from the environment scorer."""
         if not self.matcher:
-            return {"matcher_count": 0, "matcher_total_seconds": 0.0}
+            return {"matcher_count": 0, "matcher_total_seconds": 0.0, "matcher_total_cost": 0.0}
 
         if hasattr(self.matcher, "get_timing_snapshot"):
             snapshot = self.matcher.get_timing_snapshot() or {}
             return {
                 "matcher_count": int(snapshot.get("matcher_count", 0)),
                 "matcher_total_seconds": float(snapshot.get("matcher_total_seconds", 0.0)),
+                "matcher_total_cost": float(snapshot.get("matcher_total_cost", 0.0)),
             }
 
         # Backward-compatible fallback if matcher doesn't expose raw snapshot.
@@ -824,6 +825,7 @@ class SimulationEnvironment:
         return {
             "matcher_count": int(stats.get("matcher_count", 0)),
             "matcher_total_seconds": float(stats.get("matcher_total_seconds", 0.0)),
+            "matcher_total_cost": float(stats.get("matcher_total_cost", 0.0)),
         }
 
     @staticmethod
@@ -834,11 +836,16 @@ class SimulationEnvironment:
             0.0,
             float(after.get("matcher_total_seconds", 0.0)) - float(before.get("matcher_total_seconds", 0.0)),
         )
+        cost = max(
+            0.0,
+            float(after.get("matcher_total_cost", 0.0)) - float(before.get("matcher_total_cost", 0.0)),
+        )
         avg = (total / count) if count > 0 else 0.0
         return {
             "matcher_count": count,
             "matcher_total_seconds": round(total, 3),
             "matcher_avg_seconds": round(avg, 3),
+            "matcher_cost": round(cost, 6),
         }
 
     def _inject_env_matcher_timing_into_agent_logs(self, sim_date: date, day_matcher: Dict[str, float]) -> None:
@@ -887,6 +894,7 @@ class SimulationEnvironment:
                 target_row["matcher_count"] = int(day_matcher.get("matcher_count", 0))
                 target_row["matcher_total_seconds"] = float(day_matcher.get("matcher_total_seconds", 0.0))
                 target_row["matcher_avg_seconds"] = float(day_matcher.get("matcher_avg_seconds", 0.0))
+                target_row["matcher_cost"] = float(day_matcher.get("matcher_cost", 0.0))
 
                 lines[target_idx] = json.dumps(target_row) + "\n"
                 with open(stats_path, "w") as f:

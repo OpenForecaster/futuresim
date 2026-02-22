@@ -101,6 +101,7 @@ class AnswerMatcher:
         self._timing_callback = timing_callback
         self._timing_count = 0
         self._timing_total_seconds = 0.0
+        self._timing_total_cost = 0.0
         
         # Simple cache: (predicted, ground_truth, qid) -> bool
         self._cache: Dict[tuple, bool] = {}
@@ -112,6 +113,7 @@ class AnswerMatcher:
         """Record matcher call timing and forward to optional callback."""
         self._timing_count += 1
         self._timing_total_seconds += duration
+        self._timing_total_cost += cost
         if self._timing_callback:
             try:
                 self._timing_callback(duration, cost)
@@ -314,6 +316,7 @@ class AnswerMatcher:
         return {
             "matcher_count": int(self._timing_count),
             "matcher_total_seconds": float(self._timing_total_seconds),
+            "matcher_total_cost": float(self._timing_total_cost),
         }
     
     def clear(self):
