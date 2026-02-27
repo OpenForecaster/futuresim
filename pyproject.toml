@@ -68,11 +68,10 @@ dependencies = [
     "faust-cchardet",
     "feedparser",
     "filelock",
-    "flash_attn",
     "flashinfer-python",
     "fonttools",
     "frozenlist",
-    "fsspec",
+    "fsspec<2024.9.0",  # newer versions have stricter glob validation incompatible with datasets 2.14.4
     "gguf",
     "h11",
     "hf-xet",
@@ -151,6 +150,7 @@ dependencies = [
     "pillow",
     "plac",
     "platformdirs",
+    "pyairports @ git+https://github.com/NICTA/pyairports.git", # required by vllm/outlines; PyPI version is broken
     "pluggy",
     "prometheus-fastapi-instrumentator",
     "prometheus_client",
@@ -163,7 +163,7 @@ dependencies = [
     "ptyprocess",
     "pure_eval",
     "py-cpuinfo",
-    "pyarrow",
+    "pyarrow>=12,<21", # <21 required: datasets uses PyExtensionType removed in pyarrow 21
     "pyasn1",
     "pyasn1_modules",
     "pybase64",
@@ -240,7 +240,7 @@ dependencies = [
     "urllib3",
     "uvicorn",
     "uvloop",
-    "vllm>=0.4.0",
+    "vllm>=0.7.0", # >=0.6 required for Qwen3 support
     "w3lib",
     "warcio",
     "watchfiles",
@@ -251,6 +251,9 @@ dependencies = [
     "yarl",
     "zope.interface",
 ]
+
+[project.optional-dependencies]
+embed = ["flash_attn"]  # for scripts that need flash_attn (e.g. embedding); install with: uv sync --extra embed
 
 [tool.uv]
 dev-dependencies = []

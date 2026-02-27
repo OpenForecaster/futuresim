@@ -57,7 +57,7 @@ from agents.allQAgent import AllQAgent
 # Default paths
 DATASET_PATH = "/is/cluster/fast/sgoel/forecasting/qs/OpenForesight/data/"
 MODEL_PATH = "/is/cluster/fast/rolmedo/models/qwen3-4b-it-2507"
-CURRENT_SIM_DIR = "/is/cluster/fast/sgoel/forecasting/current_sim"
+CURRENT_SIM_DIR = "/fast/sgoel/forecasting/nosearch_sim2"
 
 
 class ThreadSafeLLM:
@@ -109,7 +109,9 @@ def create_inference_provider(provider: str, model: str, args):
     """Create an inference provider instance."""
     if provider == "vllm":
         from inference.vllm import VLLMInference
-        return VLLMInference(model, max_model_len=args.max_model_len)
+        return VLLMInference(model, max_model_len=args.max_model_len,
+                             gpu_memory_utilization=args.model_gpu_mem,
+                             device=getattr(args, 'model_device', None))
     elif provider == "openrouter":
         from inference.openrouter import OpenRouterInference
         return OpenRouterInference(model)
@@ -119,11 +121,14 @@ def create_inference_provider(provider: str, model: str, args):
 
 def get_model_short_name(model: str) -> str:
     """Extract short model name from full model path/ID."""
+    normalized = (model or "").rstrip("/")
     # Handle paths like /path/to/model-name
-    name = os.path.basename(model)
+    name = os.path.basename(normalized)
     # Handle OpenRouter IDs like vendor/model-name:variant
-    if '/' in model:
-        name = model.split('/')[-1]
+    if '/' in normalized:
+        name = normalized.split('/')[-1]
+    if not name:
+        name = normalized
     # Remove version tags
     name = name.split(':')[0]
     return name
@@ -269,7 +274,19 @@ def main():
     parser.add_argument("--openrouter_model", default="xiaomi/mimo-v2-flash:free",
                        help="Model ID for OpenRouter (e.g., 'xiaomi/mimo-v2-flash:free')")
     parser.add_argument("--max_model_len", type=int, default=32768,
-                       help="Max context length for VLLM (default 32768)")
+                       help="Max context length for main VLLM model (default 32768)")
+    parser.add_argument("--matcher_max_model_len", type=int, default=4096,
+                       help="Max context length for matcher VLLM model (default 4096)")
+    parser.add_argument("--embedding_max_model_len", type=int, default=4096,
+                       help="Max context length for embedding model (default 4096)")
+    parser.add_argument("--model_gpu_mem", type=float, default=0.3,
+                       help="GPU memory fraction for main VLLM model (0.0-1.0, default 0.3)")
+    parser.add_argument("--model_device", type=int, default=None,
+                       help="GPU device index for main model (e.g. 0, 1, 2). If unset, auto-assigned.")
+    parser.add_argument("--matcher_device", type=int, default=None,
+                       help="GPU device index for matcher model. If unset, auto-assigned.")
+    parser.add_argument("--embedding_device", type=int, default=None,
+                       help="GPU device index for embedding model. If unset, auto-assigned.")
     parser.add_argument("--no_inference", action="store_true",
                        help="Run without LLM (for testing setup)")
     
@@ -394,6 +411,18 @@ def main():
     
     matcher_provider = None
     
+    # Auto-assign GPUs if not explicitly set (spread across available GPUs)
+    _auto_gpu = 0
+    if args.matcher_device is None and args.matching == "vllm":
+        args.matcher_device = _auto_gpu
+        _auto_gpu += 1
+    if args.embedding_device is None and args.search_db:
+        args.embedding_device = _auto_gpu
+        _auto_gpu += 1
+    if args.model_device is None and args.provider == "vllm":
+        args.model_device = _auto_gpu
+        _auto_gpu += 1
+    
     # Optimization: Skip matcher GPU for Metaculus (uses exact string matching)
     if args.dataset.startswith("metaculus"):
         print(f"\nDataset '{args.dataset}' uses exact matching. Skipping matcher GPU allocation.")
@@ -401,8 +430,9 @@ def main():
     elif args.matching == "vllm":
         print(f"\nInitializing VLLM matcher server (must start before embedding model)...")
         from inference.vllm import VLLMInference
-        matcher_provider = VLLMInference(args.matcher, max_model_len=args.max_model_len, 
-                                          gpu_memory_utilization=args.matcher_gpu_mem)
+        matcher_provider = VLLMInference(args.matcher, max_model_len=args.matcher_max_model_len, 
+                                          gpu_memory_utilization=args.matcher_gpu_mem,
+                                          device=args.matcher_device)
         # Force server startup by making a warmup call - fail job if this fails
         print(f"  Warming up matcher ({args.matcher}, GPU: {args.matcher_gpu_mem:.0%})...")
         matcher_provider.chat([{"role": "user", "content": "test"}], {"temperature": 0, "max_tokens": 1})
@@ -426,19 +456,30 @@ def main():
         # Preload embedding model for zero-latency searches
         embedding_model = None
         if args.embedding_model and os.path.exists(args.embedding_model):
-            print(f"  Loading embedding model: {args.embedding_model} (GPU: {args.embedding_gpu_mem:.0%})")
+            emb_gpu = args.embedding_device
+            print(f"  Loading embedding model: {args.embedding_model} (GPU: {args.embedding_gpu_mem:.0%}, device: {emb_gpu})")
+            # Pin embedding model to its own GPU
+            _prev_cuda = os.environ.get("CUDA_VISIBLE_DEVICES")
+            if emb_gpu is not None:
+                os.environ["CUDA_VISIBLE_DEVICES"] = str(emb_gpu)
             try:
                 from vllm import LLM
                 # Embedding model should fit comfortably on 80GB GPU with 0.4 utilization
                 raw_model = LLM(model=args.embedding_model, convert="embed", 
                                       gpu_memory_utilization=args.embedding_gpu_mem,
-                                      max_model_len=args.max_model_len)
+                                      max_model_len=args.embedding_max_model_len)
                 # Wrap in thread-safe wrapper to prevent deadlocks when called from multiple agents
                 embedding_model = ThreadSafeLLM(raw_model)
                 print("  Embedding model loaded (queries will use semantic/hybrid search)")
             except Exception as e:
                 print(f"  Warning: Failed to load embedding model: {e}")
                 print("  Falling back to keyword-only search")
+            finally:
+                # Restore CUDA_VISIBLE_DEVICES so subsequent models use their own GPU
+                if _prev_cuda is not None:
+                    os.environ["CUDA_VISIBLE_DEVICES"] = _prev_cuda
+                elif emb_gpu is not None and "CUDA_VISIBLE_DEVICES" in os.environ:
+                    del os.environ["CUDA_VISIBLE_DEVICES"]
         
         search_tool = LanceDBSearchTool(args.search_db, embedding_model=embedding_model)
         if search_tool.is_available:
@@ -483,9 +524,11 @@ def main():
         
         if args.provider == "vllm":
             from inference.vllm import VLLMInference
-            print(f"Loading VLLM model: {args.model_path} (max_model_len={args.max_model_len})")
-            inference_provider = VLLMInference(args.model_path, max_model_len=args.max_model_len)
-            model_name = os.path.basename(args.model_path)
+            print(f"Loading VLLM model: {args.model_path} (max_model_len={args.max_model_len}, GPU: {args.model_gpu_mem:.0%}, device: {args.model_device})")
+            inference_provider = VLLMInference(args.model_path, max_model_len=args.max_model_len,
+                                               gpu_memory_utilization=args.model_gpu_mem,
+                                               device=args.model_device)
+            model_name = get_model_short_name(args.model_path)
             
         elif args.provider == "openrouter":
             from inference.openrouter import OpenRouterInference

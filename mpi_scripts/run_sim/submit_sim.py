@@ -49,7 +49,7 @@ def submit_sim_job(
         run_dir = Path(resume_path)
     else:
         # Logs go to /fast/sgoel/logs/forecasting-sim/sims/<base_name>/<unique_name>
-        log_base = Path("/fast/sgoel/logs/forecasting-sim/sims")
+        log_base = Path("/fast/nchandak/logs/forecasting-sim/sims")
         run_dir = log_base / base_sim_name / unique_name
         run_dir.mkdir(parents=True, exist_ok=True)
     
@@ -166,7 +166,7 @@ def main():
     
     # Determine where logs went for helpful message
     sim_name = args.name or base_config.get("sim_name", "sim_run")
-    print(f"Logs: /fast/sgoel/logs/forecasting-sim/sims/{sim_name}/")
+    print(f"Logs: /fast/nchandak/logs/forecasting-sim/sims/{sim_name}/")
 
 
 if __name__ == "__main__":

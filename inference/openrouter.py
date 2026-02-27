@@ -11,6 +11,7 @@ Features:
 """
 
 import os
+import sys
 import time
 import random
 from threading import Lock
@@ -22,6 +23,16 @@ except ImportError:
     raise ImportError(
         "requests module not found. Install with: pip install requests"
     )
+
+# Try to import API key from config file
+try:
+    # Add project root to path if not already there
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
+    from configs.openrouter_api_key import OPENROUTER_API_KEY as CONFIG_API_KEY
+except ImportError:
+    CONFIG_API_KEY = None
 
 
 class GlobalRateLimiter:
@@ -133,12 +144,13 @@ class OpenRouterInference:
         """
         self.model = model
         self.model_name = model  # For compatibility with VLLM interface
-        self.api_key = api_key or os.environ.get("OPENROUTER_API_KEY")
+        # Try: explicit parameter -> env var -> config file
+        self.api_key = api_key or os.environ.get("OPENROUTER_API_KEY") or CONFIG_API_KEY
         
         if not self.api_key:
             raise ValueError(
-                "OpenRouter API key required. Set OPENROUTER_API_KEY environment variable "
-                "or pass api_key parameter."
+                "OpenRouter API key required. Set OPENROUTER_API_KEY environment variable, "
+                "pass api_key parameter, or add to configs/openrouter_api_key.py"
             )
         
         self.max_retries = max_retries
@@ -186,6 +198,9 @@ class OpenRouterInference:
             "frequency_penalty": "frequency_penalty",
             "presence_penalty": "presence_penalty",
             "stop": "stop",
+            "reasoning": {
+                "effort": "high",
+            },
         }
         
         for local_key, api_key in param_mapping.items():

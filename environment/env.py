@@ -124,17 +124,19 @@ class SimLogger:
             "metadata": metadata
         }
         
-        # Clean record: only final response, no prompt
-        # We also filter out bulky reasoning from the clean log
+        # Clean record: only response, no prompt.
+        # Keep reasoning visible to make debugging/parsing behavior easier.
         clean_metadata = metadata.copy()
-        if "reasoning" in clean_metadata:
-            del clean_metadata["reasoning"]
+        clean_response = response
+        reasoning = clean_metadata.get("reasoning")
+        if reasoning and "<reasoning>" not in (clean_response or ""):
+            clean_response = f"<reasoning>{reasoning}</reasoning>\n{clean_response}"
 
         clean_record = {
             "sim_date": str(sim_date),
             "agent_id": agent_id,
             "qid": qid,
-            "response": response,
+            "response": clean_response,
             "metadata": clean_metadata
         }
         
