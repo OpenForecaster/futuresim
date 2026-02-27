@@ -26,6 +26,41 @@ class ParsedAction:
     error: Optional[str] = None  # Error message if parsing failed
 
 
+def parse_answer_probability(response: str) -> Tuple[Optional[str], Optional[float], Optional[str]]:
+    """
+    Parse an OpenForesight-style single answer response:
+      <answer>...</answer>
+      <probability>0.5</probability>
+
+    Returns: (answer, prob, error)
+    """
+    if not response:
+        return None, None, "Empty response"
+
+    # Take the LAST occurrence if the model included multiple.
+    ans_matches = re.findall(r"<answer>\s*(.*?)\s*</answer>", response, flags=re.IGNORECASE | re.DOTALL)
+    prob_matches = re.findall(r"<probability>\s*(.*?)\s*</probability>", response, flags=re.IGNORECASE | re.DOTALL)
+
+    if not ans_matches or not prob_matches:
+        return None, None, 'Missing <answer>...</answer> or <probability>...</probability> tags'
+
+    answer = (ans_matches[-1] or "").strip()
+    prob_raw = (prob_matches[-1] or "").strip()
+
+    if not answer:
+        return None, None, "Empty <answer> value"
+
+    try:
+        prob = float(prob_raw)
+    except Exception:
+        return None, None, f"Invalid probability: {prob_raw!r}"
+
+    if not (0.0 <= prob <= 1.0):
+        return None, None, f"Probability must be between 0 and 1, got {prob}"
+
+    return answer, prob, None
+
+
 
 
 def parse_action(response: str, max_outcomes: int = 5) -> ParsedAction:
@@ -260,7 +295,7 @@ def _parse_forecasts(content: str, max_outcomes: int = 5) -> Tuple[List[Dict], O
 def extract_memory(response: str) -> Optional[str]:
     """
     Extract memory content from <memory></memory> tags.
-    
+
     Returns None if no memory tags found, the content otherwise.
     """
     pattern = r'<memory>(.*?)</memory>'
@@ -268,6 +303,83 @@ def extract_memory(response: str) -> Optional[str]:
     if match:
         return match.group(1).strip()
     return None
+
+
+def extract_memory_ops(response: str) -> Tuple[List[dict], List[str]]:
+    """
+    Extract structured memory operations from <memory_add> and <memory_delete> tags.
+
+    Returns:
+        (adds, deletes) where adds is a list of dicts with keys
+        {name, type, qids, content} and deletes is a list of entry ID strings.
+    """
+    adds = []
+    for match in re.finditer(r'<memory_add>(.*?)</memory_add>', response, re.DOTALL | re.IGNORECASE):
+        entry = _parse_memory_add_body(match.group(1).strip())
+        if entry:
+            adds.append(entry)
+
+    deletes = []
+    for match in re.finditer(r'<memory_delete>(.*?)</memory_delete>', response, re.DOTALL | re.IGNORECASE):
+        entry_id = match.group(1).strip()
+        if entry_id:
+            deletes.append(entry_id)
+
+    return adds, deletes
+
+
+def _parse_memory_add_body(body: str) -> Optional[dict]:
+    """
+    Parse key: value format inside <memory_add> tags.
+
+    Expected format:
+        name: ...
+        type: reasoning|calibration|insight|fact
+        qids: Q72, Q108
+        content: ...
+
+    The content field captures everything after "content:" to end of body.
+    Single-line fields (name, type, qids) must NOT span multiple lines.
+    """
+    if not body:
+        return None
+
+    result = {}
+
+    # Extract content first (greedy: everything after "content:" to end of body)
+    content_match = re.search(r'(?:^|\n)\s*content\s*:\s*(.*)', body, re.DOTALL | re.IGNORECASE)
+    if content_match:
+        result["content"] = content_match.group(1).strip()
+        # Remove content portion so single-line field regexes don't accidentally match into it
+        body_for_fields = body[:content_match.start()]
+    else:
+        body_for_fields = body
+
+    # Extract single-line fields from the portion BEFORE content:
+    # These use re.MULTILINE (not DOTALL) so .+ stays within one line
+    for key in ["name", "type", "qids"]:
+        pattern = rf'^\s*{key}\s*:\s*(.+)$'
+        match = re.search(pattern, body_for_fields, re.MULTILINE | re.IGNORECASE)
+        if match:
+            result[key] = match.group(1).strip()
+
+    # name and content are required
+    if "name" not in result or "content" not in result:
+        return None
+
+    # Validate qids: should only contain question IDs (Q followed by numbers, commas, spaces)
+    # If it looks like prose, clear it
+    qids_val = result.get("qids", "")
+    if qids_val and len(qids_val) > 100:
+        qids_val = ""
+    result["qids"] = qids_val
+
+    return {
+        "name": result.get("name", ""),
+        "type": result.get("type", "insight"),
+        "qids": result.get("qids", ""),
+        "content": result.get("content", ""),
+    }
 
 
 # Legacy exports for backward compatibility (deprecated)

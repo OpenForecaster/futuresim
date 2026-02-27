@@ -1,30 +1,102 @@
 #!/bin/bash
-# Build IVF-PQ index for LanceDB on GPU
+# Build LanceDB search indices (Stage 2/2):
+# - FTS on "content" (with_position enabled by default)
+# - Optional IVF-PQ vector index
+#
 # Run via: condor_submit_bid 25 build_index.sub
+#
+# Optional env overrides:
+#   BUILD_FTS=1|0                (default: 1)
+#   FTS_WITH_POSITION=1|0        (default: 1)
+#   FTS_USE_TANTIVY=1|0          (default: 1)
+#   TANTIVY_INDEX_ROOT=<path>    (default: /lustre/... ; used on /is DB paths)
+#   BUILD_VECTOR_INDEX=1|0       (default: 1)
+#   NUM_PARTITIONS=<int>         (default: 4096)
+#   NUM_SUB_VECTORS=<int>        (default: 64)
+#   VECTOR_METRIC=cosine|L2|dot  (default: cosine)
+#   LOAD_CUDA_MODULE=1|0         (default: 0)
+#   DB_PATH=<path>               (default: Qwen3-Embedding-8B db path)
+#   TABLE_NAME=<name>            (default: articles)
 
 set -euo pipefail
 
 # Setup PATH
 export PATH="/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 source ~/.bashrc 2>/dev/null || true
-module load cuda/12.1
+
+if [[ "${LOAD_CUDA_MODULE:-0}" == "1" ]]; then
+  module load cuda/12.1
+fi
 
 export SOFT_FILELOCK=1
+export PYTHONUNBUFFERED=1
 
 # Activate environment
 source ~/forecast-sim/fsim/bin/activate
 cd /home/sgoel/forecast-sim
 
-echo "Building LanceDB vector index..."
-# Settings for ~14M rows:
-# - partitions: 4096 (sqrt(rows))
-# - sub_vectors: 64 (standard PQ)
-# - metric: cosine (for semantic similarity)
+BUILD_FTS="${BUILD_FTS:-1}"
+FTS_WITH_POSITION="${FTS_WITH_POSITION:-1}"
+FTS_USE_TANTIVY="${FTS_USE_TANTIVY:-1}"
+TANTIVY_INDEX_ROOT="${TANTIVY_INDEX_ROOT:-${HOME}/forecasting/lancedb_tantivy_indices}"
+BUILD_VECTOR_INDEX="${BUILD_VECTOR_INDEX:-1}"
+NUM_PARTITIONS="${NUM_PARTITIONS:-4096}"
+NUM_SUB_VECTORS="${NUM_SUB_VECTORS:-64}"
+VECTOR_METRIC="${VECTOR_METRIC:-cosine}"
+DB_PATH="${DB_PATH:-/is/cluster/fast/sgoel/forecasting/news/deduped_articles/lance/Qwen3-Embedding-8B}"
+TABLE_NAME="${TABLE_NAME:-articles}"
 
-# Bypass the "Rebuild? [y/N]" prompt by piping "y"
-echo "y" | python scripts/build_lancedb_index.py \
-    --num_partitions 4096 \
-    --num_sub_vectors 64 \
-    --metric cosine 
+echo "Building LanceDB indices (stage 2/2)..."
+echo "DB_PATH=$DB_PATH"
+echo "TABLE_NAME=$TABLE_NAME"
+echo "BUILD_FTS=$BUILD_FTS"
+echo "FTS_WITH_POSITION=$FTS_WITH_POSITION"
+echo "FTS_USE_TANTIVY=$FTS_USE_TANTIVY"
+echo "TANTIVY_INDEX_ROOT=$TANTIVY_INDEX_ROOT"
+echo "BUILD_VECTOR_INDEX=$BUILD_VECTOR_INDEX"
+echo "NUM_PARTITIONS=$NUM_PARTITIONS"
+echo "NUM_SUB_VECTORS=$NUM_SUB_VECTORS"
+echo "VECTOR_METRIC=$VECTOR_METRIC"
 
-echo "Index build complete!"
+if [[ "$FTS_USE_TANTIVY" == "1" ]]; then
+  mkdir -p "$TANTIVY_INDEX_ROOT"
+fi
+
+if [[ "$BUILD_FTS" != "1" && "$BUILD_VECTOR_INDEX" != "1" ]]; then
+  echo "Nothing to do: both BUILD_FTS=0 and BUILD_VECTOR_INDEX=0"
+  exit 2
+fi
+
+ARGS=(
+  --db_path "$DB_PATH"
+  --table_name "$TABLE_NAME"
+  --force
+  --num_partitions "$NUM_PARTITIONS"
+  --num_sub_vectors "$NUM_SUB_VECTORS"
+  --metric "$VECTOR_METRIC"
+  --tantivy_index_root "$TANTIVY_INDEX_ROOT"
+)
+
+if [[ "$BUILD_FTS" == "1" ]]; then
+  ARGS+=(--build_fts)
+  if [[ "$FTS_WITH_POSITION" == "1" ]]; then
+    ARGS+=(--fts_with_position)
+  else
+    ARGS+=(--no_fts_with_position)
+  fi
+  if [[ "$FTS_USE_TANTIVY" == "1" ]]; then
+    ARGS+=(--fts_use_tantivy)
+  else
+    ARGS+=(--fts_use_native)
+  fi
+else
+  ARGS+=(--no_fts_with_position)
+fi
+
+if [[ "$BUILD_VECTOR_INDEX" != "1" ]]; then
+  ARGS+=(--skip_vector_index)
+fi
+
+python -u scripts/build_lancedb_index.py "${ARGS[@]}"
+
+echo "LanceDB stage 2/2 complete."

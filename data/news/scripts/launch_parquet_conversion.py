@@ -11,7 +11,7 @@ Usage:
 import os
 import argparse
 from pathlib import Path
-import htcondor
+import htcondor2 as htcondor
 
 JOB_BID = 15
 

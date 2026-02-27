@@ -6,7 +6,7 @@ LanceDB-based article search for forecasting agents.
 
 1. **News articles** in parquet format at `/is/cluster/fast/sgoel/forecasting/news/deduped_articles/data/YYYY/MM/DD/`
 2. **Embedding model**: `Qwen3-Embedding-8B` at `/is/cluster/fast/sgoel/models/Qwen3-Embedding-8B`
-3. **GPU node** with 80GB+ memory for embedding and index building
+3. **High-memory node** for LanceDB indexing (GPU optional; required only for embedding)
 
 ## Setup Steps
 
@@ -19,26 +19,32 @@ python mpi_scripts/embed/submit_job.py --start_date 2023-01-01 --end_date 2025-1
 
 **Output**: `/is/cluster/fast/sgoel/forecasting/news/embeddings/Qwen3-Embedding-8B/`
 
-### 2. Build LanceDB Index (CPU-heavy)
+### 2. Build LanceDB Table (Stage 1/2, CPU-heavy)
 
-This step compiles articles and embeddings into a LanceDB table and **automatically builds**:
-1. **Full-Text Search (FTS) index** with phrase query support.
-2. **Scalar Index on `date`** column to enable correct pre-filtering for vector search.
+This step compiles articles and embeddings into a LanceDB table and builds:
+1. **Scalar Index on `date`** column (for filter pre-pruning).
+2. **No FTS in this stage** (FTS is built in Stage 2).
 
 ```bash
-# Build LanceDB from articles + embeddings
-python scripts/build_lancedb.py --start_date 2023-01-01 --end_date 2025-12-31
+# Build LanceDB table from articles + embeddings
+python scripts/build_lancedb.py \
+  --start_date 2023-01-01 \
+  --end_date 2025-12-31 \
+  --skip_fts_index
 
 # Output: /is/cluster/fast/sgoel/forecasting/news/deduped_articles/lance/Qwen3-Embedding-8B/
 ```
 
-### 3. Build Vector Index (GPU-heavy)
+### 3. Build Search Indices (Stage 2/2)
 
-**CRITICAL**: Required for fast semantic search (~50x speedup).
+Build FTS first (with phrase positions), then optional IVF-PQ vector index.
 
 ```bash
-# Run on GPU node with 80GB+ RAM
-python scripts/build_lancedb_index.py
+# FTS + vector
+python scripts/build_lancedb_index.py --build_fts --fts_with_position --force
+
+# FTS only (retry path when vector is not needed yet)
+python scripts/build_lancedb_index.py --build_fts --skip_vector_index --fts_with_position --force
 ```
 
 ## Running Search Agent
@@ -89,4 +95,4 @@ query text here
 
 Agent timing stats saved to: `<agent_dir>/timing_stats.jsonl`
 
-Fields: `llm_count`, `llm_avg_seconds`, `search_count`, `search_avg_seconds`, `df_query_count`, `df_query_avg_seconds`, `day_total_seconds`
+Fields: `llm_count`, `llm_avg_seconds`, `search_count`, `search_avg_seconds`, `df_query_count`, `df_query_avg_seconds`, `matcher_count`, `matcher_avg_seconds`, `day_total_seconds`

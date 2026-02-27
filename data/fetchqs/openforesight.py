@@ -72,7 +72,8 @@ class OpenForesightFetcher(DataFetcher):
                 resolution_date=r_date,
                 ground_truth_answer=item.get('answer', ''),
                 options=None, # OpenForesight (current) doesn't use options column
-                source="openforesight"
+                source="openforesight",
+                prompt=item.get('prompt', '') or ""
             ))
             
         return questions

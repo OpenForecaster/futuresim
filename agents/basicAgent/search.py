@@ -25,27 +25,52 @@ class SearchHandler:
     def set_date(self, current_date: date) -> None:
         self._current_date = current_date
     
-    def search(self, query: str, max_results: int = 5, search_type: str = "hybrid",
-                min_date: Optional[date] = None) -> Tuple[str, Optional[str]]:
+    def search(
+        self,
+        query: str,
+        max_results: int = 5,
+        search_type: str = "hybrid",
+        min_date: Optional[date] = None,
+        max_date: Optional[date] = None,
+    ) -> Tuple[str, Optional[str]]:
         if not self.is_available:
             return "", "Search not available"
         if not self._current_date:
             return "", "Current date not set"
         
-        # Calculate max allowed date based on cutoff
-        max_date = self._current_date - timedelta(days=self._search_cutoff_days)
+        # Never search past the simulation day (+ optional cutoff) to prevent leakage.
+        allowed_max_date = self._current_date - timedelta(days=self._search_cutoff_days)
+        effective_max_date = allowed_max_date
+        info_lines = []
+        if max_date is not None:
+            effective_max_date = min(max_date, allowed_max_date)
+            if max_date > allowed_max_date:
+                info_lines.append(
+                    f"Note: maximum allowed search date is {allowed_max_date.isoformat()} in this simulation. "
+                    f"Your requested to-date {max_date.isoformat()} was capped."
+                )
         
         # Validate min_date doesn't exceed max_date (prevent leakage)
-        if min_date and min_date > max_date:
+        if min_date and min_date > effective_max_date:
+            info_lines.append(
+                f"Note: your requested from-date {min_date.isoformat()} is after the effective to-date "
+                f"{effective_max_date.isoformat()}, so from-date was ignored."
+            )
             min_date = None  # Ignore invalid min_date
         
         try:
             results = self._search_tool.search(
-                query, max_results, max_date, search_type, min_date
+                query, max_results, effective_max_date, search_type, min_date
             )
             if not results:
-                return "No articles found matching your query.", None
-            return self._format_results(results), None
+                base = "No articles found matching your query."
+                if info_lines:
+                    return "\n".join(info_lines + ["", base]), None
+                return base, None
+            formatted = self._format_results(results)
+            if info_lines:
+                return "\n".join(info_lines + ["", formatted]), None
+            return formatted, None
         except Exception as e:
             return "", f"Search error: {e}"
     

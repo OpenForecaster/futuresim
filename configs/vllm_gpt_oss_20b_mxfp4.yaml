@@ -1,0 +1,27 @@
+# vLLM server config for GPT-OSS 20B (MXFP4 weights)
+#
+# Notes:
+# - Use the MXFP4 checkpoint: /fast/nchandak/models/gpt-oss-20b
+# - Tool calling for GPT-OSS is expected via the OpenAI Responses API.
+# - Requires H100-class GPUs (CUDACapability >= 9.0) for MXFP4.
+
+name: "gpt-oss-20b-mxfp4"
+
+model: "/fast/nchandak/models/gpt-oss-20b"
+served_model_name: "gpt-oss-20b"
+
+host: "0.0.0.0"
+port: 8000
+
+# Tune as needed.
+max_model_len: 32768
+gpu_memory_utilization: 0.92
+tensor_parallel_size: 1
+
+# gpt-oss repos typically need this.
+trust_remote_code: true
+
+# Enable tool parsing/auto tool choice flags (vLLM new enough).
+enable_tools: true
+tool_call_parser: "openai"
+

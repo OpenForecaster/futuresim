@@ -8,12 +8,13 @@ from datetime import date, timedelta
 from typing import List, Dict, Any, Optional, Tuple
 
 from agents.base import BaseAgent
-from agents.utils.forecast_parser import parse_action, extract_memory
+from agents.utils.forecast_parser import parse_action, extract_memory, extract_memory_ops
 from agents.utils.timing import AgentTimer
 from environment.interfaces import PredictionSubmission
 
 from .config import AgentConfig
 from .memory import BasicMemory
+from agents.utils.memory import StructuredMemory
 from .query import QueryHandler
 from .search import SearchHandler
 from .feedback import FeedbackHandler
@@ -29,7 +30,7 @@ class BasicAgent(BaseAgent):
        - query: Execute Python code to explore the DataFrame
        - search: Search news articles for context (if enabled)
        - get_article: Retrieve full article content
-       - submit: Submit forecasts for one or more questions
+       - submit: Submit a forecast for exactly one question
        - next: End the current day and proceed to next
     3. Updates memory at end of day (always, regardless of how day ended)
     
@@ -44,9 +45,18 @@ class BasicAgent(BaseAgent):
                  search_tool=None):
         super().__init__(agent_id, inference_provider, model_name)
         self.config = config or AgentConfig()
+
+        # Timing utilities for performance analysis
+        self._timer = AgentTimer()
         
         # Handlers
-        self._memory = BasicMemory(agent_id, self.config.memory_dir)
+        if self.config.enable_memory:
+            if self.config.memory_format == "structured":
+                self._memory = StructuredMemory(agent_id, self.config.memory_dir)
+            else:
+                self._memory = BasicMemory(agent_id, self.config.memory_dir)
+        else:
+            self._memory = None
         self._query_handler = QueryHandler()
         self._search_handler = SearchHandler(
             search_tool,
@@ -54,10 +64,10 @@ class BasicAgent(BaseAgent):
             article_max_chars=self.config.article_max_chars,
             search_cutoff_days=self.config.search_cutoff_days
         )
-        self._feedback_handler = FeedbackHandler(agent_id)
-        
-        # Timing utilities for performance analysis
-        self._timer = AgentTimer()
+        self._feedback_handler = FeedbackHandler(
+            agent_id,
+            timing_callback=self._record_matcher_timing
+        )
         
     def act(self, 
             doc_interface,  # Not used in BasicAgent
@@ -78,6 +88,10 @@ class BasicAgent(BaseAgent):
         self._timer.reset()
         self._timer.start_day()
         
+        # Load memory for this date (loads most recent snapshot before current_date)
+        if self._memory is not None:
+            self._memory.set_date(current_date)
+        
         # Setup handlers
         self._setup_day(forecast_interface, current_date)
         
@@ -88,7 +102,8 @@ class BasicAgent(BaseAgent):
         all_forecasts = self._run_action_loop(messages, forecast_interface)
         
         # End of day: memory update (always happens)
-        self._prompt_memory_update(messages, forecast_interface, current_date)
+        if self._memory is not None:
+            self._prompt_memory_update(messages, forecast_interface, current_date)
         
         # End timing and save stats
         self._timer.end_day()
@@ -108,7 +123,8 @@ class BasicAgent(BaseAgent):
         """Initialize handlers for the day."""
         csv_path = forecast_interface.get_market_csv_path()
         self._query_handler.setup(
-            csv_path, forecast_interface, self.agent_id, current_date
+            csv_path, forecast_interface, self.agent_id, current_date,
+            single_agent_mode=self.config.single_agent_mode
         )
         self._search_handler.set_date(current_date)
         self._forecast_interface = forecast_interface
@@ -116,7 +132,7 @@ class BasicAgent(BaseAgent):
     # =========================================================================
     # Action Loop
     # =========================================================================
-    
+
     def _run_action_loop(self, messages: List[Dict], forecast_interface) -> List[Dict]:
         """
         Main action loop: process agent responses until actions exhausted or day ended.
@@ -125,24 +141,47 @@ class BasicAgent(BaseAgent):
         """
         actions_remaining = self.config.max_actions
         all_forecasts = []
+        empty_retries = 0
+        max_empty_retries = 2
         
         while actions_remaining > 0:
             # Get agent response (track LLM time)
-            with self._timer.track("llm"):
-                response, usage = self.inference.chat(messages, self.config.sampling_params)
+            try:
+                with self._timer.track("llm"):
+                    response, usage = self.inference.chat(messages, self.config.sampling_params)
+            except Exception as e:
+                print(f"  [{self.agent_id}] LLM error: {e}, ending turn")
+                self._log_action(
+                    forecast_interface,
+                    messages,
+                    "",
+                    "llm_error",
+                    actions_remaining,
+                    error=str(e),
+                )
+                break
             
             # Handle empty response (API failure with graceful fallback)
             if not response or not response.strip():
-                print(f"  [{self.agent_id}] Empty LLM response (API failure?), ending turn")
+                # Retry empty responses a few times before giving up
+                if empty_retries < max_empty_retries:
+                    empty_retries += 1
+                    print(f"  [{self.agent_id}] Empty LLM response, retrying ({empty_retries}/{max_empty_retries})")
+                    continue
+                print(f"  [{self.agent_id}] Empty LLM response after {max_empty_retries} retries, ending turn")
                 self._log_action(forecast_interface, messages, response or "", "api_failure", actions_remaining)
                 break
             
+            # Successful response — reset empty retry counter
+            empty_retries = 0
+
             # Extract reasoning
             reasoning = usage.get("_reasoning_content") if usage else None
 
-            # Record token usage
+            # Record token usage and cost
             self._timer.record_tokens(usage)
-            
+            self._timer.record_cost(usage.get("cost", 0), "llm")
+
             messages.append({"role": "assistant", "content": response})
             
             # Parse and handle the action
@@ -229,7 +268,8 @@ class BasicAgent(BaseAgent):
                 result, error = self._search_handler.search(
                     parsed.query, 
                     max_results=self.config.max_search_results,
-                    min_date=min_date
+                    min_date=min_date,
+                    max_date=max_date,
                 )
             self._log_action(forecast_interface, messages, response, "search", actions_remaining, qid=qid, reasoning=reasoning)
             
@@ -250,6 +290,7 @@ class BasicAgent(BaseAgent):
         """Handle submit action. Returns (updated actions_remaining, list of submitted forecasts)."""
         submitted = []
         actions_remaining -= 1  # Always consume action
+        dropped_forecasts = 0
         
         # For logging: use provided qid, or infer from forecasts
         log_qid = qid
@@ -257,6 +298,11 @@ class BasicAgent(BaseAgent):
             log_qid = parsed.forecasts[0]['qid']
         
         if parsed.forecasts:
+            # Enforce single-qid submit: one <forecast ...> block per submit action.
+            if len(parsed.forecasts) > 1:
+                dropped_forecasts = len(parsed.forecasts) - 1
+                parsed.forecasts = [parsed.forecasts[0]]
+
             for f in parsed.forecasts:
                 try:
                     pred = PredictionSubmission(question_id=f['qid'], outcomes=f['outcomes'])
@@ -266,13 +312,22 @@ class BasicAgent(BaseAgent):
                     print(f"  [{self.agent_id}] Forecast {f['qid']}: {outcomes_str}")
                 except Exception as e:
                     print(f"  [{self.agent_id}] Failed to submit {f['qid']}: {e}")
+
+            if submitted:
+                # Ensure later same-day df queries reflect newly submitted predictions.
+                self._query_handler.invalidate_cache()
             
             # Include submitted qids in log metadata
             submitted_qids = [f['qid'] for f in submitted]
             self._log_action(forecast_interface, messages, response, "submit", 
                            actions_remaining, qid=log_qid, submitted_qids=submitted_qids,
-                           num_forecasts=len(submitted), reasoning=reasoning)
-            feedback = f"Submitted {len(submitted)} forecast(s). Actions remaining: {actions_remaining}"
+                           num_forecasts=len(submitted), dropped_forecasts=dropped_forecasts, reasoning=reasoning)
+            if submitted:
+                feedback = f"Submitted forecast for qid={submitted[0]['qid']}. Actions remaining: {actions_remaining}"
+                if dropped_forecasts > 0:
+                    feedback += f"\nIgnored {dropped_forecasts} extra forecast block(s); submit exactly one qid per action."
+            else:
+                feedback = f"SUBMIT ERROR: No valid forecast submitted.\n\nActions remaining: {actions_remaining}"
         else:
             # Parse error - still consumed action
             self._log_action(forecast_interface, messages, response, "submit_error",
@@ -316,10 +371,124 @@ class BasicAgent(BaseAgent):
         if actions_remaining == 0:
             feedback += "\n\nNo more actions available. Your day ends now."
         return feedback
+
+    def _record_matcher_timing(self, duration: float, cost: float = 0) -> None:
+        """Record answer matcher latency and cost in timing stats."""
+        self._timer.record("matcher", duration)
+        self._timer.record_cost(cost, "matcher")
     
     # =========================================================================
     # Instructions & Memory
     # =========================================================================
+    # Prompt Helpers
+    # =========================================================================
+
+    @staticmethod
+    def _render_key_mechanics(
+        mechanics: Dict[str, str],
+        drop_keys: Optional[set[str]] = None,
+    ) -> str:
+        """Render numbered key mechanics, preserving insertion order."""
+        drop = drop_keys or set()
+        lines = [text for key, text in mechanics.items() if key not in drop]
+        return "\n".join(f"{idx}. {line}" for idx, line in enumerate(lines, start=1))
+
+    def _build_binary_brier_scoring_section(
+        self,
+        *,
+        include_peer_summary: bool = True,
+        drop_mechanics: Optional[set[str]] = None,
+    ) -> str:
+        """Build binary Brier scoring text with optional mechanic filtering."""
+        is_multi_agent = not self.config.single_agent_mode
+        show_peer = is_multi_agent and include_peer_summary
+
+        peer_text = ""
+        if show_peer:
+            peer_text = """
+- **Peer Score (relative ranking)**: `100 × (avg others' Brier - your Brier)` (baseline 0 if you are the only predictor). Positive means better than peers."""
+
+        mechanics: Dict[str, str] = {
+            "accuracy_calibration": "**Accuracy + Calibration**: Assign probabilities that reflect true likelihood.",
+            "binary_outcomes": "**Binary Outcomes**: Use exact outcomes \"Yes\" and \"No\".",
+            "time_weighted": "**Time-Weighted**: The score is summed over all days the prediction was held, so early predictions have higher weight.",
+            "question_count": "**Prediction-Count Incentive**: Scores are summed (not averaged) across all questions you predict on.",
+        }
+        if show_peer:
+            mechanics["relative_performance"] = (
+                "**Relative Performance (multi-agent)**: Final scoring is relative, "
+                "so you have to outperform the market aggregate to gain positive peer score."
+            )
+
+        mechanics_text = self._render_key_mechanics(mechanics, drop_mechanics)
+        return f"""## SCORING (Brier Score, Binary)
+You are evaluated on **Brier Score** for binary Yes/No questions.
+- Let p = your predicted probability for **Yes**.
+- Let y = 1 if the resolved outcome is **Yes**, else 0.
+- **Brier Score = (p - y)^2**.
+- **Lower is better** (0 is perfect, 1 is worst).{peer_text}
+
+Key Mechanics:
+{mechanics_text}
+"""
+
+    def _build_brier_skill_scoring_section(
+        self,
+        *,
+        include_peer_summary: bool = True,
+        drop_mechanics: Optional[set[str]] = None,
+    ) -> str:
+        """Build Brier Skill scoring text with optional mechanic filtering."""
+        is_multi_agent = not self.config.single_agent_mode
+        show_peer = is_multi_agent and include_peer_summary
+
+        section_title = "Time-Weighted Peer Score (Brier-Skill Based)" if show_peer else "Brier Skill Score"
+        peer_text = ""
+        if show_peer:
+            peer_text = """
+- **Peer Score**: For each snapshot, your Brier Skill Score is compared to the crowd by subtracting the average of other agents' Brier Skill Scores (baseline 0 if you are the only predictor)."""
+
+        mechanics: Dict[str, str] = {
+            "accuracy_calibration": "**Accuracy + Calibration**: Assign high probability to the TRUE outcome and keep probabilities well-calibrated.",
+            "time_weighted": "**Time-Weighted**: The score is summed over all days the prediction was held, so early predictions have higher weight.",
+            "question_count": "**Prediction-Count Incentive**: Scores are summed (not averaged) across all questions you predict on.",
+            "max_outcomes": f"**Max Outcomes**: Submit at most {self.config.max_outcomes_per_question} outcomes per question.",
+            "no_placeholders": "**No Placeholders**: \"Unknown\", \"TBD\", \"Other\" hurt your score. Be specific.",
+        }
+        if show_peer:
+            mechanics["relative_performance"] = (
+                "**Relative Performance (multi-agent)**: Final scoring is relative, "
+                "so you have to outperform the market aggregate to gain positive peer score."
+            )
+
+        mechanics_text = self._render_key_mechanics(mechanics, drop_mechanics)
+        return f"""## SCORING ({section_title})
+You have to output a distribution of (outcome, probability) pairs for each question you make a forecast on.
+You are evaluated on **Brier Skill Score** = 1 - Σ(pᵢ - yᵢ)² summed over all outcomes.
+- pᵢ = your probability for outcome i
+- yᵢ = 1 if outcome i is TRUE, 0 otherwise
+- **Higher is better**: 1.0 = perfect, 0.0 = no skill, negative = worse than uniform.{peer_text}
+
+Key Mechanics:
+{mechanics_text}
+"""
+
+    def _get_scoring_section(self) -> str:
+        """Get scoring description - single vs multi-agent mode."""
+        source_name = getattr(getattr(self, "_forecast_interface", None), "source_name", "openforesight")
+        if source_name == "metaculus_binary":
+            return self._build_binary_brier_scoring_section()
+        return self._build_brier_skill_scoring_section()
+    
+    def _get_data_notes(self) -> str:
+        """Get notes about DataFrame columns - conditional on agent mode."""
+        if self.config.single_agent_mode:
+            # Single-agent: market_aggregate just reflects own predictions, don't mention it
+            return "Note: `my_prediction` column contains your current forecast as a dict (or None if not yet predicted)."
+        else:
+            # Multi-agent: market_aggregate is meaningful
+            return """Note: `market_aggregate` and `my_prediction` columns contain Python dicts (or None). You can access them directly, e.g. `row['market_aggregate']['outcome_name']`.
+The `num_predictions` column shows how many predictions have been made on that question."""
     
     def _get_source_rules(self) -> str:
         """Get source-specific submission rules."""
@@ -359,13 +528,30 @@ Example (if options are ["Candidate A", "Candidate B", "Candidate C"]):
         df_info = self._query_handler.get_info()
         
         memory_section = ""
-        if self._memory:
-            memory_section = f"""## YOUR MEMORY FROM PREVIOUS DAYS
+        if self._memory is not None:
+            memory_content = self._memory.get()
+            if memory_content:
+                if isinstance(self._memory, StructuredMemory):
+                    memory_section = f"""## YOUR MEMORY ({self._memory.entry_count} entries)
 <memory>
-{self._memory.get()}
+{memory_content}
 </memory>
 
+Use these stored insights to inform today's forecasts. Entry IDs in brackets (e.g. [a1b2c3d4]) can be used to delete stale entries at end of day. The DataFrame includes your latest predictions for active questions and your final prediction snapshot on resolved questions.
+
 """
+                else:
+                    memory_section = f"""## YOUR MEMORY (reasoning, patterns, and insights from previous days)
+<memory>
+{memory_content}
+</memory>
+
+Use the reasoning and insights above to inform today's forecasts. The DataFrame includes your latest predictions for active questions and your final prediction snapshot on resolved questions.
+
+"""
+            memory_flow_note = "Note: After ending your day, you will be prompted to update your memory."
+        else:
+            memory_flow_note = ""
         
         # Search section (only if enabled)
         search_section = ""
@@ -399,89 +585,18 @@ You can use search to gather evidence before submitting forecasts.
 
 You have access to a news article database. You can search it to gather information before making predictions."""
         
-        return f"""You are an expert forecasting agent. You are participating in a forecasting competition and your goal is to make the best (both accurate and calibrated) predictions.
+        return f"""You are a forecasting agent. Today is {current_date}. Your goal: make accurate probability predictions.
 
-In this competition, the market consists of (open-ended) forecasting questions. For each question you choose to answer, you have to not only specify the outcome(s) which you think are most likely but also assign your probability (confidence)to each outcome. Think step by step about the information provided and reason about uncertainty.
-
-Your predictions are scored based on the probabilities you assign to outcomes using the multi-class BRIER SCORING RULE:
-
-**Score = 1 - Σ(p_i - y_i)²**
-
-Where:
-- The sum is over ALL outcomes you name, plus the ground truth if you didn't name it
-- **p_i** = probability you assigned to outcome i (0 if you didn't name that outcome)
-- **y_i** = 1 if outcome i is correct, 0 otherwise
-
-**Score Range: -1 to +1**
-- **+1** = Perfect prediction (100% on correct outcome, 0% on all others)
-- **0** = Abstainer baseline (provides no information)
-- **Negative** = Worse than random (e.g., mentioning only the wrong outcome(s))
-
-**Examples:**
-1. You predict: {{"Paris": 0.70, "London": 0.20, "Berlin": 0.10}}, Truth: "Paris"
-   - Brier = (0.70-1)² + (0.20-0)² + (0.10-0)² = 0.09 + 0.04 + 0.01 = 0.14
-   - **Score = 1 - 0.14 = 0.86** (Good!)
-
-2. You predict: {{"Paris": 0.40, "London": 0.40, "Berlin": 0.20}}, Truth: "Paris"  
-   - Brier = (0.40-1)² + (0.40-0)² + (0.20-0)² = 0.36 + 0.16 + 0.04 = 0.56
-   - **Score = 1 - 0.56 = 0.44** (Okay, but uncertain)
-
-3. You predict: {{"London": 0.80, "Paris": 0.15, "Berlin": 0.05}}, Truth: "Paris"
-   - Brier = (0.80-0)² + (0.15-1)² + (0.05-0)² = 0.64 + 0.7225 + 0.0025 = 1.365
-   - **Score = 1 - 1.365 = -0.365** (Penalty for being confident on wrong answer)
-
-As the Brier Score is a strictly proper scoring rule, so you can truthfully report your underlying probabilities. YOU MUST MAXIMIZE YOUR SCORE.
-
-Additionally, you will also be provided with a MEMORY SYSTEM which you can use to track your insights, strategies, and observations across days:
-
-## ABOUT THE MEMORY SYSTEM
-Your memory is persistent across days and is the ONLY context retained between days.
-
-**On Day 1:**
-- Your memory starts empty
-
-**On Subsequent Days:**
-- Your previous memory will be shown at the top of this prompt in <memory> tags
-- All conversation history from previous days is forgotten - only memory persists
-- At the end of each day, you'll be prompted to update your memory
-
-**Tips on what to store in memory:**
-- Key insights about recurring question patterns or topics (e.g., "tech earnings questions tend to resolve positively")
-- Strategies that are working well or poorly (e.g., "early predictions on sports questions scoring well")
-- Important observations about data quality, market behavior, or trends
-- Notes about specific questions you're tracking over time (e.g., "Question X234 - watching for news about treaty negotiations")
-- Calibration lessons learned (e.g., "I was overconfident on political questions, should moderate probabilities")
-
-**Memory Best Practices:**
-- Keep it CONCISE (a few paragraphs max) - it uses your context budget every day
-- Focus on actionable insights, not detailed logs of every action taken
-- Update it thoughtfully at day's end, not during active forecasting
-- Replace (not append) - each update is a complete rewrite, so preserve important info
-
-------------------------------------------
-
-Today is {current_date}.
-
-{self._feedback_handler.format_feedback(self._feedback_handler.generate_feedback(self._forecast_interface, current_date, self.inference))}
+{self._feedback_handler.format_feedback(
+    self._feedback_handler.generate_feedback(self._forecast_interface, current_date, self.inference),
+    show_tw_peer=not self.config.single_agent_mode,
+)}
 
 {getattr(self._forecast_interface, 'source_context', '')}
 
 {self._get_source_rules()}
 
-{memory_section}## SCORING (Time-Weighted Peer Score)
-You are evaluated on your **Time-Weighted Peer Score**.
-- **Peer Score**: How much better your forecast is compared to the crowd (average of other agents). 
-  - If you are the only predictor, you are compared against a baseline of 0.
-- **Time-Weighted**: Your score is accumulated over time.
-  - **Incentive**: Predict **early** and **accurately**, and on **more** questions. If you hold a prediction better than the crowd on D days, your improvement multiples D times!
-
-Key Mechanics:
-1. **Accuracy**: Brier score (1 - squared error) as explained above. 
-2. **Relative Performance**: You gain points by being more accurate than the market average.
-3. **Timing**: Establish a good position early to maximize the duration of your high score.
-4. **Number of predictions**: Your score is accumulated (SUMMED, not AVERAGED!) across all questions you predict on
-5. **Max Outcomes**: You can submit at most {self.config.max_outcomes_per_question} outcomes per question.
-6. **No Placeholders**: "Unknown", "TBD", "Other" are detrimental. Predict specific outcomes.
+{memory_section}{self._get_scoring_section()}
 {search_advice}
 ## AVAILABLE DATA
 DataFrame `df` with {df_info['n_rows']} questions ({df_info['n_active']} active/unresolved, {df_info['n_resolved']} resolved).
@@ -489,8 +604,7 @@ DataFrame `df` with {df_info['n_rows']} questions ({df_info['n_active']} active/
 Column descriptions:
 {df_info['columns_desc']}
 
-Note: `market_aggregate` and `my_prediction` columns contain Python dicts (or None). You can access them directly, e.g. `row['market_aggregate']['outcome_name']`.
-The `num_predictions` column shows how many predictions have been made on that question.
+{self._get_data_notes()}
 
 ## CODE EXECUTION ENVIRONMENT
 Your Python code runs in a sandbox with these variables pre-defined:
@@ -515,39 +629,19 @@ IMPORTANT:
 - Only ONE <action> block allowed per turn.
 - For "search", this means only 1 search query per turn.
 - For "query", you can write complex multi-step Python code in one block.
-- For "submit", you can include multiple <forecast> items in one block.
+- For "submit", include exactly one <forecast ...> block (one qid only).
 
 ## ACTION TYPES
 
 ### 1. Query Questions (explore data)
 <action type="query">
 ```python
-# Example 1: View active questions
-print(df[df['is_resolved'] == False][['qid', 'title', 'answer_type']])
-
-# Example 2: Find questions closing soon
-print(df[df['close_time'] <= today + timedelta(days=7)][['qid', 'title', 'close_time']])
-
-# Example 3: Compare your prediction to market aggregate
-my_active = df[(df['is_resolved'] == False) & (df['my_prediction'].notna())]
-for idx, row in my_active.iterrows():
-    print(f"Q: {{row['title']}}")
-    print(f"  My prediction: {{row['my_prediction']}}")
-    print(f"  Market: {{row['market_aggregate']}}")
-
-# Example 4: Check resolved questions to learn from outcomes
-resolved = df[df['is_resolved'] == True].tail(5)
-for idx, row in resolved.iterrows():
-    print(f"Q: {{row['title']}} | Answer: {{row['resolution']}} | My pred: {{row['my_prediction']}}")
-
-# Example 5: Filter by keywords or patterns
-sports_qs = df[df['title'].str.contains('NBA|NFL|soccer', case=False, na=False)]
-print(sports_qs[['qid', 'title', 'close_time']])
+print(df[df['is_resolved'] == False][['qid', 'title', 'answer_type']].head())
 ```
 </action>
 Use `print()` to ensure you see output. We are not executing in a jupyter notebook, so .head() preview alone can be unreliable.
 {search_section}
-### {submit_num}. Submit Forecasts
+### {submit_num}. Submit Forecast
 <action type="submit">
 <forecast qid="QUESTION_ID">
   <outcome name="Answer1" prob="0.5"/>
@@ -555,61 +649,113 @@ Use `print()` to ensure you see output. We are not executing in a jupyter notebo
 </forecast>
 </action>
 
-You can either submit forecast for a single question (above example) or multiple questions in one action (below example):
-<action type="submit">
-<forecast qid="QUESTION_ID_1">
-  <outcome name="Answer1" prob="0.5"/>
-  <outcome name="Answer2" prob="0.3"/>
-</forecast>
-<forecast qid="QUESTION_ID_2">
-  <outcome name="Answer3" prob="0.8"/>
-</forecast>
-</action>
-
-### {end_day_num}. End Day (finish current day; proceed to next day)
+### {end_day_num}. End Day (proceed to next day)
 <action type="next"/>
 
 ## INTERACTION FLOW
 You have {self.config.max_actions} actions per day. Each query, search, or submission uses 1 action.
 You can interleave queries, searches, and submissions as needed.
 When ready to move on, use <action type="next"/> to end your day.
-Note: After ending your day, you will be prompted to update your memory.
+{memory_flow_note}
 
 ## SUBMISSION RULES
 - qid must be from an active (is_resolved=False) question you saw in query results
-- One forecast per QID per submit action (can submit multiple times for different questions)
+- In one submit action, include exactly one <forecast ...> block for one qid.
+- You can submit again in later turns to update that qid.
 - Max {self.config.max_outcomes_per_question} outcomes per question.
 - Outcome names must be REAL predicted answers (e.g., person names, locations, numbers)
 - NEVER use placeholders like "Unknown", "TBD", "Other", "N/A" - these ALWAYS hurt your score
 - Probabilities must sum to ≤ 1.0
-- Submit at least one forecast before ending your day
 
 ---
 
 You have {self.config.max_actions} actions available. Begin."""
     
-    def _prompt_memory_update(self, messages: List[Dict[str, str]],  
+    def _prompt_memory_update(self, messages: List[Dict[str, str]],
                                forecast_interface, current_date: date) -> None:
         """
         Ask the agent to update its memory at the end of the day.
-        
-        Memory is the only context retained between days, allowing the agent to
-        track insights, patterns, and strategies across simulation days.
+
+        For StructuredMemory: uses add/delete operations on individual entries.
+        For BasicMemory (legacy): uses full replacement via <memory> tags.
         """
-        memory_prompt = f"""End of day {current_date}. You can now update your memory.
+        if isinstance(self._memory, StructuredMemory):
+            memory_prompt = self._build_structured_memory_prompt(current_date)
+        else:
+            memory_prompt = self._build_plain_memory_prompt(current_date)
+
+        messages.append({"role": "user", "content": memory_prompt})
+        response, usage = self.inference.chat(messages, self.config.sampling_params)
+        self._timer.record_tokens(usage)
+        self._timer.record_cost(usage.get("cost", 0), "llm")
+        messages.append({"role": "assistant", "content": response})
+
+        reasoning = usage.get("_reasoning_content") if usage else None
+
+        forecast_interface.log_model_output(
+            memory_prompt, response,
+            {"phase": "memory_update", "current_memory_len": len(self._memory), "reasoning": reasoning}
+        )
+
+        if isinstance(self._memory, StructuredMemory):
+            self._apply_structured_memory_ops(response)
+        else:
+            new_memory = extract_memory(response)
+            if new_memory is not None:
+                self._memory.update(new_memory)
+
+    def _build_structured_memory_prompt(self, current_date: date) -> str:
+        """Build the structured memory update prompt (add/delete entries)."""
+        return f"""End of day {current_date}. You can now update your memory.
 
 ## MEMORY UPDATE
-Your memory is the ONLY context you will retain tomorrow. Everything else (this conversation, 
-queries, forecasts) will be forgotten. Tomorrow you'll receive a fresh system prompt with 
-your memory included.
+Your memory entries are the ONLY context retained between days. Everything else resets. Tomorrow you get: search over news articles and the DataFrame (active question predictions, resolved question ground truths, your final predictions on resolved questions).
 
-Use memory to record:
-- Insights about recurring question patterns
-- Strategies that worked well or poorly
-- Important observations about data/trends
-- Notes about specific questions you're tracking
+You currently have {self._memory.entry_count} memory entries ({len(self._memory)} chars). Max 30 entries.
 
-Keep it CONCISE (a few paragraphs max) as it consumes your context window.
+### What to store (add new entries for):
+1. **reasoning** — Why you made specific predictions, especially when based on hard-to-find evidence. Example: "Q149: PSG 0.70 because Sky Bet implied 55% and Inter eliminated in semis."
+2. **calibration** — Performance patterns across resolved questions. Example: "Bookmaker odds correct 80% across 15 sports Qs; weight them more."
+3. **insight** — Non-obvious patterns that search alone would not surface. Example: "'First country to X' Qs almost always resolve to a major economy."
+4. **fact** — Critical hard-to-find facts relevant to active questions. Example: "ECB next meeting June 5 — relevant to Q72, Q108."
+
+### What NOT to store:
+General forecasting advice (already in instructions), easily searchable facts, prediction outcomes without reasoning.
+
+### How to update:
+Add entries (you may add multiple):
+<memory_add>
+name: Short descriptive title (max 150 chars, include question IDs if relevant)
+type: reasoning|calibration|insight|fact
+qids: Q72, Q108 (comma-separated, or leave empty)
+content: Your content here (max 800 chars). Include specific numbers, sources, and reasoning.
+</memory_add>
+
+Delete stale entries by ID (you may delete multiple):
+<memory_delete>ENTRY_ID_HERE</memory_delete>
+
+First reflect on today's session, then add/delete entries as needed:
+<reasoning>
+Reflect on today's forecasting session...
+</reasoning>
+
+If no updates needed, just output <reasoning>...</reasoning> without any memory tags."""
+
+    def _build_plain_memory_prompt(self, current_date: date) -> str:
+        """Build the legacy plain-text memory update prompt (full replacement)."""
+        return f"""End of day {current_date}. You can now update your memory.
+
+## MEMORY UPDATE
+Your memory is the ONLY thing that carries over to tomorrow. Everything else resets. Tomorrow you get: search over news articles and access to the DataFrame (active question predictions, resolved question ground truths, and your final predictions on resolved questions).
+
+Store things NOT recoverable from those tools:
+1. Reasoning behind predictions and how you did on resolved questions that might help with unresolved questions — once a question resolves, your prediction remains visible in the dataframe, but your reasoning is never stored in the dataframe. Example: "Q149: PSG 0.70 because Sky Bet implied 55% and Inter eliminated in semis."
+2. Performance patterns — track your accuracy across resolved questions so you can calibrate. Example: "Bookmaker odds were correct 80% across 15 sports questions; I should weight them more."
+3. Non-obvious insights that search alone would not surface. Example: "'First country to X' questions almost always resolve to a major economy."
+4. Critical hard-to-find facts directly relevant to active questions. Example: "ECB next meeting June 5 — relevant to Q72, Q108."
+
+Do NOT store: general forecasting advice (already in your instructions), easily searchable facts, prediction outcomes without reasoning, or vague tracking lists without reasoning.
+Aim to keep memory under 2000 characters. Prioritize recent and high-impact items and drop stale entries about resolved questions you have already learned from.
 
 To update memory, include it after your reasoning:
 <reasoning>
@@ -621,19 +767,19 @@ Your updated memory content here (complete replacement, not a diff)
 
 If you don't want to update memory, just output <reasoning>...</reasoning> without <memory> tags.
 Current memory length: {len(self._memory)} characters"""
-        
-        messages.append({"role": "user", "content": memory_prompt})
-        response, usage = self.inference.chat(messages, self.config.sampling_params)
-        self._timer.record_tokens(usage)
-        messages.append({"role": "assistant", "content": response})
-        
-        reasoning = usage.get("_reasoning_content") if usage else None
 
-        forecast_interface.log_model_output(
-            memory_prompt, response, 
-            {"phase": "memory_update", "current_memory_len": len(self._memory), "reasoning": reasoning}
-        )
-        
-        new_memory = extract_memory(response)
-        if new_memory is not None:
-            self._memory.update(new_memory)
+    def _apply_structured_memory_ops(self, response: str) -> None:
+        """Apply structured memory operations from agent response, with fallback."""
+        adds, deletes = extract_memory_ops(response)
+        if adds or deletes:
+            for entry_id in deletes:
+                self._memory.delete_entry(entry_id)
+            for add in adds:
+                self._memory.add_entry(
+                    add["name"], add["type"], add.get("qids", ""), add["content"]
+                )
+        else:
+            # Fallback: try old-style <memory> full replacement
+            old_memory = extract_memory(response)
+            if old_memory is not None:
+                self._memory.update(old_memory)

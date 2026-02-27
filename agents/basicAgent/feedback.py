@@ -2,23 +2,15 @@
 FeedbackHandler: Computes and formatting daily feedback for the agent.
 """
 
-from typing import Dict, Any, List, Set, Optional
+from typing import Dict, Any, Set, Optional, Callable
 from datetime import date
-from collections import defaultdict
-
-from environment.scoring import (
-    BrierScorer, 
-    resolve_question, 
-    compute_snapshot_peer_scores,
-    PredictionHistory,
-    DEFAULT_SCORER
-)
-from environment.ansmatching import AnswerMatcher
-from environment.data_loader import Question
 
 class FeedbackHandler:
-    def __init__(self, agent_id: str):
+    def __init__(self, agent_id: str, timing_callback: Optional[Callable[[float], None]] = None):
         self.agent_id = agent_id
+        # Kept for backward compatibility with constructor call sites.
+        # Feedback no longer runs matcher calls locally.
+        self._timing_callback = timing_callback
         
         # Cumulative metrics tracking
         self.total_brier_sum = 0.0
@@ -29,16 +21,6 @@ class FeedbackHandler:
         # Track which questions we've already processed to avoid double-counting
         self.processed_qids: Set[str] = set()
         
-        # Matcher instance (lazy initialized)
-        self._matcher: Optional[AnswerMatcher] = None
-        
-    def _get_matcher(self, inference_provider):
-        if self._matcher is None:
-            # Create a matcher using the agent's inference provider
-            # We use a mocked logger or None since we don't need to log matching details here
-            self._matcher = AnswerMatcher(inference_provider, logger=None)
-        return self._matcher
-        
     def generate_feedback(self, 
                           forecast_interface, 
                           current_date: date,
@@ -48,78 +30,46 @@ class FeedbackHandler:
         1. Results for questions resolved since last check
         2. Cumulative performance metrics
         """
-        matcher = self._get_matcher(inference_provider)
+        del current_date
+        del inference_provider
         
         # 1. Identify newly resolved questions
         resolved_today = []
-        
-        # Check all resolved key in the interface
-        # Note: forecast_interface.resolved_questions contains ALL resolved questions
-        for q in forecast_interface.resolved_questions:
-            if q.qid in self.processed_qids:
+
+        # Consume authoritative env-produced resolution summaries.
+        for event in getattr(forecast_interface, "resolution_events", []):
+            qid = str(event.get("qid")) if event.get("qid") is not None else None
+            if not qid or qid in self.processed_qids:
                 continue
-                
-            # It's a new resolved question! Process it.
-            self.processed_qids.add(q.qid)
-            
-            # Get prediction history
-            history = forecast_interface.histories.get(q.qid)
-            if not history:
+            self.processed_qids.add(qid)
+
+            per_agent = event.get("agents", {}) or {}
+            my_stats = per_agent.get(self.agent_id)
+            if not isinstance(my_stats, dict):
                 continue
-                
-            # Check if WE predicted on it
-            # Using get_prediction_as_of with resolution date to get our final standing
-            my_final_pred = history.get_prediction_as_of(self.agent_id, q.resolution_date)
-            
-            if not my_final_pred:
-                # We didn't participate, so no score impact (for now)
-                # (Though technically abstaining = 0 peer score, but metrics usually track active participation)
+
+            brier_raw = my_stats.get("brier")
+            if brier_raw is None:
                 continue
-                
-            # --- Compute Scores ---
-            
-            # 1. Brier Score
-            brier = DEFAULT_SCORER.score_prediction(
-                my_final_pred, 
-                q.ground_truth_answer, 
-                matcher,
-                question_id=q.qid,
-                question_title=q.title
-            )
-            
-            # 2. Accuracy (Top choice match)
-            # Find outcome with max probability
-            best_outcome = max(my_final_pred.outcomes.items(), key=lambda x: x[1])[0] if my_final_pred.outcomes else None
-            is_accurate = False
-            if best_outcome:
-                if matcher.is_equivalent(best_outcome, q.ground_truth_answer,
-                                       question_id=q.qid, question_title=q.title):
-                    is_accurate = True
-            
-            # 3. Time-Weighted Peer Score
-            # We need to resolve the whole question to get the peer scores
-            q_result = resolve_question(
-                history, 
-                q.ground_truth_answer, 
-                matcher, 
-                DEFAULT_SCORER
-            )
-            tw_peer_score = q_result.agent_scores.get(self.agent_id, 0.0)
-            
-            # --- Update Cumulative Metrics ---
+
+            brier = float(brier_raw)
+            tw_peer_score = float(my_stats.get("tw_peer", 0.0))
+            is_accurate = bool(my_stats.get("is_accurate", False))
+            best_outcome = my_stats.get("best_outcome")
+            best_prob = float(my_stats.get("best_prob", 0.0) or 0.0)
+
             self.total_brier_sum += brier
             self.total_tw_peer_sum += tw_peer_score
             if is_accurate:
                 self.total_accuracy_count += 1
             self.total_resolved_count += 1
-            
-            # --- Record for "Today's Results" ---
+
             resolved_today.append({
-                'qid': q.qid,
-                'title': q.title,
+                'qid': qid,
+                'title': event.get("title", ""),
                 'my_pred_outcome': best_outcome,
-                'my_pred_prob': my_final_pred.outcomes.get(best_outcome, 0.0) if best_outcome else 0.0,
-                'ground_truth': q.ground_truth_answer,
+                'my_pred_prob': best_prob,
+                'ground_truth': event.get("ground_truth", ""),
                 'brier': brier,
                 'tw_peer': tw_peer_score
             })
@@ -151,7 +101,7 @@ class FeedbackHandler:
             }
         }
 
-    def format_feedback(self, feedback_data: Dict[str, Any]) -> str:
+    def format_feedback(self, feedback_data: Dict[str, Any], show_tw_peer: bool = True) -> str:
         """Convert feedback dict to string for the prompt."""
         sections = []
         
@@ -162,7 +112,10 @@ class FeedbackHandler:
             for item in resolved:
                 lines.append(f"- \"{item['title']}\"")
                 lines.append(f"  Your prediction: {item['my_pred_outcome']} ({item['my_pred_prob']:.2f}) | Truth: {item['ground_truth']}")
-                lines.append(f"  Brier: {item['brier']:+.2f} | TW-Peer: {item['tw_peer']:+.2f}")
+                if show_tw_peer:
+                    lines.append(f"  Brier: {item['brier']:+.2f} | TW-Peer: {item['tw_peer']:+.2f}")
+                else:
+                    lines.append(f"  Brier: {item['brier']:+.2f}")
                 lines.append("") 
             sections.append("\n".join(lines))
         
@@ -174,11 +127,17 @@ class FeedbackHandler:
             m_lines.append(f"- Total Predictions: {metrics['total_predictions']} ({metrics['num_resolved']} resolved)")
             
             if metrics['num_resolved'] > 0:
-                m_lines.append(
-                    f"- accuracy: {metrics['accuracy']:.1f}% | "
-                    f"avg brier: {metrics['avg_brier']:.3f} | "
-                    f"time weighted peer: {metrics['tw_peer_score']:.2f}"
-                )
+                if show_tw_peer:
+                    m_lines.append(
+                        f"- accuracy: {metrics['accuracy']:.1f}% | "
+                        f"avg brier: {metrics['avg_brier']:.3f} | "
+                        f"time weighted peer: {metrics['tw_peer_score']:.2f}"
+                    )
+                else:
+                    m_lines.append(
+                        f"- accuracy: {metrics['accuracy']:.1f}% | "
+                        f"avg brier: {metrics['avg_brier']:.3f}"
+                    )
             else:
                 m_lines.append("- (Waiting for resolutions to compute scores)")
             

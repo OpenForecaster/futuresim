@@ -27,6 +27,7 @@ from .base import (
     compute_aggregate,
 )
 from .brier import BrierScorer
+from .binary_brier import BinaryBrierScorer
 from .log_score import LogScorer
 
 from typing import Dict, List, Optional
@@ -92,15 +93,20 @@ def compute_snapshot_peer_scores(
         {agent_id: peer_score}
     """
     if len(predictions) < 2:
-        # Single agent: compare against baseline abstainer (score 0)
-        # This is equivalent to having a virtual abstainer as a peer
-        # peer_score = 100 × (agent_score - 0) = 100 × agent_score
-        return {
-            agent_id: 100 * scorer.score_prediction(pred, ground_truth, matcher, 
-                                                    question_id=question_id, 
-                                                    question_title=question_title)
-            for agent_id, pred in predictions.items()
-        }
+        # Single agent: compare against a baseline score of 0.
+        # Use scorer.peer_score(...) so orientation is correct for both
+        # higher-is-better and lower-is-better raw scorers.
+        peer_scores = {}
+        for agent_id, pred in predictions.items():
+            my_score = scorer.score_prediction(
+                pred,
+                ground_truth,
+                matcher,
+                question_id=question_id,
+                question_title=question_title,
+            )
+            peer_scores[agent_id] = scorer.peer_score(my_score, [0.0])
+        return peer_scores
     
     # Compute raw score for each agent
     raw_scores = {}
@@ -254,6 +260,7 @@ def resolve_question(
 __all__ = [
     'BaseScorer',
     'BrierScorer',
+    'BinaryBrierScorer',
     'LogScorer',
     'DailyPrediction',
     'PredictionHistory',

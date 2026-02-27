@@ -50,7 +50,6 @@ python scripts/embed_articles.py \
     --articles_dir "$ARTICLES_DIR" \
     --output_dir "$OUTPUT_DIR" \
     --chunk_tokens 512 \
-    --batch_size 32 \
     --worker_id "$WORKER_ID" \
     --num_workers "$NUM_WORKERS" \
     --resume

@@ -91,6 +91,40 @@ class GlobalRateLimiter:
 _session: Optional[requests.Session] = None
 _session_lock = Lock()
 
+_pool_connections: int = 10
+_pool_maxsize: int = 20
+
+
+def configure_http_pool(pool_maxsize: int, pool_connections: Optional[int] = None) -> None:
+    """
+    Configure the shared HTTP connection pool used by all OpenRouterInference instances.
+
+    This should be called once at startup (before high-parallelism runs) to avoid
+    urllib3 warnings like "Connection pool is full" under ThreadPool workloads.
+    """
+    global _pool_connections, _pool_maxsize, _session
+
+    pool_maxsize = int(pool_maxsize)
+    if pool_maxsize <= 0:
+        raise ValueError("pool_maxsize must be > 0")
+
+    if pool_connections is None:
+        pool_connections = pool_maxsize
+    pool_connections = int(pool_connections)
+    if pool_connections <= 0:
+        raise ValueError("pool_connections must be > 0")
+
+    with _session_lock:
+        _pool_connections = pool_connections
+        _pool_maxsize = pool_maxsize
+        if _session is not None:
+            adapter = requests.adapters.HTTPAdapter(
+                pool_connections=_pool_connections,
+                pool_maxsize=_pool_maxsize,
+                max_retries=0,  # We handle retries ourselves
+            )
+            _session.mount('https://', adapter)
+
 
 def get_session() -> requests.Session:
     """Get or create the shared requests session."""
@@ -100,8 +134,8 @@ def get_session() -> requests.Session:
             _session = requests.Session()
             # Configure connection pooling
             adapter = requests.adapters.HTTPAdapter(
-                pool_connections=10,
-                pool_maxsize=20,
+                pool_connections=_pool_connections,
+                pool_maxsize=_pool_maxsize,
                 max_retries=0  # We handle retries ourselves
             )
             _session.mount('https://', adapter)
@@ -225,7 +259,8 @@ class OpenRouterInference:
             - Connection errors
             - JSON decode errors (malformed responses)
         """
-        last_error = None
+        RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504, 524}
+        last_error: Optional[BaseException] = None
         rate_limiter = GlobalRateLimiter()
         session = get_session()
         
@@ -246,7 +281,7 @@ class OpenRouterInference:
                     # Handle malformed JSON responses
                     try:
                         data = response.json()
-                    except requests.exceptions.JSONDecodeError as e:
+                    except Exception as e:
                         last_error = e
                         if attempt < self.max_retries:
                             delay = self._calculate_backoff(attempt)
@@ -280,16 +315,50 @@ class OpenRouterInference:
                     
                     content = data["choices"][0]["message"]["content"]
                     usage = data.get("usage", {})
-                    
+
                     # Extract reasoning if available
                     reasoning = data["choices"][0]["message"].get("reasoning")
                     if reasoning:
                         usage["_reasoning_content"] = reasoning
-                        
+
+                    finish_reason = data["choices"][0].get("finish_reason")
+                    if finish_reason:
+                        usage["_finish_reason"] = finish_reason
+
+                    # Treat null/empty content as retryable when reasoning exists
+                    if (not content or not content.strip()) and reasoning:
+                        last_error = Exception(
+                            f"Empty content with reasoning ({len(reasoning)} chars), finish_reason={finish_reason}"
+                        )
+                        if attempt < self.max_retries:
+                            delay = self._calculate_backoff(attempt)
+                            print(
+                                f"  [OpenRouter] Empty content (reasoning={len(reasoning)}c, "
+                                f"finish={finish_reason}), retrying in {delay:.1f}s "
+                                f"(attempt {attempt + 1}/{self.max_retries})"
+                            )
+                            time.sleep(delay)
+                            continue
+                        # Exhausted retries — fall through with the reasoning as content
+                        print(
+                            f"  [OpenRouter] Empty content persisted after {self.max_retries} retries, "
+                            f"using reasoning as content ({len(reasoning)} chars)"
+                        )
+                        return reasoning, usage
+
+                    # Log empty content without reasoning (unexpected)
+                    if not content or not content.strip():
+                        comp_tokens = usage.get("completion_tokens", "?")
+                        print(
+                            f"  [OpenRouter] Warning: empty content "
+                            f"(finish={finish_reason}, tokens={comp_tokens}, "
+                            f"reasoning={'yes' if reasoning else 'no'})"
+                        )
+
                     return content, usage
                 
                 # Rate limit or server error - retry (including 524 Cloudflare timeout)
-                if response.status_code in (429, 500, 502, 503, 504, 524):
+                if response.status_code in RETRYABLE_STATUS_CODES:
                     error_msg = f"HTTP {response.status_code}"
                     try:
                         error_data = response.json()
@@ -306,22 +375,32 @@ class OpenRouterInference:
                         time.sleep(delay)
                         continue
                 
-                # Other HTTP errors - don't retry
-                response.raise_for_status()
+                # Other HTTP errors: treat as fatal configuration/usage errors.
+                # We intentionally do NOT retry these.
+                if response.status_code in (401, 403):
+                    raise ValueError(f"OpenRouter auth error (HTTP {response.status_code}). Check OPENROUTER_API_KEY / permissions.")
+                if response.status_code in (400, 402):
+                    raise ValueError(f"OpenRouter request error (HTTP {response.status_code}). Check model/params/billing.")
+
+                # Best-effort message for unknown status codes.
+                try:
+                    body = response.text[:500]
+                except Exception:
+                    body = "<unreadable body>"
+                raise RuntimeError(f"OpenRouter HTTP {response.status_code}: {body}")
                 
-            except requests.exceptions.Timeout as e:
+            except requests.exceptions.RequestException as e:
+                # Broad catch for transient network/proxy failures:
+                # - Timeout / ReadTimeout
+                # - ConnectionError
+                # - ChunkedEncodingError ("Response ended prematurely")
+                # - etc.
+                #
+                # NOTE: We avoid using raise_for_status() so HTTPError isn't expected here.
                 last_error = e
                 if attempt < self.max_retries:
                     delay = self._calculate_backoff(attempt)
-                    print(f"  [OpenRouter] Timeout, retrying in {delay:.1f}s (attempt {attempt + 1}/{self.max_retries})")
-                    time.sleep(delay)
-                    continue
-                    
-            except requests.exceptions.ConnectionError as e:
-                last_error = e
-                if attempt < self.max_retries:
-                    delay = self._calculate_backoff(attempt)
-                    print(f"  [OpenRouter] Connection error, retrying in {delay:.1f}s (attempt {attempt + 1}/{self.max_retries})")
+                    print(f"  [OpenRouter] {type(e).__name__}, retrying in {delay:.1f}s (attempt {attempt + 1}/{self.max_retries})")
                     time.sleep(delay)
                     continue
         

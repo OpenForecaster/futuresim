@@ -15,6 +15,7 @@ class Question:
     resolution_date: date
     ground_truth_answer: str = ""
     options: Optional[List[str]] = None
+    prompt: str = ""
 
 
 class QuestionPool:
@@ -75,7 +76,8 @@ class QuestionPool:
                 answer_type=q_data.answer_type,
                 resolution_date=q_data.resolution_date,
                 ground_truth_answer=q_data.ground_truth_answer,
-                options=q_data.options
+                options=q_data.options,
+                prompt=getattr(q_data, "prompt", "") or ""
             )
             
             self._all_questions[q.qid] = q

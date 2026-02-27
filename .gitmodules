@@ -2,3 +2,6 @@
 	path = data/news/news-please
 	url = https://github.com/fhamborg/news-please.git
 	ignore = dirty
+[submodule "third_party/SkyRL"]
+	path = third_party/SkyRL
+	url = https://github.com/NovaSky-AI/SkyRL.git

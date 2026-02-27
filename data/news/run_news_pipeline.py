@@ -7,7 +7,8 @@ This script submits HTCondor jobs for the full news processing pipeline:
 2. Deduplication
 3. JSONL → Parquet conversion
 4. Embedding generation
-5. LanceDB index rebuild
+5. LanceDB table + scalar date index (stage 1/2)
+6. LanceDB FTS refresh (stage 2/2; vector index optional)
 
 Since some steps depend on previous outputs, run this script multiple times
 after each step completes (check with condor_q).
@@ -25,8 +26,12 @@ Usage:
     # Step 4: Generate embeddings (after step 3 completes)
     python run_news_pipeline.py --step embed
     
-    # Step 5: Build LanceDB index (after step 4 completes)
+    # Step 5: Build LanceDB table + scalar date index only (after step 4 completes)
     python run_news_pipeline.py --step lancedb
+
+    # Step 6: Build/refresh FTS (with positions). Vector index is optional.
+    #         (after step 5 completes)
+    python run_news_pipeline.py --step lancedb_index
     
     # Show status of all steps
     python run_news_pipeline.py --status
@@ -36,7 +41,7 @@ import os
 import sys
 import argparse
 from pathlib import Path
-from datetime import date
+from datetime import date, datetime
 
 # Add parent directories to path
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))  # data/news
@@ -78,27 +83,215 @@ def check_dir_exists(path: str) -> bool:
     return False
 
 
+def get_latest_mtime(path: str, recursive: bool = False):
+    """
+    Return newest mtime (epoch seconds) for path contents.
+    If recursive=False, only checks direct children for directories.
+    """
+    p = Path(path)
+    if not p.exists():
+        return None
+    if p.is_file():
+        return p.stat().st_mtime
+
+    latest = None
+    if recursive:
+        for root, dirs, files in os.walk(p):
+            # Ignore hidden/cache dirs (e.g. .cache/huggingface upload metadata).
+            dirs[:] = [d for d in dirs if not d.startswith(".")]
+            for fname in files:
+                if fname.startswith("."):
+                    continue
+                fp = Path(root) / fname
+                try:
+                    ts = fp.stat().st_mtime
+                except OSError:
+                    continue
+                if latest is None or ts > latest:
+                    latest = ts
+    else:
+        for child in p.iterdir():
+            if child.name.startswith("."):
+                continue
+            try:
+                ts = child.stat().st_mtime
+            except OSError:
+                continue
+            if latest is None or ts > latest:
+                latest = ts
+
+    # Fallback to dir mtime if empty
+    if latest is None:
+        return p.stat().st_mtime
+    return latest
+
+
+def fmt_mtime(ts):
+    if ts is None:
+        return "n/a"
+    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def get_lancedb_index_flags(db_dir: str, table_name: str = "articles"):
+    """Return whether LanceDB table has FTS and vector indices."""
+    flags = {"ok": False, "has_fts": False, "has_vector": False, "error": None}
+    try:
+        import lancedb  # Local import so --status still works without lancedb installed.
+    except Exception as e:
+        flags["error"] = f"lancedb import failed: {e}"
+        return flags
+
+    try:
+        db = lancedb.connect(db_dir)
+        table = db.open_table(table_name)
+        indices = table.list_indices()
+        for idx in indices:
+            if "FTS" in str(idx).upper():
+                flags["has_fts"] = True
+            else:
+                flags["has_vector"] = True
+        # Tantivy-backed FTS may not always appear in list_indices() on some versions.
+        if not flags["has_fts"]:
+            try:
+                table.search("__lancedb_fts_probe_token__").limit(1).to_list()
+                flags["has_fts"] = True
+            except Exception as probe_err:
+                if "Cannot perform full text search unless an INVERTED index" not in str(probe_err):
+                    flags["error"] = f"fts probe error: {probe_err}"
+        flags["ok"] = True
+    except Exception as e:
+        flags["error"] = str(e)
+    return flags
+
+
 def show_status():
-    """Show status of each processing step."""
+    """Show status of each processing step with freshness checks."""
     print("\n=== News Pipeline Status ===\n")
-    
-    checks = [
-        ("1. Raw articles", RAW_ARTICLES_DIR),
-        ("2. JSONL files", JSONL_DIR),
-        ("3. Deduped JSONL", DEDUPED_DIR),
-        ("4. Parquet data", f"{PARQUET_OUTPUT_DIR}/data"),
-        ("5. Embeddings", f"{EMBEDDINGS_DIR}/Qwen3-Embedding-8B"),
-        ("6. LanceDB index", f"{LANCEDB_DIR}/Qwen3-Embedding-8B"),
+
+    stages = [
+        {
+            "id": "raw",
+            "name": "1. Raw articles",
+            "path": RAW_ARTICLES_DIR,
+            "deps": [],
+            "recursive": False,
+        },
+        {
+            "id": "jsonl",
+            "name": "2. JSONL files",
+            "path": JSONL_DIR,
+            "deps": ["raw"],
+            "recursive": False,
+        },
+        {
+            "id": "dedup",
+            "name": "3. Deduped JSONL",
+            "path": DEDUPED_DIR,
+            "deps": ["jsonl"],
+            "recursive": False,
+        },
+        {
+            "id": "parquet",
+            "name": "4. Parquet data",
+            "path": f"{PARQUET_OUTPUT_DIR}/data",
+            "deps": ["dedup"],
+            "recursive": False,
+        },
+        {
+            "id": "embed",
+            "name": "5. Embeddings",
+            "path": f"{EMBEDDINGS_DIR}/Qwen3-Embedding-8B",
+            "deps": ["parquet"],
+            "recursive": False,
+        },
+        {
+            "id": "lancedb",
+            "name": "6. LanceDB table + scalar index (stage 1/2)",
+            "path": f"{LANCEDB_DIR}/Qwen3-Embedding-8B",
+            "deps": ["parquet", "embed"],
+            "recursive": False,
+        },
     ]
-    
-    for name, path in checks:
+
+    stage_info = {}
+    for stage in stages:
+        path = stage["path"]
         exists = check_dir_exists(path)
-        status = "✓ Ready" if exists else "✗ Missing"
-        print(f"  {name}: {status}")
+        stage_info[stage["id"]] = {
+            "exists": exists,
+            "mtime": get_latest_mtime(path, recursive=stage["recursive"]) if exists else None,
+            "state": None,
+            "reasons": [],
+        }
+
+    for stage in stages:
+        info = stage_info[stage["id"]]
+        path = stage["path"]
+        status = "✓ Ready"
+        stale_reasons = []
+
+        if not info["exists"]:
+            status = "✗ Missing"
+            info["state"] = "missing"
+        else:
+            for dep in stage["deps"]:
+                dep_info = stage_info[dep]
+                if dep_info["state"] in {"missing", "stale"}:
+                    status = "⚠ Stale"
+                    stale_reasons.append(f"dependency not ready: {dep}")
+                    continue
+                if info["mtime"] is not None and dep_info["mtime"] is not None and info["mtime"] < dep_info["mtime"]:
+                    status = "⚠ Stale"
+                    stale_reasons.append(f"older than {dep} ({fmt_mtime(dep_info['mtime'])})")
+            if status == "✓ Ready":
+                info["state"] = "ready"
+            else:
+                info["state"] = "stale"
+        info["reasons"] = stale_reasons
+
+        print(f"  {stage['name']}: {status}")
         print(f"    Path: {path}")
-    
-    print("\n  Run with --step <name> to process each step.")
-    print("  Steps: jsonl, dedup, parquet, embed, lancedb\n")
+        print(f"    Latest update: {fmt_mtime(info['mtime'])}")
+        if stale_reasons:
+            print(f"    Reason: {', '.join(stale_reasons)}")
+
+    # Stage 2 readiness checks (metadata-based, not mtime-only).
+    print("\n  7. LanceDB FTS index (stage 2/2):", end=" ")
+    lancedb_path = f"{LANCEDB_DIR}/Qwen3-Embedding-8B"
+    lancedb_ready = stage_info["lancedb"]["state"] == "ready"
+    if not lancedb_ready:
+        print("✗ Missing")
+        print("    Reason: Step 6 output is not ready")
+    else:
+        flags = get_lancedb_index_flags(lancedb_path)
+        if not flags["ok"]:
+            print("⚠ Unknown")
+            print(f"    Reason: could not inspect indices ({flags['error']})")
+        elif flags["has_fts"]:
+            print("✓ Ready")
+        else:
+            print("⚠ Missing")
+            print("    Reason: no FTS index found; run --step lancedb_index")
+
+    print("\n  8. LanceDB vector index (optional IVF-PQ optimization):", end=" ")
+    if not lancedb_ready:
+        print("✗ Missing")
+        print("    Reason: Step 6 output is not ready")
+    else:
+        flags = get_lancedb_index_flags(lancedb_path)
+        if not flags["ok"]:
+            print("⚠ Unknown")
+            print(f"    Reason: could not inspect indices ({flags['error']})")
+        elif flags["has_vector"]:
+            print("✓ Ready")
+        else:
+            print("ℹ Optional / not built")
+            print("    Reason: stage 2 default is FTS-only (BUILD_VECTOR_INDEX=0)")
+        print(f"    FTS present: {flags.get('has_fts', False)}")
+
+    print("\n  NOTE: 'Ready' means present and not older than upstream dependencies.")
+    print("  Run with --step <name> to process each step.")
+    print("  Steps: jsonl, dedup, parquet, embed, lancedb, lancedb_index\n")
 
 
 def run_jsonl_step():
@@ -213,10 +406,10 @@ def run_embed_step():
 
 
 def run_lancedb_step():
-    """Step 5: Build LanceDB index."""
+    """Step 5: Build LanceDB table + scalar index (stage 1/2)."""
     import subprocess
     
-    print("\n=== Step 5: LanceDB Index Build ===")
+    print("\n=== Step 5: LanceDB Table Build (Stage 1/2, no FTS) ===")
     
     emb_dir = f"{EMBEDDINGS_DIR}/Qwen3-Embedding-8B"
     if not check_dir_exists(emb_dir):
@@ -237,6 +430,48 @@ def run_lancedb_step():
         return False
     
     print(f"\nOutput will be in: {LANCEDB_DIR}")
+    print("Next: run --step lancedb_index for stage 2/2 (FTS refresh; vector optional).")
+    return True
+
+
+def run_lancedb_index_step():
+    """Step 6: Build LanceDB FTS (stage 2/2, vector optional)."""
+    import subprocess
+
+    print("\n=== Step 6: LanceDB Index Build (Stage 2/2: FTS default, vector optional) ===")
+
+    lancedb_model_dir = f"{LANCEDB_DIR}/Qwen3-Embedding-8B"
+    if not check_dir_exists(lancedb_model_dir):
+        print(f"ERROR: LanceDB directory does not exist: {lancedb_model_dir}")
+        print("Run step 5 (lancedb) first.")
+        return False
+
+    cmd = [
+        "condor_submit_bid", "25",
+        "/home/sgoel/forecast-sim/mpi_scripts/build_lancedb/build_index.sub",
+    ]
+
+    env = os.environ.copy()
+    # Force stage-2 defaults for the one-line pipeline command.
+    # This avoids shell env leakage accidentally changing index mode.
+    env["BUILD_FTS"] = "1"
+    env["FTS_WITH_POSITION"] = "1"
+    env["FTS_USE_TANTIVY"] = "1"
+    env["TANTIVY_INDEX_ROOT"] = os.path.join(
+        os.path.expanduser("~"), "forecasting", "lancedb_tantivy_indices"
+    )
+    env["BUILD_VECTOR_INDEX"] = "0"
+    env["NUM_PARTITIONS"] = "4096"
+    env["NUM_SUB_VECTORS"] = "64"
+    env["VECTOR_METRIC"] = "cosine"
+
+    result = subprocess.run(cmd, capture_output=True, text=True, env=env)
+    print(result.stdout)
+    if result.returncode != 0:
+        print(f"Error: {result.stderr}")
+        return False
+
+    print(f"\nOutput will be in: {LANCEDB_DIR}")
     return True
 
 
@@ -248,7 +483,7 @@ def main():
     )
     
     parser.add_argument('--step', type=str, 
-                       choices=['jsonl', 'dedup', 'parquet', 'embed', 'lancedb'],
+                       choices=['jsonl', 'dedup', 'parquet', 'embed', 'lancedb', 'lancedb_index'],
                        help="Which step to run")
     parser.add_argument('--status', action='store_true',
                        help="Show status of all steps")
@@ -265,6 +500,7 @@ def main():
         'parquet': run_parquet_step,
         'embed': run_embed_step,
         'lancedb': run_lancedb_step,
+        'lancedb_index': run_lancedb_index_step,
     }
     
     step_func = step_funcs[args.step]

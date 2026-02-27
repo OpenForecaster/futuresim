@@ -1,0 +1,25 @@
+# HTCondor submit file for running vLLM server: GPT-OSS 20B (MXFP4) on H100s only
+#
+# Run with:
+#   condor_submit_bid 25 mpi_scripts/vllm_serve/vllm_gpt_oss_20b_h100.sub
+#
+# Then from a login node, you can port-forward to the allocated machine and hit:
+#   http://<node>:8000/v1/models
+
+executable = /usr/bin/env
+arguments = bash -lc "cd /home/sgoel/forecast-sim && python mpi_scripts/vllm_serve/serve_from_config.py --config configs/vllm_gpt_oss_20b_mxfp4.yaml"
+
+output = /is/cluster/fast/sgoel/logs/forecasting-sim/vllm/gpt_oss_20b_$(Cluster).out
+error  = /is/cluster/fast/sgoel/logs/forecasting-sim/vllm/gpt_oss_20b_$(Cluster).err
+log    = /is/cluster/fast/sgoel/logs/forecasting-sim/vllm/gpt_oss_20b_$(Cluster).log
+
+request_cpus   = 8
+request_memory = 96GB
+request_disk   = 50GB
+request_gpus   = 1
+
+# Hopper+ only for MXFP4
+requirements = (TARGET.CUDACapability >= 9.0)
+
+queue
+

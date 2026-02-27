@@ -10,8 +10,8 @@ class QueryHandler:
     def __init__(self):
         self._df_interface: Optional[DfInterface] = None
     
-    def setup(self, csv_path: str, forecast_interface, agent_id: str, current_date: date) -> None:
-        self._df_interface = DfInterface(csv_path, forecast_interface, agent_id, current_date)
+    def setup(self, csv_path: str, forecast_interface, agent_id: str, current_date: date, single_agent_mode: bool = False) -> None:
+        self._df_interface = DfInterface(csv_path, forecast_interface, agent_id, current_date, single_agent_mode)
     
     def execute(self, code: str) -> Tuple[str, Optional[str]]:
         if not self._df_interface:

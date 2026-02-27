@@ -48,6 +48,18 @@ python scripts/test_basic_agent.py \
 
 On seal-node we already have GPUs, so you can go for it directly.
 
+## Config-Driven HTCondor Resources (and GPU Pinning)
+
+`mpi_scripts/run_sim/submit_sim.py` can infer HTCondor resource requests from the YAML config via a `resources:` block:
+- `resources.gpus`, `resources.cpus`, `resources.memory_gb`, `resources.disk_gb`, `resources.bid`, `resources.requirements`
+- To override config values at submit time, use `--set key=value` (repeatable), e.g. `--set resources.gpus=2`.
+
+For local vLLM runs that need deterministic multi-GPU placement (e.g., agent model on GPU0, matcher+embedder on GPU1), configs can also set:
+- `aux_cuda_visible_devices`: applied to the *parent* process before starting matcher / embedder
+- `agent_cuda_visible_devices`: applied only to *agent vLLM subprocesses*
+
+These values are interpreted as indices into the scheduler-provided `CUDA_VISIBLE_DEVICES` list when present (so `"0"`/`"1"` work even if the scheduler uses UUIDs).
+
 ## AllQAgent (Warmup Mode)
 This agent performs a "warmup" phase on Day 0 where it predicts on **every single active question** before the simulation starts.
 - **Goal**: Establish a baseline score by ensuring coverage of all questions.
@@ -56,6 +68,43 @@ This agent performs a "warmup" phase on Day 0 where it predicts on **every singl
     - **Day 1+**: Behaves like BasicAgent, but with a prompt reminder that initial predictions exist.
 - **Memory**: The warmup phase does **not** read/write persistent memory. Memory is enabled starting Day 1.
 - **Config**: Use `scaffold: "allQ"` and `warmup_max_actions: 10`.
+
+## AllQDailyAgent (AllQD Mode)
+This agent runs the same **per-question focused** loop as AllQ warmup, but **every day** (no separate warmup phase).
+- **Goal**: Get one focused forecast attempt per question per day (parallelized across questions).
+- **Behavior**:
+  - **Every day**: For each active question, run a mini-loop with `warmup_max_actions` (default 10) and submit a forecast for that question.
+  - **No DataFrame queries**: `query` is disabled; prompts include prior prediction/market aggregate only if non-empty.
+- **Memory**: No end-of-day memory update (AllQD does not call the BasicAgent memory phase).
+- **Config**: Use `scaffold: "allqd"`. Parallelism is controlled by `warmup_parallelism`.
+
+## Disabling Memory (All Modes)
+You can disable the BasicAgent end-of-day memory prompt/snapshots by setting `enable_memory: false` in agent config.
+- Implemented via `AgentConfig.enable_memory` (plumbed from YAML `defaults.enable_memory` / `agents[].enable_memory`).
+- Useful for restart runs where you want to remove the memory-update LLM call.
+
+## Simulation Resume & Restart
+
+### Resume (continue from last day)
+Use `--resume <output_dir>` to continue a simulation from where it left off. State is rebuilt from `actions.jsonl`.
+
+### Restart from Specific Day
+Use `--restart_from <source_dir> --restart_from_day YYYY-MM-DD` to re-run from a specific day:
+```bash
+python scripts/test_basic_agent.py \
+    --restart_from /path/to/original/run \
+    --restart_from_day 2025-04-05
+```
+- Creates a **new** output directory (`{sim_name}_restart/...`)
+- Copies `actions.jsonl` entries and memory snapshots **before** restart day
+- Uses existing `--resume` logic internally
+- **Warmup predictions preserved** (main use case: avoid costly Day 0 re-runs)
+
+### Per-Day Memory Storage
+Memory is saved per-day as `agents/<agent_id>/memory/{YYYY-MM-DD}.txt`.
+- On each day, `set_date(current_date)` loads the most recent memory file **before** that date
+- Enables restarting from any day with correct memory state
+- Backward compatible: if no memory files exist, starts with empty memory
 
 ## Scoring Approach
 
@@ -160,6 +209,7 @@ deduped_articles/
 - **Cluster access**: `kinit` on seal-node1, then `ssh login.cluster.is.localnet`
 - **Memory limit**: Jobs killed if exceeding requested memory. Request 100GB+ for large data jobs.
 - **Batch processing**: For large data, process in batches to avoid memory spikes. See `scripts/convert_jsonl_to_parquet.py` for example.
+- **OpenRouter + high parallelism**: If you run per-question parallelism (e.g. AllQ warmup / AllQD) with many threads, ensure the HTTP connection pool is sized accordingly. The OpenRouter client now configures its `requests` pool to match the run's `warmup_parallelism` to avoid "Connection pool is full" warnings and empty responses.
 
 ## Scoring Implementation
 
@@ -412,6 +462,10 @@ Full chunk content (512 tokens max, not truncated)
 
 Agent timing stats saved to `<agent_dir>/timing_stats.jsonl`.
 
+Notes:
+- `day_total_seconds` is wall-clock time between `AgentTimer.start_day()` and `AgentTimer.end_day()`.
+- In parallel per-question modes (AllQ warmup / AllQD), `llm_total_seconds` can be much larger than `day_total_seconds` because many LLM calls overlap.
+
 ### Full Setup
 
 See `agents/search_tools/README.md` for complete setup instructions.
@@ -428,6 +482,19 @@ Verify each line of env code
 
 **Checkpointing**: Test Save/resume simulation state mid-run
 **vLLM Batching for Multi-Agent**: Batch inference requests across agents for better throughput with local modelse
+
+### Local vLLM Servers (Matcher + Embedder + Agent)
+
+- `inference/vllm.py` starts a per-model vLLM OpenAI-compatible server subprocess and reuses it within a process.
+- Answer matching (`matching: vllm`) already runs through this server.
+- Embeddings for LanceDB search now also run via a vLLM server (`POST /v1/embeddings`) instead of an in-process `vllm.LLM(convert="embed")`, so parallel search calls can be continuous-batched by vLLM.
+- vLLM server logs go to `SIM_OUTPUT_DIR` (set to the run output dir) and are named like `vllm_server_<model>_<port>.log`.
+
+### GPT-OSS Notes
+
+- GPT-OSS weights (e.g., `gpt-oss-20b` MXFP4) are supported via vLLM.
+- For this codebase's current tag-based action protocol (e.g. `<action type="search">`), use `VLLMInference.chat()` (Chat Completions). vLLM will internally convert to Harmony for GPT-OSS.
+- If you later add OpenAI-style tool calling, `VLLMInference.chat()` will route to `VLLMInference.responses(...)` automatically when `tools`/`tool_choice` are provided.
 
 ### Low Priority / Nice-to-Have
 

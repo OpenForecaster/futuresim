@@ -29,7 +29,8 @@ class DfInterface:
                  csv_path: str,
                  forecast_interface,  # Has get_agent_predictions(agent_id)
                  agent_id: str,
-                 current_date: date):
+                 current_date: date,
+                 single_agent_mode: bool = False):
         """
         Initialize the DataFrame interface.
         
@@ -38,11 +39,13 @@ class DfInterface:
             forecast_interface: Interface to get agent's predictions
             agent_id: Current agent's ID
             current_date: Current simulation date
+            single_agent_mode: If True, hide market_aggregate (not meaningful for single agent)
         """
         self.csv_path = Path(csv_path)
         self.forecast_interface = forecast_interface
         self.agent_id = agent_id
         self.current_date = current_date
+        self.single_agent_mode = single_agent_mode
         
         self._df: Optional[pd.DataFrame] = None
         self._executor = QueryExecutor(timeout_seconds=5.0)
@@ -99,6 +102,10 @@ class DfInterface:
         df['my_prediction_date'] = df['qid'].apply(
             lambda qid: agent_preds.get(qid, {}).get('date')
         )
+        
+        # In single-agent mode, drop market_aggregate (it just reflects own predictions)
+        if self.single_agent_mode and 'market_aggregate' in df.columns:
+            df = df.drop(columns=['market_aggregate'])
         
         self._df = df
         return df

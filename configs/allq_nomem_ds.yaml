@@ -1,0 +1,58 @@
+# AllQAgent restart config with memory disabled (no memory prompt / no memory snapshots).
+#
+# Restarts an existing AllQ run from Day 1 onward. Day 0 in AllQ is warmup-only anyway.
+#
+# Usage: python mpi_scripts/run_sim/submit_sim.py --config configs/allq_nomem_ds.yaml --runs 1
+
+# --- Restart ---
+restart_from: "/fast/sgoel/forecasting/current_sim/allq_sim_deepseek_r00/26-02-05-07-20-09"
+restart_from_day: "2025-04-25"
+
+# --- Simulation Meta ---
+sim_name: "allq_nomem_deepseek"
+start_date: "2025-05-01" # Resolution window start (kept for completeness; restart drives sim date)
+end_date: "2025-08-23"   # Resolution window end
+lookback_days: 7
+search_cutoff_days: 0
+split: "test"
+
+# --- Data Paths ---
+dataset: "openforesight"
+dataset_path: "/is/cluster/fast/sgoel/forecasting/qs/OpenForesight/data/"
+dataset_cache: "/is/cluster/fast/sgoel/forecasting/qs/cache"
+min_forecasters: 10
+resolved_only: true
+output_base: "/fast/sgoel/forecasting/current_sim"
+warmup_parallelism: 64
+
+# --- Search Settings ---
+search_db: "/is/cluster/fast/sgoel/forecasting/news/deduped_articles/lance/Qwen3-Embedding-8B"
+embedding_model: "/is/cluster/fast/sgoel/models/Qwen3-Embedding-8B"
+embedding_gpu_mem: 0.7
+
+# --- Answer Matching ---
+matching: "openrouter"
+matcher: "deepseek/deepseek-v3.2"
+matcher_gpu_mem: 0.0
+max_model_len: 8192
+
+# --- Inference Defaults ---
+rate_limit: 32.0
+parallel: true
+
+# --- Agents Configuration ---
+defaults:
+  provider: "openrouter"
+  scaffold: "allQ"
+  enable_memory: false
+  max_actions: 10
+  warmup_max_actions: 10
+  warmup_parallelism: 64
+  temperature: 0.7
+  max_tokens: 2048
+  max_retries: 3
+
+agents:
+  - model: "deepseek/deepseek-v3.2"
+    provider: "openrouter"
+
