@@ -57,8 +57,9 @@ def load_all_records(input_dir: str) -> List[dict]:
         print(f"No .jsonl files found in {input_dir}")
         return all_records
 
+    min_records = 5
     for fpath in jsonl_files:
-        count = 0
+        records = []
         with open(fpath, "r", encoding="utf-8", errors="replace") as f:
             for line in f:
                 line = line.strip()
@@ -67,13 +68,50 @@ def load_all_records(input_dir: str) -> List[dict]:
                 try:
                     record = json.loads(line)
                     record["_source_file"] = fpath.name
-                    all_records.append(record)
-                    count += 1
+                    records.append(record)
                 except json.JSONDecodeError:
                     continue
-        print(f"  Loaded {count} records from {fpath.name}")
+        if len(records) < min_records:
+            print(f"  Skipping {fpath.name}: only {len(records)} records (need >= {min_records})")
+            continue
+        all_records.extend(records)
+        print(f"  Loaded {len(records)} records from {fpath.name}")
 
     print(f"Total: {len(all_records)} records from {len(jsonl_files)} files")
+
+    def _get_output(r):
+        return r.get("raw_model_output") or r.get("model_answer_raw") or ""
+
+    before = len(all_records)
+    all_records = [
+        r for r in all_records
+        if "<answer>" in _get_output(r) and "</answer>" in _get_output(r)
+    ]
+    no_tag = before - len(all_records)
+    if no_tag:
+        print(f"Filtered out {no_tag} records missing <answer> tags ({len(all_records)} remaining)")
+
+    before = len(all_records)
+    all_records = [
+        r for r in all_records
+        if _get_output(r).count("<answer>") == 1 and _get_output(r).count("</answer>") == 1
+    ]
+    multi_tag = before - len(all_records)
+    if multi_tag:
+        print(f"Filtered out {multi_tag} records with multiple <answer> tags ({len(all_records)} remaining)")
+
+    before = len(all_records)
+    filtered = []
+    for r in all_records:
+        gt = str(r.get("ground_truth", "")).strip().lower()
+        ma = str(r.get("model_answer", "")).strip().lower()
+        if gt and ma and gt == ma:
+            filtered.append(r)
+    mismatch = before - len(filtered)
+    all_records = filtered
+    if mismatch:
+        print(f"Filtered out {mismatch} records where model answer != ground truth ({len(all_records)} remaining)")
+
     return all_records
 
 
@@ -90,8 +128,9 @@ def transform_record(record: dict, idx: int, split: str) -> dict:
     raw_model_output = record.get("raw_model_output", "")
     metadata = record.get("metadata", {})
 
-    # Build the prompt using the same function as eval_qa.py
-    prompt_text = build_eval_prompt(question, background)
+    prompt_text = record.get("original_prompt") or record.get("prompt_text") or ""
+    if not prompt_text.strip():
+        prompt_text = build_eval_prompt(question, background)
 
     # Build the full response (model output as-is)
     response = raw_model_output

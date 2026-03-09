@@ -48,7 +48,10 @@ class OpenForesightFetcher(DataFetcher):
             ds = Dataset.from_pandas(combined_df)
         else:
             # Load from HuggingFace hub
-            ds = load_dataset(path, split=self.split)
+            kwargs = {}
+            if cache_dir:
+                kwargs["cache_dir"] = cache_dir
+            ds = load_dataset(path, split=self.split, **kwargs)
         
         questions = []
         for item in ds:

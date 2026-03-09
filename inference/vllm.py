@@ -106,6 +106,8 @@ class VLLMInference:
                  startup_timeout: float = 300.0,
                  enable_tools: bool = False,
                  cuda_visible_devices: Optional[str] = None,
+                 language_model_only: bool = False,
+                 max_num_seqs: Optional[int] = None,
                  **kwargs):
         """
         Initialize VLLM inference.
@@ -119,6 +121,8 @@ class VLLMInference:
             timeout: Request timeout in seconds
             startup_timeout: Server startup timeout in seconds (default 600).
             enable_tools: Start vLLM with tool-calling flags (requires newer vLLM).
+            language_model_only: Skip vision encoder for multimodal models (vLLM >=0.12).
+            max_num_seqs: Limit concurrent sequences (reduces Mamba state cache).
             **kwargs: Additional args (ignored for server mode)
         """
         global _NEXT_PORT, _VLLM_SERVERS
@@ -133,6 +137,8 @@ class VLLMInference:
         self.startup_timeout = startup_timeout
         self.enable_tools = enable_tools
         self.cuda_visible_devices = cuda_visible_devices
+        self.language_model_only = language_model_only
+        self.max_num_seqs = max_num_seqs
 
         # GPT-OSS uses the Harmony format. vLLM supports it, but tool calling is
         # expected via /v1/responses rather than /v1/chat/completions.
@@ -200,6 +206,12 @@ class VLLMInference:
             ]
             if self.rope_scaling:
                 cmd += ["--rope-scaling", json.dumps(self.rope_scaling, separators=(",", ":"))]
+
+            if self.language_model_only:
+                cmd += ["--language-model-only"]
+
+            if self.max_num_seqs:
+                cmd += ["--max-num-seqs", str(self.max_num_seqs)]
         
             # Tool calling on vLLM's OpenAI server requires extra flags in newer vLLM.
             # We keep this behind a toggle because older vLLM versions will error on

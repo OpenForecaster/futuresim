@@ -323,7 +323,12 @@ class BasicAgent(BaseAgent):
                            actions_remaining, qid=log_qid, submitted_qids=submitted_qids,
                            num_forecasts=len(submitted), dropped_forecasts=dropped_forecasts, reasoning=reasoning)
             if submitted:
-                feedback = f"Submitted forecast for qid={submitted[0]['qid']}. Actions remaining: {actions_remaining}"
+                # feedback = f"Submitted forecast for qid={sub['qid']}. Actions remaining: {actions_remaining}"
+                sub = submitted[0]
+                outcomes_str = ", ".join(f"{k}: {v:.2f}" for k, v in sub['outcomes'].items())
+                title = self._query_handler.get_question_title(sub['qid'])
+                title_str = f" ({title})" if title else ""
+                feedback = f"Submitted forecast for qid={sub['qid']}{title_str}: {outcomes_str}. Actions remaining: {actions_remaining}"
                 if dropped_forecasts > 0:
                     feedback += f"\nIgnored {dropped_forecasts} extra forecast block(s); submit exactly one qid per action."
             else:

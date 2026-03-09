@@ -966,8 +966,12 @@ class GPTOSSBasicAgent(BasicAgent):
             if submitted:
                 # Ensure later same-day df queries reflect newly submitted predictions.
                 self._query_handler.invalidate_cache()
+                sub = submitted[0]
+                outcomes_str = ", ".join(f"{k}: {v:.2f}" for k, v in sub['outcomes'].items())
+                title = self._query_handler.get_question_title(sub['qid'])
+                title_str = f" ({title})" if title else ""
                 feedback = (
-                    f"Submitted forecast for qid={submitted[0]['qid']}. "
+                    f"Submitted forecast for qid={sub['qid']}{title_str}: {outcomes_str}. "
                     f"Actions remaining: {actions_remaining}"
                 )
                 if dropped_forecasts > 0:

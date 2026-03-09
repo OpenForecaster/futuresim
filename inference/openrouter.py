@@ -233,6 +233,7 @@ class OpenRouterInference:
             "presence_penalty": "presence_penalty",
             "stop": "stop",
             "reasoning": {
+                # "enabled": True,
                 "effort": "high",
             },
         }

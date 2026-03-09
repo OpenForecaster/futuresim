@@ -23,6 +23,16 @@ class QueryHandler:
             return {'n_rows': 0, 'n_active': 0, 'n_resolved': 0, 'columns': [], 'columns_desc': ''}
         return self._df_interface.get_info()
     
+    def get_question_title(self, qid: str) -> Optional[str]:
+        """Look up a question's title from the DataFrame."""
+        if not self._df_interface:
+            return None
+        df = self._df_interface.load_df()
+        match = df[df['qid'] == str(qid)]
+        if not match.empty:
+            return match.iloc[0].get('title')
+        return None
+    
     def invalidate_cache(self) -> None:
         if self._df_interface:
             self._df_interface.invalidate_cache()

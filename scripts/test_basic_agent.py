@@ -241,6 +241,8 @@ def create_inference_provider(provider: str, model: str, args):
             rope_scaling=rope_scaling,
             enable_tools=getattr(args, "vllm_enable_tools", False),
             cuda_visible_devices=getattr(args, "agent_cuda_visible_devices", None),
+            language_model_only=getattr(args, "language_model_only", False),
+            max_num_seqs=getattr(args, "vllm_max_num_seqs", None),
         )
     elif provider == "openrouter":
         from inference.openrouter import OpenRouterInference
@@ -497,8 +499,9 @@ def main():
                        help="Inference provider: 'vllm' (local) or 'openrouter' (API)")
     parser.add_argument("--model_path", default=MODEL_PATH,
                        help="Path to model for VLLM inference")
-    parser.add_argument("--openrouter_model", default="xiaomi/mimo-v2-flash:free",
-                       help="Model ID for OpenRouter (e.g., 'xiaomi/mimo-v2-flash:free')")
+    parser.add_argument("--openrouter_model", default=None,
+                       help="Model ID for OpenRouter (e.g., 'xiaomi/mimo-v2-flash:free'). "
+                            "Ignored when agents are configured via YAML.")
     parser.add_argument("--max_model_len", type=int, default=32768,
                        help="Max context length for VLLM (default 32768)")
     parser.add_argument("--agent_max_model_len", type=int, default=None,
@@ -547,6 +550,10 @@ def main():
                        help="vLLM server startup timeout in seconds (default 300)")
     parser.add_argument("--vllm_enable_tools", action="store_true", default=False,
                        help="Start vLLM servers with tool-calling enabled (Responses API recommended for gpt-oss tools)")
+    parser.add_argument("--language_model_only", action="store_true", default=False,
+                       help="Pass --language-model-only to vLLM (skip vision encoder for multimodal checkpoints)")
+    parser.add_argument("--vllm_max_num_seqs", type=int, default=None,
+                       help="Limit max concurrent sequences in vLLM (reduces Mamba/conv state cache)")
 
     # GPU pinning for local multi-GPU runs.
     # If you set aux_cuda_visible_devices=1 and agent_cuda_visible_devices=0, then:
@@ -923,13 +930,16 @@ def main():
                 tensor_parallel_size=getattr(args, "vllm_tensor_parallel_size", 1),
                 startup_timeout=getattr(args, "vllm_startup_timeout", 300.0),
                 rope_scaling=getattr(args, "rope_scaling", None),
+                language_model_only=getattr(args, "language_model_only", False),
+                max_num_seqs=getattr(args, "vllm_max_num_seqs", None),
             )
             model_name = os.path.basename(args.model_path)
             
         elif args.provider == "openrouter":
             from inference.openrouter import OpenRouterInference
-            # Match HTTP connection pool to requested warmup parallelism.
-            # (Even in single-agent mode, AllQ/AllQD uses thread pools for per-question runs.)
+            if not args.openrouter_model:
+                print("Error: --openrouter_model is required in single-agent mode with --provider openrouter")
+                sys.exit(1)
             try:
                 from inference.openrouter import configure_http_pool
                 desired_pool = max(20, int(getattr(args, 'warmup_parallelism', 20)))

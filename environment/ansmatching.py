@@ -4,9 +4,14 @@ Uses LLM for asymmetric semantic matching (predicted -> ground_truth).
 
 Key rule: More specific predictions match less specific ground truth,
 but vaguer predictions do NOT match more specific ground truth.
+
+Supports async batch matching via ``batch_is_equivalent`` / ``warmup_cache``
+to parallelise OpenRouter calls (up to ``max_concurrency`` at a time).
 """
 
-from typing import List, Dict, Optional, Callable
+from typing import List, Dict, Optional, Callable, Tuple
+import asyncio
+import os
 import re
 import time
 
@@ -70,6 +75,107 @@ def parse_find_match_response(response_text: str, existing_outcomes: List[str]) 
     if 0 <= idx < len(existing_outcomes):
         return existing_outcomes[idx]
     return None
+
+
+API_URL = "https://openrouter.ai/api/v1/chat/completions"
+
+
+async def _async_openrouter_chat(
+    client,
+    model: str,
+    messages: List[Dict[str, str]],
+    semaphore: asyncio.Semaphore,
+    temperature: float = 0.0,
+    max_tokens: int = 50,
+    max_retries: int = 3,
+) -> Tuple[str, dict]:
+    """Single async OpenRouter chat completion with retries and concurrency control.
+
+    Uses a shared ``httpx.AsyncClient`` passed in by the caller.
+    """
+    payload = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "usage": {"include": True},
+    }
+
+    for attempt in range(max_retries):
+        try:
+            async with semaphore:
+                resp = await client.post(API_URL, json=payload)
+            if resp.status_code == 429:
+                await asyncio.sleep(5 * (attempt + 1))
+                continue
+            resp.raise_for_status()
+            data = resp.json()
+            if "choices" in data:
+                content = data["choices"][0]["message"]["content"] or ""
+                return content, data.get("usage", {})
+        except Exception:
+            if attempt < max_retries - 1:
+                await asyncio.sleep(2 * (attempt + 1))
+
+    return "", {}
+
+
+async def async_batch_openrouter_chat(
+    api_key: str,
+    model: str,
+    message_batches: List[List[Dict[str, str]]],
+    max_concurrency: int = 300,
+    temperature: float = 0.0,
+    max_tokens: int = 50,
+) -> List[Tuple[str, dict]]:
+    """Fire many OpenRouter chat calls concurrently.
+
+    Uses a single shared httpx.AsyncClient with a connection pool for all requests.
+
+    Args:
+        api_key: OpenRouter API key.
+        model: Model identifier string.
+        message_batches: List of message lists (one per call).
+        max_concurrency: Max concurrent requests (semaphore size).
+        temperature: Sampling temperature.
+        max_tokens: Max output tokens.
+
+    Returns:
+        List of (response_text, usage_dict) in the same order as input.
+    """
+    import httpx
+
+    sem = asyncio.Semaphore(max_concurrency)
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    limits = httpx.Limits(
+        max_connections=max_concurrency,
+        max_keepalive_connections=max_concurrency,
+    )
+    async with httpx.AsyncClient(
+        timeout=120.0, headers=headers, limits=limits
+    ) as client:
+        tasks = [
+            _async_openrouter_chat(client, model, msgs, sem, temperature, max_tokens)
+            for msgs in message_batches
+        ]
+        return list(await asyncio.gather(*tasks))
+
+
+def run_async(coro):
+    """Run an async coroutine from sync code, handling nested event loops."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(asyncio.run, coro).result()
+    return asyncio.run(coro)
 
 
 class AnswerMatcher:
@@ -224,6 +330,126 @@ class AnswerMatcher:
             
         return is_equiv
 
+    # ------------------------------------------------------------------
+    # Async batch matching
+    # ------------------------------------------------------------------
+
+    def batch_is_equivalent(
+        self,
+        items: List[Tuple[str, str, Optional[str], Optional[str]]],
+        max_concurrency: int = 300,
+    ) -> List[bool]:
+        """Fire many is_equivalent calls concurrently via async httpx.
+
+        Each *item* is ``(predicted, ground_truth, question_id, question_title)``.
+        Returns a list of booleans in the same order.
+
+        Calls that are already cached or are exact matches skip the API.
+        """
+        results: List[Optional[bool]] = [None] * len(items)
+        pending_indices: List[int] = []
+        pending_meta: List[Tuple[str, str, str, str, tuple]] = []
+        pending_messages: List[List[Dict[str, str]]] = []
+
+        for i, (predicted, ground_truth, qid, qtitle) in enumerate(items):
+            pred_norm = self._normalize(predicted)
+            truth_norm = self._normalize(ground_truth)
+            if pred_norm == truth_norm:
+                results[i] = True
+                continue
+            cache_key = (pred_norm, truth_norm, str(qid) if qid else "None")
+            if cache_key in self._cache:
+                results[i] = self._cache[cache_key]
+                continue
+            prompt = build_is_equivalent_prompt(predicted, ground_truth, qtitle)
+            pending_indices.append(i)
+            pending_meta.append((predicted, ground_truth, qid, qtitle, cache_key))
+            pending_messages.append([{"role": "user", "content": prompt}])
+
+        if not pending_messages:
+            return [r for r in results]
+
+        started = time.perf_counter()
+        responses = run_async(async_batch_openrouter_chat(
+            api_key=self._resolve_api_key(),
+            model=self._resolve_model(),
+            message_batches=pending_messages,
+            max_concurrency=max_concurrency,
+        ))
+        batch_duration = time.perf_counter() - started
+
+        per_call_duration = batch_duration / max(len(responses), 1)
+        for j, (response_text, usage) in enumerate(responses):
+            idx = pending_indices[j]
+            predicted, ground_truth, qid, qtitle, cache_key = pending_meta[j]
+            is_equiv = parse_is_equivalent_response(response_text)
+            self._cache[cache_key] = is_equiv
+            self._record_timing(per_call_duration, usage.get("cost", 0))
+            results[idx] = is_equiv
+
+            if self.logger:
+                input_data = {
+                    "type": "check_guess",
+                    "predicted": predicted,
+                    "ground_truth": ground_truth,
+                }
+                if qid:
+                    input_data["question_id"] = qid
+                if qtitle:
+                    input_data["question_title"] = qtitle
+                self.logger.log_matcher(
+                    input_data=input_data,
+                    output_data={"response": response_text, "is_equivalent": is_equiv},
+                    metadata={"duration_seconds": round(per_call_duration, 4), "batch": True},
+                )
+
+        if self.cache_path:
+            self.save_cache()
+
+        return [r if r is not None else False for r in results]
+
+    def warmup_cache(
+        self,
+        items: List[Tuple[str, str, Optional[str], Optional[str]]],
+        max_concurrency: int = 300,
+    ) -> None:
+        """Pre-populate cache for a batch of (predicted, gt, qid, qtitle) tuples.
+
+        After this call every subsequent ``is_equivalent`` for these pairs
+        will be a cache hit (no API call).
+        """
+        if not items:
+            return
+        uncached = []
+        for predicted, ground_truth, qid, qtitle in items:
+            pred_norm = self._normalize(predicted)
+            truth_norm = self._normalize(ground_truth)
+            if pred_norm == truth_norm:
+                continue
+            cache_key = (pred_norm, truth_norm, str(qid) if qid else "None")
+            if cache_key not in self._cache:
+                uncached.append((predicted, ground_truth, qid, qtitle))
+        if not uncached:
+            return
+        print(f"  [Matcher] warming cache: {len(uncached)} calls (concurrency={max_concurrency})")
+        started = time.perf_counter()
+        self.batch_is_equivalent(uncached, max_concurrency=max_concurrency)
+        elapsed = time.perf_counter() - started
+        print(f"  [Matcher] cache warm done: {len(uncached)} calls in {elapsed:.1f}s "
+              f"({len(uncached)/max(elapsed,0.01):.1f} calls/s)")
+
+    def _resolve_api_key(self) -> str:
+        """Extract the API key from the inference provider."""
+        if hasattr(self.inference, 'api_key'):
+            return self.inference.api_key
+        return os.environ.get("OPENROUTER_API_KEY", "")
+
+    def _resolve_model(self) -> str:
+        """Extract the model name from the inference provider."""
+        if hasattr(self.inference, 'model'):
+            return self.inference.model
+        return "deepseek/deepseek-v3.2"
+
     def find_match(self, candidate: str, existing_outcomes: List[str],
                    question_id: str = None, question_title: str = None) -> Optional[str]:
         """
@@ -268,7 +494,7 @@ class AnswerMatcher:
         started = time.perf_counter()
         duration = 0.0
         try:
-            response_text, usage = self.inference.chat(messages, {"temperature": 0.0, "max_tokens": 10})
+            response_text, usage = self.inference.chat(messages, {"temperature": 0.0, "max_tokens": 50})
         finally:
             duration = time.perf_counter() - started
             self._record_timing(duration, usage.get("cost", 0))

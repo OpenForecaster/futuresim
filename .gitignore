@@ -26,6 +26,7 @@ wheels/
 
 # Virtual environments
 .venv/
+.skyrl-venv/
 venv/
 ENV/
 env/
@@ -59,3 +60,8 @@ Thumbs.db
 
 # API Keys
 configs/openrouter_api_key.py
+
+# Plotting
+plots/
+
+numactl-2.0.16/

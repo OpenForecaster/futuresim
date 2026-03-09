@@ -565,7 +565,10 @@ class SimulationEnvironment:
                 if self.q_pool.get_question(qid)
             ]
             self._update_aggregates(active_questions)
-            
+
+            if self.matcher and active_questions:
+                self._warmup_matcher_cache(active_questions)
+
             # Save daily metrics
             self._save_daily_metrics()
             
@@ -579,6 +582,10 @@ class SimulationEnvironment:
 
         # 1. Resolve questions expiring today
         resolving = self.q_pool.pop_resolving(self.current_date)
+
+        if resolving and self.matcher:
+            self._warmup_matcher_cache(resolving)
+
         for q in resolving:
             self._resolve_question(q)
             self.resolved_questions.append(q)  # Track for agent learning
@@ -612,7 +619,11 @@ class SimulationEnvironment:
         # 5. Update aggregates (end of day)
         self._update_aggregates(active_questions)
         
-        # 6. Save daily metrics
+        # 6. Pre-populate matcher cache for active-question scoring
+        if self.matcher and active_questions:
+            self._warmup_matcher_cache(active_questions)
+
+        # 7. Save daily metrics
         self._save_daily_metrics()
         matcher_after = self._get_env_matcher_timing_snapshot()
         day_matcher = self._compute_env_matcher_delta(matcher_before, matcher_after)
@@ -808,6 +819,36 @@ class SimulationEnvironment:
                     active_stats[aid]['count'] += 1
                     
         return active_stats
+
+    def _warmup_matcher_cache(self, questions) -> None:
+        """Pre-populate matcher cache for a list of questions in parallel.
+
+        Collects every (outcome, ground_truth) pair that will be checked during
+        resolution / scoring and fires them concurrently via ``matcher.warmup_cache``.
+        Subsequent individual ``is_equivalent`` calls become instant cache hits.
+        """
+        if not hasattr(self.matcher, 'warmup_cache'):
+            return
+
+        items = []
+        for q in questions:
+            gt = q.ground_truth_answer
+            if not gt:
+                continue
+            history = self.prediction_histories.get(q.qid)
+            if not history or not history.predictions:
+                continue
+            seen_outcomes = set()
+            for pred_list in history.predictions.values():
+                for pred in pred_list:
+                    if pred and pred.outcomes:
+                        for outcome in pred.outcomes:
+                            if outcome not in seen_outcomes:
+                                seen_outcomes.add(outcome)
+                                items.append((outcome, gt, q.qid, q.title))
+
+        if items:
+            self.matcher.warmup_cache(items, max_concurrency=300)
 
     def _get_env_matcher_timing_snapshot(self) -> Dict[str, float]:
         """Get cumulative matcher timing counters from the environment scorer."""
