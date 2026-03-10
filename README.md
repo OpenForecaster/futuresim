@@ -80,6 +80,7 @@ python mpi_scripts/run_sim/submit_sim.py --config configs/metaculus_sim.yaml --r
 - **[agents/search_tools/README.md](agents/search_tools/README.md)** — Search infrastructure setup
 - **[data/news/README.md](data/news/README.md)** — News pipeline (download, embed, index)
 - **[mpi_scripts/run_sim/README.md](mpi_scripts/run_sim/README.md)** — Cluster job submission
+- **[third_party/SKYRL_MAINTENANCE.md](third_party/SKYRL_MAINTENANCE.md)** — Fork/upstream SkyRL submodule maintenance workflow
 
 ## Output
 
