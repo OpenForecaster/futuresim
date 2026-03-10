@@ -33,7 +33,7 @@ import argparse
 import os
 import sys
 import json
-from datetime import datetime
+from datetime import datetime, date
 
 # Add project root to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -102,7 +102,12 @@ def prepare_restart_directory(source_dir: str, restart_day: str, output_dir: str
     from datetime import date
     import shutil
     
-    restart_date = datetime.strptime(restart_day, "%Y-%m-%d").date()
+    if isinstance(restart_day, datetime):
+        restart_date = restart_day.date()
+    elif isinstance(restart_day, date):
+        restart_date = restart_day
+    else:
+        restart_date = datetime.strptime(str(restart_day), "%Y-%m-%d").date()
     
     # 1. Copy actions.jsonl entries before restart_day
     src_actions = os.path.join(source_dir, "actions.jsonl")
@@ -236,6 +241,7 @@ def create_inference_provider(provider: str, model: str, args):
             model,
             max_model_len=agent_max_model_len,
             gpu_memory_utilization=getattr(args, "vllm_gpu_mem", 0.3),
+            max_num_seqs=getattr(args, "vllm_max_num_seqs", 8),
             tensor_parallel_size=getattr(args, "vllm_tensor_parallel_size", 1),
             startup_timeout=getattr(args, "vllm_startup_timeout", 300.0),
             rope_scaling=rope_scaling,
@@ -541,6 +547,8 @@ def main():
     # vLLM runtime settings (when provider == vllm in config)
     parser.add_argument("--vllm_gpu_mem", type=float, default=0.3,
                        help="GPU memory fraction for vLLM agent models (0.0-1.0, default 0.3)")
+    parser.add_argument("--vllm_max_num_seqs", type=int, default=8,
+                       help="vLLM max concurrent sequences (default 8)")
     parser.add_argument("--vllm_tensor_parallel_size", type=int, default=1,
                        help="Tensor parallel size for vLLM agent models (default 1)")
     parser.add_argument("--vllm_startup_timeout", type=float, default=300.0,
@@ -623,6 +631,19 @@ def main():
         args = parser.parse_args(args=remaining_argv + sys.argv[1:])
     else:
         args = parser.parse_args()
+
+    # YAML parsing can materialize date-like values as datetime/date objects when
+    # overrides are passed via submit_sim.py --set. Normalize back to ISO strings.
+    def _normalize_date_like(v):
+        if isinstance(v, datetime):
+            return v.date().isoformat()
+        if isinstance(v, date):
+            return v.isoformat()
+        return v
+
+    for key in ("start_date", "end_date", "resolution_start", "resolution_end", "restart_from_day"):
+        if hasattr(args, key):
+            setattr(args, key, _normalize_date_like(getattr(args, key)))
 
     def _config_uses_vllm(cfg: dict | None, parsed_args: argparse.Namespace) -> bool:
         # Legacy single-agent mode.
@@ -818,6 +839,7 @@ def main():
             matcher_max_model_len = args.max_model_len
         matcher_provider = VLLMInference(args.matcher, max_model_len=matcher_max_model_len, 
                                           gpu_memory_utilization=args.matcher_gpu_mem,
+                                          max_num_seqs=getattr(args, "vllm_max_num_seqs", 8),
                                           startup_timeout=getattr(args, "vllm_startup_timeout", 300.0),
                                           rope_scaling=matcher_rope_scaling,
                                           cuda_visible_devices=getattr(args, "aux_cuda_visible_devices", None))
@@ -857,6 +879,7 @@ def main():
                     args.embedding_model,
                     max_model_len=embedding_max_model_len,
                     gpu_memory_utilization=args.embedding_gpu_mem,
+                    max_num_seqs=getattr(args, "vllm_max_num_seqs", 8),
                     startup_timeout=getattr(args, "vllm_startup_timeout", 300.0),
                     rope_scaling=embedding_rope_scaling,
                     cuda_visible_devices=getattr(args, "aux_cuda_visible_devices", None),
@@ -920,6 +943,7 @@ def main():
             inference_provider = VLLMInference(
                 args.model_path,
                 max_model_len=agent_max_model_len,
+                max_num_seqs=getattr(args, "vllm_max_num_seqs", 8),
                 tensor_parallel_size=getattr(args, "vllm_tensor_parallel_size", 1),
                 startup_timeout=getattr(args, "vllm_startup_timeout", 300.0),
                 rope_scaling=getattr(args, "rope_scaling", None),

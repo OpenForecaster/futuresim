@@ -16,29 +16,87 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Compare memory vs no-memory runs (multi-run avg + stddev).")
     parser.add_argument("--mem_parent", type=str, required=True, help="Parent directory containing memory run subdirectories")
     parser.add_argument("--nomem_parent", type=str, required=True, help="Parent directory containing no-memory run subdirectories")
+    parser.add_argument("--mem_child_glob", type=str, default="*",
+                        help="Glob (under --mem_parent) selecting memory run dirs (e.g., '*_med_r0[0-2]_restart').")
+    parser.add_argument("--nomem_child_glob", type=str, default="*",
+                        help="Glob (under --nomem_parent) selecting no-memory run dirs.")
     parser.add_argument("--output_dir", type=str, required=True, help="Directory to save plots")
     parser.add_argument("--mem_label", type=str, default="With Memory", help="Label for memory runs")
     parser.add_argument("--nomem_label", type=str, default="Without Memory", help="Label for no-memory runs")
+    parser.add_argument("--expected_runs", type=int, default=None,
+                        help="Optional expected number of runs per side (e.g., 3 for r00/r01/r02).")
     return parser.parse_args()
 
 
-def load_all_runs(parent_dir):
-    """Load daily_metrics.csv from all subdirectories under parent_dir."""
+def _latest_csv_in_dir(run_dir):
+    """Return the most recent daily_metrics.csv in run_dir or None."""
+    direct_csv = os.path.join(run_dir, "daily_metrics.csv")
+    if os.path.isfile(direct_csv):
+        return direct_csv
+
+    # Typical layout:
+    # <run_dir>/<timestamp>/daily_metrics.csv
+    ts_csvs = glob.glob(os.path.join(run_dir, "*", "daily_metrics.csv"))
+    if not ts_csvs:
+        return None
+    ts_csvs.sort(key=lambda p: os.path.getmtime(p))
+    return ts_csvs[-1]
+
+
+def _discover_run_csvs(parent_dir, child_glob="*"):
+    """
+    Discover one daily_metrics.csv per run under parent_dir.
+
+    If parent_dir itself is a run directory, use it directly.
+    Otherwise, for each immediate child (e.g., r00/r01/r02), select the latest
+    timestamped daily_metrics.csv.
+    """
+    parent_dir = os.path.abspath(parent_dir)
+    if not os.path.isdir(parent_dir):
+        print(f"Error: {parent_dir} is not a directory.")
+        sys.exit(1)
+
+    discovered = []
+    children = sorted([p for p in glob.glob(os.path.join(parent_dir, child_glob)) if os.path.isdir(p)])
+
+    # Parent may itself be a run dir.
+    parent_csv = _latest_csv_in_dir(parent_dir)
+    if parent_csv is not None and not children:
+        return [(os.path.basename(parent_dir), parent_csv)]
+
+    for child in children:
+        csv_path = _latest_csv_in_dir(child)
+        if csv_path is None:
+            continue
+        discovered.append((os.path.basename(child), csv_path))
+
+    # Fallback: if no child run dirs found but parent has direct/timestamped csv.
+    if not discovered and parent_csv is not None:
+        discovered.append((os.path.basename(parent_dir), parent_csv))
+
+    return discovered
+
+
+def load_all_runs(parent_dir, expected_runs=None, child_glob="*"):
+    """Load per-run daily_metrics.csv discovered under parent_dir."""
     dfs = []
-    subdirs = sorted(glob.glob(os.path.join(parent_dir, "*")))
-    for subdir in subdirs:
-        csv_path = os.path.join(subdir, "daily_metrics.csv")
-        if os.path.isfile(csv_path):
-            df = pd.read_csv(csv_path)
-            df['date'] = pd.to_datetime(df['date'])
-            df['run'] = os.path.basename(subdir)
-            dfs.append(df)
+    discovered = _discover_run_csvs(parent_dir, child_glob=child_glob)
+    for run_name, csv_path in discovered:
+        df = pd.read_csv(csv_path)
+        df['date'] = pd.to_datetime(df['date'])
+        df['run'] = run_name
+        dfs.append(df)
+
     if not dfs:
         print(f"Error: No daily_metrics.csv found under {parent_dir}")
         sys.exit(1)
+
     print(f"  Loaded {len(dfs)} runs from {parent_dir}")
     for df in dfs:
         print(f"    {df['run'].iloc[0]}: {len(df)} days ({df['date'].min().date()} to {df['date'].max().date()})")
+    if expected_runs is not None and len(dfs) != expected_runs:
+        print(f"  Warning: expected {expected_runs} runs, found {len(dfs)} in {parent_dir}")
+
     return dfs
 
 
@@ -47,7 +105,8 @@ def aggregate_runs(dfs, metrics_cols):
     combined = pd.concat(dfs, ignore_index=True)
     grouped = combined.groupby('date')[metrics_cols]
     mean_df = grouped.mean().reset_index()
-    std_df = grouped.std().reset_index()
+    # Use sample std; fill NaN (single run on a date) with 0.
+    std_df = grouped.std().fillna(0.0).reset_index()
     count_df = grouped.size().reset_index(name='n_runs')
     mean_df = mean_df.sort_values('date')
     std_df = std_df.sort_values('date')
@@ -60,9 +119,17 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     print("Loading memory runs...")
-    mem_dfs = load_all_runs(args.mem_parent)
+    mem_dfs = load_all_runs(
+        args.mem_parent,
+        expected_runs=args.expected_runs,
+        child_glob=args.mem_child_glob,
+    )
     print("Loading no-memory runs...")
-    nomem_dfs = load_all_runs(args.nomem_parent)
+    nomem_dfs = load_all_runs(
+        args.nomem_parent,
+        expected_runs=args.expected_runs,
+        child_glob=args.nomem_child_glob,
+    )
 
     metrics = [
         ('avg_brier', 'Average Brier Skill Score', 'higher is better'),
@@ -146,7 +213,38 @@ def main():
     output_path = os.path.join(args.output_dir, 'mem_vs_nomem_multi_comparison.png')
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     plt.close()
-    print(f"\nComparison plot saved to {output_path}")
+    print(f"\nMean+std comparison plot saved to {output_path}")
+
+    # Also save std-only comparison figure.
+    fig_std, axes_std = plt.subplots(len(metrics), 1, figsize=(14, 4 * len(metrics)), sharex=True)
+    if len(metrics) == 1:
+        axes_std = [axes_std]
+
+    for ax, (col, title, _) in zip(axes_std, metrics):
+        ax.plot(mem_std['date'], mem_std[col],
+                label=f"{args.mem_label} std", color=colors['mem'], linewidth=1.8, alpha=0.95)
+        ax.plot(nomem_std['date'], nomem_std[col],
+                label=f"{args.nomem_label} std", color=colors['nomem'], linewidth=1.8, alpha=0.95)
+        ax.set_title(f"{title} Std Dev", fontsize=12, fontweight='bold', loc='left')
+        ax.set_ylabel(f"std({col})", fontsize=10)
+        ax.grid(True, linestyle='--', alpha=0.4)
+        ax.legend(loc='upper right', fontsize=9)
+
+        # Final std annotations.
+        for std_df, color in [(mem_std, colors['mem']), (nomem_std, colors['nomem'])]:
+            last = std_df.iloc[-1]
+            ax.annotate(f"{last[col]:.4f}", xy=(last['date'], last[col]),
+                        fontsize=8, color=color, fontweight='bold',
+                        xytext=(5, 0), textcoords='offset points', va='center')
+
+    axes_std[-1].xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+    plt.setp(axes_std[-1].get_xticklabels(), rotation=45, ha='right')
+    axes_std[-1].set_xlabel('Date', fontsize=11)
+    plt.tight_layout()
+    std_output_path = os.path.join(args.output_dir, 'mem_vs_nomem_std_comparison.png')
+    plt.savefig(std_output_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"Std-only comparison plot saved to {std_output_path}")
 
 
 if __name__ == "__main__":

@@ -20,11 +20,11 @@ split: "test"
 resources:
   gpus: 3
   cpus: 24
-  memory_gb: 160
+  memory_gb: 120
   disk_gb: 80
   bid: 35
-  # H100 only; keep i103 excluded.
-  requirements: "TARGET.CUDACapability >= 9.0 && TARGET.CUDAGlobalMemoryMb > 90000 && TARGET.Machine =!= \"i103.internal.cluster.is.localnet\""
+  # H100 only (excludes B200), include 80GB+ cards, keep i103 excluded.
+  requirements: "TARGET.CUDACapability == 9.0 && TARGET.CUDAGlobalMemoryMb >= 80000 && TARGET.Machine =!= \"i103.internal.cluster.is.localnet\""
 
 # --- Data Paths ---
 dataset: "openforesight"
@@ -50,6 +50,7 @@ max_model_len: 32768
 
 # --- vLLM Agent Runtime ---
 vllm_gpu_mem: 0.9
+vllm_max_num_seqs: 8
 vllm_tensor_parallel_size: 2
 # 120B checkpoints can take >5m to load; avoid false startup timeouts.
 vllm_startup_timeout: 1800

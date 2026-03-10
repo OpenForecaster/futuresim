@@ -52,6 +52,7 @@ max_model_len: 32768
 # --- vLLM Agent Runtime ---
 # This is for agent models (provider: vllm). Keep high for 20B.
 vllm_gpu_mem: 0.92
+vllm_max_num_seqs: 8
 # Enable for GPT-OSS Harmony tool-calling agent path.
 vllm_enable_tools: true
 

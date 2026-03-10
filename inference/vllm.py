@@ -100,6 +100,7 @@ class VLLMInference:
     def __init__(self, model_path: str, model_name: str = None, 
                  max_model_len: int = 8192,
                  gpu_memory_utilization: float = 0.3,
+                 max_num_seqs: int = 8,
                  tensor_parallel_size: int = 1,
                  rope_scaling: Optional[Dict[str, Any]] = None,
                  timeout: float = 120.0,
@@ -115,6 +116,7 @@ class VLLMInference:
             model_name: Optional display name
             max_model_len: Maximum context length (default 8192 for matcher)
             gpu_memory_utilization: GPU memory fraction (default 0.3)
+            max_num_seqs: vLLM scheduler max concurrent sequences (default 8)
             rope_scaling: Optional RoPE scaling config for long-context extension.
             timeout: Request timeout in seconds
             startup_timeout: Server startup timeout in seconds (default 600).
@@ -127,6 +129,7 @@ class VLLMInference:
         self.model_name = model_name or os.path.basename(model_path)
         self.max_model_len = max_model_len
         self.gpu_mem = gpu_memory_utilization
+        self.max_num_seqs = max(1, int(max_num_seqs))
         self.tensor_parallel_size = max(1, int(tensor_parallel_size))
         self.rope_scaling = rope_scaling if isinstance(rope_scaling, dict) else None
         self.timeout = timeout
@@ -152,6 +155,7 @@ class VLLMInference:
                 if (
                     info.get('model_path') == model_path
                     and info.get('cuda_visible_devices') == self.cuda_visible_devices
+                    and int(info.get('max_num_seqs', 8)) == self.max_num_seqs
                     and int(info.get('tensor_parallel_size', 1)) == self.tensor_parallel_size
                 ):
                     self._port = int(port)
@@ -192,6 +196,7 @@ class VLLMInference:
                 "--model", self.model_path,
                 "--port", str(self._port),
                 "--gpu-memory-utilization", str(self.gpu_mem),
+                "--max-num-seqs", str(self.max_num_seqs),
                 "--max-model-len", str(self.max_model_len),
                 "--tensor-parallel-size", str(self.tensor_parallel_size),
                 "--disable-log-stats",
@@ -232,6 +237,7 @@ class VLLMInference:
                     'process': proc,
                     'model_path': self.model_path,
                     'cuda_visible_devices': self.cuda_visible_devices,
+                    'max_num_seqs': self.max_num_seqs,
                     'tensor_parallel_size': self.tensor_parallel_size,
                 }
         
@@ -273,6 +279,7 @@ class VLLMInference:
                             'process': proc,
                             'model_path': self.model_path,
                             'cuda_visible_devices': self.cuda_visible_devices,
+                            'max_num_seqs': self.max_num_seqs,
                             'tensor_parallel_size': self.tensor_parallel_size,
                         }
                     time.sleep(0.5)
