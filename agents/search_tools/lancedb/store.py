@@ -16,6 +16,7 @@ class LanceDBSearchTool(BaseSearchTool):
     """LanceDB-based search with hybrid search and date filtering."""
     
     TABLE_NAME = "articles"
+    _hybrid_warned = True
     
     def __init__(self, db_path: str, embedding_model=None, model_path: str = None):
         """
@@ -218,8 +219,9 @@ class LanceDBSearchTool(BaseSearchTool):
                                             continue
                                         break
                                 # All retries exhausted or non-FTS error — fall through to semantic
-                            # Hybrid failed — keep retrieval alive via semantic-only search.
-                            print(f"[LanceDB] Hybrid search unavailable, falling back to semantic: {e}")
+                            if not LanceDBSearchTool._hybrid_warned:
+                                print(f"[LanceDB] Hybrid search unavailable, falling back to semantic: {e}")
+                                LanceDBSearchTool._hybrid_warned = True
                             results = self._table.search(query_embedding)
                             rows = _execute(results)
             return self._to_results(rows)

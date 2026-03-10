@@ -8,12 +8,13 @@ from datetime import date, timedelta
 from typing import List, Dict, Any, Optional, Tuple
 
 from agents.base import BaseAgent
-from agents.utils.forecast_parser import parse_action, extract_memory
+from agents.utils.forecast_parser import parse_action, extract_memory, extract_memory_ops
 from agents.utils.timing import AgentTimer
 from environment.interfaces import PredictionSubmission
 
 from .config import AgentConfig
 from .memory import BasicMemory
+from agents.utils.memory import StructuredMemory
 from .query import QueryHandler
 from .search import SearchHandler
 from .feedback import FeedbackHandler
@@ -49,7 +50,13 @@ class BasicAgent(BaseAgent):
         self._timer = AgentTimer()
         
         # Handlers
-        self._memory = BasicMemory(agent_id, self.config.memory_dir) if self.config.enable_memory else None
+        if self.config.enable_memory:
+            if self.config.memory_format == "structured":
+                self._memory = StructuredMemory(agent_id, self.config.memory_dir)
+            else:
+                self._memory = BasicMemory(agent_id, self.config.memory_dir)
+        else:
+            self._memory = None
         self._query_handler = QueryHandler()
         self._search_handler = SearchHandler(
             search_tool,
@@ -316,7 +323,12 @@ class BasicAgent(BaseAgent):
                            actions_remaining, qid=log_qid, submitted_qids=submitted_qids,
                            num_forecasts=len(submitted), dropped_forecasts=dropped_forecasts, reasoning=reasoning)
             if submitted:
-                feedback = f"Submitted forecast for qid={submitted[0]['qid']}. Actions remaining: {actions_remaining}"
+                # feedback = f"Submitted forecast for qid={sub['qid']}. Actions remaining: {actions_remaining}"
+                sub = submitted[0]
+                outcomes_str = ", ".join(f"{k}: {v:.2f}" for k, v in sub['outcomes'].items())
+                title = self._query_handler.get_question_title(sub['qid'])
+                title_str = f" ({title})" if title else ""
+                feedback = f"Submitted forecast for qid={sub['qid']}{title_str}: {outcomes_str}. Actions remaining: {actions_remaining}"
                 if dropped_forecasts > 0:
                     feedback += f"\nIgnored {dropped_forecasts} extra forecast block(s); submit exactly one qid per action."
             else:
@@ -524,7 +536,17 @@ Example (if options are ["Candidate A", "Candidate B", "Candidate C"]):
         if self._memory is not None:
             memory_content = self._memory.get()
             if memory_content:
-                memory_section = f"""## YOUR MEMORY (reasoning, patterns, and insights from previous days)
+                if isinstance(self._memory, StructuredMemory):
+                    memory_section = f"""## YOUR MEMORY ({self._memory.entry_count} entries)
+<memory>
+{memory_content}
+</memory>
+
+Use these stored insights to inform today's forecasts. Entry IDs in brackets (e.g. [a1b2c3d4]) can be used to delete stale entries at end of day. The DataFrame includes your latest predictions for active questions and your final prediction snapshot on resolved questions.
+
+"""
+                else:
+                    memory_section = f"""## YOUR MEMORY (reasoning, patterns, and insights from previous days)
 <memory>
 {memory_content}
 </memory>
@@ -532,8 +554,6 @@ Example (if options are ["Candidate A", "Candidate B", "Candidate C"]):
 Use the reasoning and insights above to inform today's forecasts. The DataFrame includes your latest predictions for active questions and your final prediction snapshot on resolved questions.
 
 """
-            else:
-                memory_section = ""
             memory_flow_note = "Note: After ending your day, you will be prompted to update your memory."
         else:
             memory_flow_note = ""
@@ -656,15 +676,79 @@ When ready to move on, use <action type="next"/> to end your day.
 
 You have {self.config.max_actions} actions available. Begin."""
     
-    def _prompt_memory_update(self, messages: List[Dict[str, str]],  
+    def _prompt_memory_update(self, messages: List[Dict[str, str]],
                                forecast_interface, current_date: date) -> None:
         """
         Ask the agent to update its memory at the end of the day.
-        
-        Memory is the only context retained between days, allowing the agent to
-        track insights, patterns, and strategies across simulation days.
+
+        For StructuredMemory: uses add/delete operations on individual entries.
+        For BasicMemory (legacy): uses full replacement via <memory> tags.
         """
-        memory_prompt = f"""End of day {current_date}. You can now update your memory.
+        if isinstance(self._memory, StructuredMemory):
+            memory_prompt = self._build_structured_memory_prompt(current_date)
+        else:
+            memory_prompt = self._build_plain_memory_prompt(current_date)
+
+        messages.append({"role": "user", "content": memory_prompt})
+        response, usage = self.inference.chat(messages, self.config.sampling_params)
+        self._timer.record_tokens(usage)
+        self._timer.record_cost(usage.get("cost", 0), "llm")
+        messages.append({"role": "assistant", "content": response})
+
+        reasoning = usage.get("_reasoning_content") if usage else None
+
+        forecast_interface.log_model_output(
+            memory_prompt, response,
+            {"phase": "memory_update", "current_memory_len": len(self._memory), "reasoning": reasoning}
+        )
+
+        if isinstance(self._memory, StructuredMemory):
+            self._apply_structured_memory_ops(response)
+        else:
+            new_memory = extract_memory(response)
+            if new_memory is not None:
+                self._memory.update(new_memory)
+
+    def _build_structured_memory_prompt(self, current_date: date) -> str:
+        """Build the structured memory update prompt (add/delete entries)."""
+        return f"""End of day {current_date}. You can now update your memory.
+
+## MEMORY UPDATE
+Your memory entries are the ONLY context retained between days. Everything else resets. Tomorrow you get: search over news articles and the DataFrame (active question predictions, resolved question ground truths, your final predictions on resolved questions).
+
+You currently have {self._memory.entry_count} memory entries ({len(self._memory)} chars). Max 30 entries.
+
+### What to store (add new entries for):
+1. **reasoning** — Why you made specific predictions, especially when based on hard-to-find evidence. Example: "Q149: PSG 0.70 because Sky Bet implied 55% and Inter eliminated in semis."
+2. **calibration** — Performance patterns across resolved questions. Example: "Bookmaker odds correct 80% across 15 sports Qs; weight them more."
+3. **insight** — Non-obvious patterns that search alone would not surface. Example: "'First country to X' Qs almost always resolve to a major economy."
+4. **fact** — Critical hard-to-find facts relevant to active questions. Example: "ECB next meeting June 5 — relevant to Q72, Q108."
+
+### What NOT to store:
+General forecasting advice (already in instructions), easily searchable facts, prediction outcomes without reasoning.
+
+### How to update:
+Add entries (you may add multiple):
+<memory_add>
+name: Short descriptive title (max 150 chars, include question IDs if relevant)
+type: reasoning|calibration|insight|fact
+qids: Q72, Q108 (comma-separated, or leave empty)
+content: Your content here (max 800 chars). Include specific numbers, sources, and reasoning.
+</memory_add>
+
+Delete stale entries by ID (you may delete multiple):
+<memory_delete>ENTRY_ID_HERE</memory_delete>
+
+First reflect on today's session, then add/delete entries as needed:
+<reasoning>
+Reflect on today's forecasting session...
+</reasoning>
+
+If no updates needed, just output <reasoning>...</reasoning> without any memory tags."""
+
+    def _build_plain_memory_prompt(self, current_date: date) -> str:
+        """Build the legacy plain-text memory update prompt (full replacement)."""
+        return f"""End of day {current_date}. You can now update your memory.
 
 ## MEMORY UPDATE
 Your memory is the ONLY thing that carries over to tomorrow. Everything else resets. Tomorrow you get: search over news articles and access to the DataFrame (active question predictions, resolved question ground truths, and your final predictions on resolved questions).
@@ -688,20 +772,19 @@ Your updated memory content here (complete replacement, not a diff)
 
 If you don't want to update memory, just output <reasoning>...</reasoning> without <memory> tags.
 Current memory length: {len(self._memory)} characters"""
-        
-        messages.append({"role": "user", "content": memory_prompt})
-        response, usage = self.inference.chat(messages, self.config.sampling_params)
-        self._timer.record_tokens(usage)
-        self._timer.record_cost(usage.get("cost", 0), "llm")
-        messages.append({"role": "assistant", "content": response})
-        
-        reasoning = usage.get("_reasoning_content") if usage else None
 
-        forecast_interface.log_model_output(
-            memory_prompt, response, 
-            {"phase": "memory_update", "current_memory_len": len(self._memory), "reasoning": reasoning}
-        )
-        
-        new_memory = extract_memory(response)
-        if new_memory is not None:
-            self._memory.update(new_memory)
+    def _apply_structured_memory_ops(self, response: str) -> None:
+        """Apply structured memory operations from agent response, with fallback."""
+        adds, deletes = extract_memory_ops(response)
+        if adds or deletes:
+            for entry_id in deletes:
+                self._memory.delete_entry(entry_id)
+            for add in adds:
+                self._memory.add_entry(
+                    add["name"], add["type"], add.get("qids", ""), add["content"]
+                )
+        else:
+            # Fallback: try old-style <memory> full replacement
+            old_memory = extract_memory(response)
+            if old_memory is not None:
+                self._memory.update(old_memory)

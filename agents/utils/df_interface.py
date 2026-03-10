@@ -7,6 +7,7 @@ This is an agent-side utility - the environment doesn't need to know how agents 
 
 import json
 import pandas as pd
+from pandas.errors import EmptyDataError
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple
@@ -59,8 +60,23 @@ class DfInterface:
         if self._df is not None:
             return self._df
         
-        # Load base CSV
-        df = pd.read_csv(self.csv_path, dtype={'qid': str})
+        # Load base CSV. Some simulation days can legitimately have no active
+        # questions, producing an empty market.csv file.
+        try:
+            df = pd.read_csv(self.csv_path, dtype={'qid': str})
+        except EmptyDataError:
+            df = pd.DataFrame(columns=[
+                "qid",
+                "title",
+                "answer_type",
+                "is_resolved",
+                "close_time",
+                "resolution_date",
+                "resolution",
+                "market_aggregate",
+                "options",
+                "num_predictions",
+            ])
         
         # Parse JSON columns
         if 'market_aggregate' in df.columns:

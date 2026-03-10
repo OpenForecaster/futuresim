@@ -1,7 +1,8 @@
 from .base import DataFetcher, CachedQuestion
-from datasets import load_dataset
+from datasets import load_dataset, Dataset
 from datetime import datetime, date
 import os
+import glob
 
 class OpenForesightFetcher(DataFetcher):
     """Fetcher for the standard OpenForesight dataset (HuggingFace/disk)."""
@@ -25,7 +26,32 @@ class OpenForesightFetcher(DataFetcher):
         path = self.dataset_path or "openforesight" 
         print(f"Loading OpenForesight data from: {path} (split={self.split})")
         
-        ds = load_dataset(path, split=self.split)
+        # If loading from local directory with parquet files, read them directly
+        if os.path.isdir(path):
+            import pandas as pd
+            
+            # Find parquet files for the requested split
+            parquet_files = sorted(glob.glob(os.path.join(path, f'{self.split}-*.parquet')))
+            
+            if not parquet_files:
+                raise ValueError(f"No parquet files found for split '{self.split}' in {path}")
+            
+            # Read all parquet files and concatenate
+            dfs = []
+            for pq_file in parquet_files:
+                df = pd.read_parquet(pq_file)
+                dfs.append(df)
+            
+            combined_df = pd.concat(dfs, ignore_index=True)
+            
+            # Convert to HuggingFace Dataset format for compatibility
+            ds = Dataset.from_pandas(combined_df)
+        else:
+            # Load from HuggingFace hub
+            kwargs = {}
+            if cache_dir:
+                kwargs["cache_dir"] = cache_dir
+            ds = load_dataset(path, split=self.split, **kwargs)
         
         questions = []
         for item in ds:

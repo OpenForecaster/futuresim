@@ -130,7 +130,7 @@ def submit_sim_job(
         run_dir = Path(resume_path)
     else:
         # Logs go to /fast/sgoel/logs/forecasting-sim/sims/<base_name>/<unique_name>
-        log_base = Path("/fast/sgoel/logs/forecasting-sim/sims")
+        log_base = Path("/fast/nchandak/logs/forecasting-sim/sims")
         run_dir = log_base / base_sim_name / unique_name
         run_dir.mkdir(parents=True, exist_ok=True)
     
@@ -151,7 +151,8 @@ def submit_sim_job(
         print(f"Generated run config: {config_path}")
 
     # 4. Prepare submission
-    executable = str(script_dir / "run_sim.sh")
+    run_script = config.get("run_script", "run_sim.sh")
+    executable = str(script_dir / run_script)
     log_prefix = str(run_dir / "job")
     
     job_settings = {
@@ -293,9 +294,9 @@ def main():
     
     print(f"\nAll jobs submitted! Cluster IDs: {cluster_ids}")
     
-    # Determine where logs went for helpful message
     sim_name = base_config.get("sim_name", "sim_run")
-    print(f"Logs: /fast/sgoel/logs/forecasting-sim/sims/{sim_name}/")
+    log_base = Path("/fast/nchandak/logs/forecasting-sim/sims")
+    print(f"Logs: {log_base / sim_name}/")
 
 
 if __name__ == "__main__":
