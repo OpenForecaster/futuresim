@@ -10,7 +10,7 @@ restart_from: "/fast/sgoel/forecasting/current_sim/allq_warmup_only_r00/gemini-3
 restart_from_day: "2025-04-25"
 
 # --- Simulation Meta ---
-sim_name: "allq_mem_gemini_3_flash_testset-40actions"
+sim_name: "allq_nomem_gemini_3_flash_testset-40actions"
 start_date: "2025-05-01"
 # end_date: "2025-12-14"
 end_date: "2025-08-23"
@@ -45,12 +45,14 @@ parallel: true
 defaults:
   provider: "openrouter"
   scaffold: "allQ"
-  enable_memory: true
+  enable_memory: false
   max_actions: 40
   warmup_max_actions: 10
   temperature: 0.7
-  max_tokens: 8192
+  max_tokens: 32768
   max_retries: 3
+  reasoning: 
+    effort: "high"
 
 agents:
   - model: "google/gemini-3-flash-preview"

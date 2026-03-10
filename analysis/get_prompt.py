@@ -160,6 +160,7 @@ def _build_expected_agent_specs(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
         max_retries = int(a.get("max_retries", defaults.get("max_retries", cfg.get("max_retries", 3))))
         temperature = float(a.get("temperature", defaults.get("temperature", cfg.get("temperature", 0.7))))
         max_tokens = int(a.get("max_tokens", defaults.get("max_tokens", cfg.get("max_tokens", 2048))))
+        reasoning = a.get("reasoning", defaults.get("reasoning", cfg.get("reasoning", None)))
         search_cutoff_days = int(
             a.get("search_cutoff_days", defaults.get("search_cutoff_days", cfg.get("search_cutoff_days", 0)))
         )
@@ -213,7 +214,11 @@ def _build_expected_agent_specs(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
                 memory_dir="",  # patched later
                 enable_memory=enable_memory,
                 singleans=singleans,
-                sampling_params={"temperature": temperature, "max_tokens": max_tokens},
+                sampling_params={
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                    **({"reasoning": reasoning} if reasoning is not None else {}),
+                },
                 search_cutoff_days=search_cutoff_days,
                 single_agent_mode=(len(defs) == 1),
                 gptoss_prompt_mode=gptoss_prompt_mode,

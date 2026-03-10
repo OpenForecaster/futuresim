@@ -232,15 +232,19 @@ class OpenRouterInference:
             "frequency_penalty": "frequency_penalty",
             "presence_penalty": "presence_penalty",
             "stop": "stop",
-            "reasoning": {
-                # "enabled": True,
-                "effort": "high",
-            },
         }
         
         for local_key, api_key in param_mapping.items():
             if local_key in sampling_params:
                 payload[api_key] = sampling_params[local_key]
+
+        # Reasoning is a nested object, not a simple key rename — handle separately.
+        # Accepts either a dict (e.g. {"effort": "high"}) or a string effort level.
+        reasoning_cfg = sampling_params.get("reasoning")
+        if reasoning_cfg is not None:
+            if isinstance(reasoning_cfg, str):
+                reasoning_cfg = {"effort": reasoning_cfg}
+            payload["reasoning"] = reasoning_cfg
         
         # Add any default kwargs
         for key, value in self.default_kwargs.items():

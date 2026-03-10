@@ -331,6 +331,7 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
         max_retries = agent_def.get('max_retries', defaults.get('max_retries', args.max_retries))
         temperature = agent_def.get('temperature', defaults.get('temperature', args.temperature))
         max_tokens = agent_def.get('max_tokens', defaults.get('max_tokens', args.max_tokens))
+        reasoning = agent_def.get('reasoning', defaults.get('reasoning', None))
         search_cutoff_days = agent_def.get('search_cutoff_days', defaults.get('search_cutoff_days', getattr(args, 'search_cutoff_days', 0)))
         enable_memory = agent_def.get('enable_memory', defaults.get('enable_memory', True))
         singleans = agent_def.get('singleans', defaults.get('singleans', False))
@@ -381,6 +382,7 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
             sampling_params={
                 'temperature': temperature,
                 'max_tokens': max_tokens,
+                **({'reasoning': reasoning} if reasoning is not None else {}),
             },
             search_cutoff_days=search_cutoff_days,
             single_agent_mode=(len(agents_list) == 1),  # Adjust prompt for single-agent runs
