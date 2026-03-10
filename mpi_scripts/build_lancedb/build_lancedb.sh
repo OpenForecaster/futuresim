@@ -29,7 +29,7 @@ START_DATE="2023-01-01"
 END_DATE="2026-01-31"
 
 # Activate environment
-source ~/forecast-sim/fsim/bin/activate
+source ~/forecast-sim/.venv/bin/activate
 cd "$REPO_DIR"
 
 SCALAR_INDEX_TIMEOUT_MINUTES="${SCALAR_INDEX_TIMEOUT_MINUTES:-30}"

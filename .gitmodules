@@ -4,4 +4,5 @@
 	ignore = dirty
 [submodule "third_party/SkyRL"]
 	path = third_party/SkyRL
-	url = https://github.com/NovaSky-AI/SkyRL.git
+	url = https://github.com/shash42/SkyRL.git
+	branch = main

@@ -34,7 +34,7 @@ NUM_WORKERS=${2:-1}
 module load cuda/12.1
 
 # Activate environment
-source ~/forecast-sim/fsim/bin/activate
+source ~/forecast-sim/.venv/bin/activate
 cd "$REPO_DIR"
 
 echo "Starting embedding job..."

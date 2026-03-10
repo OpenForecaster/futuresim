@@ -9,7 +9,7 @@ export PATH="/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 source ~/.bashrc 2>/dev/null || true
 
 # Activate environment
-source ~/forecast-sim/fsim/bin/activate
+source ~/forecast-sim/.venv/bin/activate
 
 # Run deduplication
 cd /home/sgoel/forecast-sim

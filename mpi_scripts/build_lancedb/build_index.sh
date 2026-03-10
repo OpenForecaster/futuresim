@@ -32,7 +32,7 @@ export SOFT_FILELOCK=1
 export PYTHONUNBUFFERED=1
 
 # Activate environment
-source ~/forecast-sim/fsim/bin/activate
+source ~/forecast-sim/.venv/bin/activate
 cd /home/sgoel/forecast-sim
 
 BUILD_FTS="${BUILD_FTS:-1}"
