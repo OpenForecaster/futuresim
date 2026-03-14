@@ -97,18 +97,23 @@ atexit.register(_cleanup_servers)
 class VLLMInference:
     """VLLM inference using OpenAI-compatible server internally."""
     
-    def __init__(self, model_path: str, model_name: str = None, 
+    def __init__(self, model_path: str, model_name: str = None,
                  max_model_len: int = 8192,
                  gpu_memory_utilization: float = 0.3,
                  max_num_seqs: int = 8,
                  tensor_parallel_size: int = 1,
+                 data_parallel_size: int = 1,
+                 pipeline_parallel_size: int = 1,
+                 enable_expert_parallel: bool = False,
+                 all2all_backend: Optional[str] = None,
                  rope_scaling: Optional[Dict[str, Any]] = None,
                  timeout: float = 120.0,
                  startup_timeout: float = 300.0,
                  enable_tools: bool = False,
+                 tool_call_parser: Optional[str] = None,
+                 tool_parser_plugin: Optional[str] = None,
                  cuda_visible_devices: Optional[str] = None,
                  language_model_only: bool = False,
-                 max_num_seqs: Optional[int] = None,
                  **kwargs):
         """
         Initialize VLLM inference.
@@ -123,8 +128,9 @@ class VLLMInference:
             timeout: Request timeout in seconds
             startup_timeout: Server startup timeout in seconds (default 600).
             enable_tools: Start vLLM with tool-calling flags (requires newer vLLM).
+            tool_call_parser: Optional parser name for --tool-call-parser.
+            tool_parser_plugin: Optional plugin module for --tool-parser-plugin.
             language_model_only: Skip vision encoder for multimodal models (vLLM >=0.12).
-            max_num_seqs: Limit concurrent sequences (reduces Mamba state cache).
             **kwargs: Additional args (ignored for server mode)
         """
         global _NEXT_PORT, _VLLM_SERVERS
@@ -133,15 +139,20 @@ class VLLMInference:
         self.model_name = model_name or os.path.basename(model_path)
         self.max_model_len = max_model_len
         self.gpu_mem = gpu_memory_utilization
-        self.max_num_seqs = max(1, int(max_num_seqs))
+        self.max_num_seqs = max(1, int(max_num_seqs or 8))
         self.tensor_parallel_size = max(1, int(tensor_parallel_size))
+        self.data_parallel_size = max(1, int(data_parallel_size))
+        self.pipeline_parallel_size = max(1, int(pipeline_parallel_size))
+        self.enable_expert_parallel = bool(enable_expert_parallel)
+        self.all2all_backend = (all2all_backend or "").strip() or None
         self.rope_scaling = rope_scaling if isinstance(rope_scaling, dict) else None
         self.timeout = timeout
         self.startup_timeout = startup_timeout
         self.enable_tools = enable_tools
+        self.tool_call_parser = (tool_call_parser or "").strip() or None
+        self.tool_parser_plugin = (tool_parser_plugin or "").strip() or None
         self.cuda_visible_devices = cuda_visible_devices
         self.language_model_only = language_model_only
-        self.max_num_seqs = max_num_seqs
 
         # GPT-OSS uses the Harmony format. vLLM supports it, but tool calling is
         # expected via /v1/responses rather than /v1/chat/completions.
@@ -163,6 +174,13 @@ class VLLMInference:
                     and info.get('cuda_visible_devices') == self.cuda_visible_devices
                     and int(info.get('max_num_seqs', 8)) == self.max_num_seqs
                     and int(info.get('tensor_parallel_size', 1)) == self.tensor_parallel_size
+                    and int(info.get('data_parallel_size', 1)) == self.data_parallel_size
+                    and int(info.get('pipeline_parallel_size', 1)) == self.pipeline_parallel_size
+                    and bool(info.get('enable_expert_parallel', False)) == self.enable_expert_parallel
+                    and (info.get('all2all_backend') or None) == self.all2all_backend
+                    and bool(info.get('enable_tools', False)) == bool(self.enable_tools)
+                    and (info.get('tool_call_parser') or None) == self.tool_call_parser
+                    and (info.get('tool_parser_plugin') or None) == self.tool_parser_plugin
                 ):
                     self._port = int(port)
                     self._server_started = True
@@ -205,27 +223,30 @@ class VLLMInference:
                 "--max-num-seqs", str(self.max_num_seqs),
                 "--max-model-len", str(self.max_model_len),
                 "--tensor-parallel-size", str(self.tensor_parallel_size),
+                "--data-parallel-size", str(self.data_parallel_size),
+                "--pipeline-parallel-size", str(self.pipeline_parallel_size),
                 "--disable-log-stats",
                 "--trust-remote-code",
                 "--host", "0.0.0.0",  # Bind to all interfaces
             ]
+            if self.enable_expert_parallel:
+                cmd += ["--enable-expert-parallel"]
+            if self.all2all_backend:
+                cmd += ["--all2all-backend", self.all2all_backend]
             if self.rope_scaling:
                 cmd += ["--rope-scaling", json.dumps(self.rope_scaling, separators=(",", ":"))]
 
             if self.language_model_only:
                 cmd += ["--language-model-only"]
-
-            if self.max_num_seqs:
-                cmd += ["--max-num-seqs", str(self.max_num_seqs)]
         
             # Tool calling on vLLM's OpenAI server requires extra flags in newer vLLM.
             # We keep this behind a toggle because older vLLM versions will error on
             # unknown flags.
             if self.enable_tools:
-                cmd += [
-                    "--enable-auto-tool-choice",
-                    "--tool-call-parser", "openai",
-                ]
+                parser_name = self.tool_call_parser or "openai"
+                cmd += ["--enable-auto-tool-choice", "--tool-call-parser", parser_name]
+                if self.tool_parser_plugin:
+                    cmd += ["--tool-parser-plugin", self.tool_parser_plugin]
         
             # Log to a proper location - try output_dir from environment, fallback to /tmp
             import os
@@ -251,6 +272,13 @@ class VLLMInference:
                     'cuda_visible_devices': self.cuda_visible_devices,
                     'max_num_seqs': self.max_num_seqs,
                     'tensor_parallel_size': self.tensor_parallel_size,
+                    'data_parallel_size': self.data_parallel_size,
+                    'pipeline_parallel_size': self.pipeline_parallel_size,
+                    'enable_expert_parallel': self.enable_expert_parallel,
+                    'all2all_backend': self.all2all_backend,
+                    'enable_tools': self.enable_tools,
+                    'tool_call_parser': self.tool_call_parser,
+                    'tool_parser_plugin': self.tool_parser_plugin,
                 }
         
             # Immediately check if process died
@@ -293,6 +321,13 @@ class VLLMInference:
                             'cuda_visible_devices': self.cuda_visible_devices,
                             'max_num_seqs': self.max_num_seqs,
                             'tensor_parallel_size': self.tensor_parallel_size,
+                            'data_parallel_size': self.data_parallel_size,
+                            'pipeline_parallel_size': self.pipeline_parallel_size,
+                            'enable_expert_parallel': self.enable_expert_parallel,
+                            'all2all_backend': self.all2all_backend,
+                            'enable_tools': self.enable_tools,
+                            'tool_call_parser': self.tool_call_parser,
+                            'tool_parser_plugin': self.tool_parser_plugin,
                         }
                     time.sleep(0.5)
                     if proc.poll() is not None:
@@ -661,6 +696,63 @@ class VLLMInference:
                 return "", {}
         
         return "", {}
+
+    def chat_json(self, messages: List[Dict[str, Any]], sampling_params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Chat Completions call that returns the raw JSON payload.
+
+        Useful for native tool-calling agents that need `assistant.tool_calls`.
+        """
+        self._ensure_server()
+
+        payload: Dict[str, Any] = {
+            "model": self.model_path,
+            "messages": messages,
+            "temperature": sampling_params.get("temperature", 0.7),
+            "max_tokens": sampling_params.get("max_tokens", 1024),
+        }
+        if "top_p" in sampling_params:
+            payload["top_p"] = sampling_params["top_p"]
+        if "stop" in sampling_params:
+            payload["stop"] = sampling_params["stop"]
+        if "tools" in sampling_params:
+            payload["tools"] = sampling_params["tools"]
+        if "tool_choice" in sampling_params:
+            payload["tool_choice"] = sampling_params["tool_choice"]
+
+        session = self._get_session()
+        for attempt in range(3):
+            try:
+                response = session.post(
+                    f"http://127.0.0.1:{self._port}/v1/chat/completions",
+                    json=payload,
+                    timeout=self.timeout,
+                )
+
+                if response.status_code == 200:
+                    return response.json()
+
+                if response.status_code == 400:
+                    body = response.text
+                    body = body[-1500:] if isinstance(body, str) else ""
+                    raise RuntimeError(f"vLLM /v1/chat/completions 400 Bad Request: {body}")
+
+                if response.status_code in (500, 502, 503, 504, 529):
+                    if attempt < 2:
+                        time.sleep(2 ** attempt)
+                        continue
+                response.raise_for_status()
+            except requests.exceptions.Timeout:
+                if attempt < 2:
+                    continue
+                raise RuntimeError(f"vLLM chat/completions timeout after {self.timeout}s")
+            except requests.exceptions.ConnectionError:
+                if attempt < 2:
+                    time.sleep(2)
+                    continue
+                raise RuntimeError("vLLM chat/completions connection error")
+
+        return {}
 
     def responses(
         self,

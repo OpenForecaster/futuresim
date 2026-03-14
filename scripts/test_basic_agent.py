@@ -47,13 +47,18 @@ if os.path.exists(env_path):
             line = line.strip()
             if line and not line.startswith('#') and '=' in line:
                 key, value = line.split('=', 1)
-                os.environ[key.strip()] = value.strip().strip('"').strip("'")
+                key = key.strip()
+                # Keep values already exported by launcher scripts and only fill gaps.
+                # Expand simple env references (e.g. $HOME) for direct Python runs.
+                parsed_value = os.path.expandvars(value.strip().strip('"').strip("'"))
+                os.environ.setdefault(key, parsed_value)
 
 from environment.env import SimulationEnvironment, SimForecastInterface
 from agents.basicAgent import BasicAgent, AgentConfig
 from agents.allQAgent import AllQAgent, AllQDailyAgent
 from agents.ogAgent import OgAgent
 from agents.gptossAgent import GPTOSSBasicAgent, GPTOSSAllQAgent
+from agents.qwenAgent import QwenBasicAgent, QwenAllQAgent
 
 
 # Default paths
@@ -237,18 +242,24 @@ def create_inference_provider(provider: str, model: str, args):
         agent_max_model_len = getattr(args, "agent_max_model_len", None)
         if agent_max_model_len is None:
             agent_max_model_len = args.max_model_len
+        tool_call_parser = _resolve_vllm_tool_call_parser(model, args)
         return VLLMInference(
             model,
             max_model_len=agent_max_model_len,
             gpu_memory_utilization=getattr(args, "vllm_gpu_mem", 0.3),
             max_num_seqs=getattr(args, "vllm_max_num_seqs", 8),
             tensor_parallel_size=getattr(args, "vllm_tensor_parallel_size", 1),
+            data_parallel_size=getattr(args, "vllm_data_parallel_size", 1),
+            pipeline_parallel_size=getattr(args, "vllm_pipeline_parallel_size", 1),
+            enable_expert_parallel=getattr(args, "vllm_enable_expert_parallel", False),
+            all2all_backend=getattr(args, "vllm_all2all_backend", None),
             startup_timeout=getattr(args, "vllm_startup_timeout", 300.0),
             rope_scaling=rope_scaling,
             enable_tools=getattr(args, "vllm_enable_tools", False),
+            tool_call_parser=tool_call_parser,
+            tool_parser_plugin=getattr(args, "vllm_tool_parser_plugin", None),
             cuda_visible_devices=getattr(args, "agent_cuda_visible_devices", None),
             language_model_only=getattr(args, "language_model_only", False),
-            max_num_seqs=getattr(args, "vllm_max_num_seqs", None),
         )
     elif provider == "openrouter":
         from inference.openrouter import OpenRouterInference
@@ -267,6 +278,27 @@ def get_model_short_name(model: str) -> str:
     # Remove version tags
     name = name.split(':')[0]
     return name
+
+
+def _is_qwen_model(model: str) -> bool:
+    model_l = str(model or "").lower()
+    return ("qwen" in model_l) and ("gpt-oss" not in model_l)
+
+
+def _resolve_vllm_tool_call_parser(model: str, args) -> str | None:
+    parser = getattr(args, "vllm_tool_call_parser", None)
+    if isinstance(parser, str):
+        parser = parser.strip()
+    if parser:
+        return parser
+
+    if not bool(getattr(args, "vllm_enable_tools", False)):
+        return None
+
+    if _is_qwen_model(model):
+        return "qwen3_coder"
+
+    return "openai"
 
 
 def create_agents_from_config(config: dict, args, output_dir: str, search_tool=None) -> list:
@@ -406,9 +438,19 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
             and bool(getattr(args, "vllm_enable_tools", False))
             and ("gpt-oss" in str(model).lower())
         )
+        use_qwen_native_tools = (
+            provider == "vllm"
+            and bool(getattr(args, "vllm_enable_tools", False))
+            and _is_qwen_model(model)
+        )
 
         if scaffold == 'basic':
-            agent_cls = GPTOSSBasicAgent if use_gptoss_harmony else BasicAgent
+            if use_gptoss_harmony:
+                agent_cls = GPTOSSBasicAgent
+            elif use_qwen_native_tools:
+                agent_cls = QwenBasicAgent
+            else:
+                agent_cls = BasicAgent
             agent = agent_cls(
                 agent_id=agent_id,
                 inference_provider=inference_provider,
@@ -417,7 +459,12 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
                 search_tool=search_tool
             )
         elif scaffold in ('allQ', 'allq'):
-            agent_cls = GPTOSSAllQAgent if use_gptoss_harmony else AllQAgent
+            if use_gptoss_harmony:
+                agent_cls = GPTOSSAllQAgent
+            elif use_qwen_native_tools:
+                agent_cls = QwenAllQAgent
+            else:
+                agent_cls = AllQAgent
             agent = agent_cls(
                 agent_id=agent_id,
                 inference_provider=inference_provider,
@@ -556,14 +603,24 @@ def main():
                        help="vLLM max concurrent sequences (default 8)")
     parser.add_argument("--vllm_tensor_parallel_size", type=int, default=1,
                        help="Tensor parallel size for vLLM agent models (default 1)")
+    parser.add_argument("--vllm_data_parallel_size", type=int, default=1,
+                       help="Data parallel size for vLLM agent models (default 1)")
+    parser.add_argument("--vllm_pipeline_parallel_size", type=int, default=1,
+                       help="Pipeline parallel size for vLLM agent models (default 1)")
+    parser.add_argument("--vllm_enable_expert_parallel", action="store_true", default=False,
+                       help="Enable vLLM expert parallel mode for MoE models")
+    parser.add_argument("--vllm_all2all_backend", default=None,
+                       help="Optional vLLM all-to-all backend (e.g. allgather_reducescatter, deepep_high_throughput)")
     parser.add_argument("--vllm_startup_timeout", type=float, default=300.0,
                        help="vLLM server startup timeout in seconds (default 300)")
     parser.add_argument("--vllm_enable_tools", action="store_true", default=False,
-                       help="Start vLLM servers with tool-calling enabled (Responses API recommended for gpt-oss tools)")
+                       help="Start vLLM servers with tool-calling enabled (required for native Qwen tool calls)")
+    parser.add_argument("--vllm_tool_call_parser", default=None,
+                       help="vLLM tool parser name (e.g. qwen3_coder, openai). Auto-detected when omitted.")
+    parser.add_argument("--vllm_tool_parser_plugin", default=None,
+                       help="Optional --tool-parser-plugin value for custom parsers")
     parser.add_argument("--language_model_only", action="store_true", default=False,
                        help="Pass --language-model-only to vLLM (skip vision encoder for multimodal checkpoints)")
-    parser.add_argument("--vllm_max_num_seqs", type=int, default=None,
-                       help="Limit max concurrent sequences in vLLM (reduces Mamba/conv state cache)")
 
     # GPU pinning for local multi-GPU runs.
     # If you set aux_cuda_visible_devices=1 and agent_cuda_visible_devices=0, then:
@@ -952,12 +1009,20 @@ def main():
             inference_provider = VLLMInference(
                 args.model_path,
                 max_model_len=agent_max_model_len,
+                gpu_memory_utilization=getattr(args, "vllm_gpu_mem", 0.3),
                 max_num_seqs=getattr(args, "vllm_max_num_seqs", 8),
                 tensor_parallel_size=getattr(args, "vllm_tensor_parallel_size", 1),
+                data_parallel_size=getattr(args, "vllm_data_parallel_size", 1),
+                pipeline_parallel_size=getattr(args, "vllm_pipeline_parallel_size", 1),
+                enable_expert_parallel=getattr(args, "vllm_enable_expert_parallel", False),
+                all2all_backend=getattr(args, "vllm_all2all_backend", None),
                 startup_timeout=getattr(args, "vllm_startup_timeout", 300.0),
                 rope_scaling=getattr(args, "rope_scaling", None),
+                enable_tools=getattr(args, "vllm_enable_tools", False),
+                tool_call_parser=_resolve_vllm_tool_call_parser(args.model_path, args),
+                tool_parser_plugin=getattr(args, "vllm_tool_parser_plugin", None),
+                cuda_visible_devices=getattr(args, "agent_cuda_visible_devices", None),
                 language_model_only=getattr(args, "language_model_only", False),
-                max_num_seqs=getattr(args, "vllm_max_num_seqs", None),
             )
             model_name = os.path.basename(args.model_path)
             
@@ -1006,8 +1071,25 @@ def main():
             gptoss_retry_backoff_max_s=args.gptoss_retry_backoff_max_s,
         )
         
+        use_gptoss_harmony = (
+            args.provider == "vllm"
+            and bool(getattr(args, "vllm_enable_tools", False))
+            and ("gpt-oss" in str(model_name).lower())
+        )
+        use_qwen_native_tools = (
+            args.provider == "vllm"
+            and bool(getattr(args, "vllm_enable_tools", False))
+            and _is_qwen_model(model_name)
+        )
+
         if args.scaffold == 'basic':
-            agent = BasicAgent(
+            if use_gptoss_harmony:
+                agent_cls = GPTOSSBasicAgent
+            elif use_qwen_native_tools:
+                agent_cls = QwenBasicAgent
+            else:
+                agent_cls = BasicAgent
+            agent = agent_cls(
                 agent_id=agent_id,
                 inference_provider=inference_provider,
                 config=agent_config,
@@ -1015,7 +1097,13 @@ def main():
                 search_tool=search_tool
             )
         elif args.scaffold in ['allQ', 'allq']:
-            agent = AllQAgent(
+            if use_gptoss_harmony:
+                agent_cls = GPTOSSAllQAgent
+            elif use_qwen_native_tools:
+                agent_cls = QwenAllQAgent
+            else:
+                agent_cls = AllQAgent
+            agent = agent_cls(
                 agent_id=agent_id,
                 inference_provider=inference_provider,
                 config=agent_config,
