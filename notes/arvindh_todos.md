@@ -1,0 +1,2 @@
+- implement question-wise memory the model can fetch + meta insights that go in the context directly
+- try mem0

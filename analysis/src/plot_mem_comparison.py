@@ -50,7 +50,7 @@ def main():
         # ('tw_peer_score', 'Time-Weighted Peer Score', 'higher is better'),
         ('accuracy', 'Accuracy (%)', 'higher is better'),
         ('exp_acc', 'Expected Accuracy', 'higher is better'),
-        ('total_predictions', 'Total Predictions', ''),
+        # ('total_predictions', 'Total Predictions', ''),
     ]
 
     fig, axes = plt.subplots(len(metrics), 1, figsize=(14, 4 * len(metrics)), sharex=True)
@@ -80,7 +80,7 @@ def main():
     plt.setp(axes[-1].get_xticklabels(), rotation=45, ha='right')
     axes[-1].set_xlabel('Date', fontsize=11)
 
-    fig.suptitle('Memory vs No-Memory Run Comparison', fontsize=14, fontweight='bold', y=1.01)
+    # fig.suptitle('Memory vs No-Memory Run Comparison', fontsize=14, fontweight='bold', y=1.01)
     plt.tight_layout()
     output_path = os.path.join(args.output_dir, 'mem_vs_nomem_comparison.png')
     plt.savefig(output_path, dpi=300, bbox_inches='tight')

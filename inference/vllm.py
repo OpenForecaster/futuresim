@@ -97,7 +97,7 @@ atexit.register(_cleanup_servers)
 class VLLMInference:
     """VLLM inference using OpenAI-compatible server internally."""
     
-    def __init__(self, model_path: str, model_name: str = None, 
+    def __init__(self, model_path: str, model_name: str = None,
                  max_model_len: int = 8192,
                  gpu_memory_utilization: float = 0.3,
                  max_num_seqs: int = 8,
@@ -108,7 +108,6 @@ class VLLMInference:
                  enable_tools: bool = False,
                  cuda_visible_devices: Optional[str] = None,
                  language_model_only: bool = False,
-                 max_num_seqs: Optional[int] = None,
                  **kwargs):
         """
         Initialize VLLM inference.
@@ -124,7 +123,6 @@ class VLLMInference:
             startup_timeout: Server startup timeout in seconds (default 600).
             enable_tools: Start vLLM with tool-calling flags (requires newer vLLM).
             language_model_only: Skip vision encoder for multimodal models (vLLM >=0.12).
-            max_num_seqs: Limit concurrent sequences (reduces Mamba state cache).
             **kwargs: Additional args (ignored for server mode)
         """
         global _NEXT_PORT, _VLLM_SERVERS
@@ -141,7 +139,6 @@ class VLLMInference:
         self.enable_tools = enable_tools
         self.cuda_visible_devices = cuda_visible_devices
         self.language_model_only = language_model_only
-        self.max_num_seqs = max_num_seqs
 
         # GPT-OSS uses the Harmony format. vLLM supports it, but tool calling is
         # expected via /v1/responses rather than /v1/chat/completions.

@@ -144,3 +144,59 @@ class FeedbackHandler:
             sections.append("\n".join(m_lines))
             
         return "\n\n".join(sections)
+
+    @staticmethod
+    def format_cheat_feedback(cheat_data: dict, detail: str = "full") -> str:
+        """Format privileged cheat-feedback for injection before memory update.
+
+        ``cheat_data`` has shape ``{'items': [...], 'summary': {...}}``.
+        ``detail`` is ``"full"`` (show Brier scores) or ``"direction"`` (labels only).
+        """
+        items = cheat_data.get("items", [])
+        summary = cheat_data.get("summary", {})
+        if not items:
+            return ""
+
+        direction_labels = {
+            "improved": "IMPROVED",
+            "worsened": "WORSENED",
+            "unchanged": "UNCHANGED",
+            "first_prediction": "FIRST PREDICTION",
+        }
+
+        lines = [
+            "## PREDICTION PERFORMANCE FEEDBACK:",
+            "Below is feedback on your predictions updated today.",
+            "",
+        ]
+
+        for item in items:
+            dir_label = direction_labels.get(item["direction"], item["direction"].upper())
+            lines.append(f"- Q{item['qid']}: \"{item['title']}\"")
+            if detail == "full":
+                prev = item.get("previous_brier")
+                cur = item.get("current_brier")
+                if prev is not None and item["direction"] != "first_prediction":
+                    lines.append(f"  Brier Skill: {cur:+.3f} (was {prev:+.3f}) | {dir_label}")
+                else:
+                    lines.append(f"  Brier Skill: {cur:+.3f} (baseline: +0.000) | {dir_label}")
+            else:
+                lines.append(f"  Direction: {dir_label}")
+            lines.append("")
+
+        # Summary line
+        s = summary
+        summary_parts = [f"{s.get('total', 0)} updated"]
+        if s.get("improved", 0):
+            summary_parts.append(f"{s['improved']} improved")
+        if s.get("worsened", 0):
+            summary_parts.append(f"{s['worsened']} worsened")
+        if s.get("unchanged", 0):
+            summary_parts.append(f"{s['unchanged']} unchanged")
+        if detail == "full" and "avg_brier" in s:
+            summary_parts.append(f"avg Brier: {s['avg_brier']:+.3f}")
+        lines.append(f"**Summary**: {', '.join(summary_parts)}")
+        lines.append("")
+        lines.append("Use this feedback to reflect on which prediction strategies are working and update your memory accordingly.")
+
+        return "\n".join(lines)

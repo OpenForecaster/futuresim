@@ -29,7 +29,7 @@ warmup_parallelism: 64
 
 # --- Search Settings ---
 search_db: "/mnt/nfs/datasets_ac/news/deduped_articles/lance/Qwen3-Embedding-8B"
-embedding_model: "/mnt/nfs/datasets_ac/models/Qwen3-Embedding-8B"
+embedding_model: "/mnt/nfs/home/ac146091/forecast-sim/models/Qwen3-Embedding-8B"
 embedding_gpu_mem: 0.7
 
 # --- Answer Matching ---
@@ -41,6 +41,10 @@ max_model_len: 8192
 # --- Inference Defaults ---
 rate_limit: 32.0
 parallel: true
+
+# --- Cheat Feedback (privileged directional-correctness before memory update) ---
+cheat_feedback: true
+cheat_feedback_detail: "direction"  # "full" (Brier scores) or "direction" (labels only)
 
 # --- Agents Configuration ---
 defaults:

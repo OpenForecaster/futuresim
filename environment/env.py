@@ -270,7 +270,8 @@ class SimulationEnvironment:
                  split: str = "train",
                  resume_dir: str = None,
                  min_forecasters: int = 0,
-                 resolved_only: bool = False):
+                 resolved_only: bool = False,
+                 cheat_feedback: bool = False):
         
         # Handle positional args shift if someone called with positional args (unlikely in this codebase but safe)
         # We'll rely on kwargs mostly.
@@ -286,6 +287,7 @@ class SimulationEnvironment:
         self.output_dir = output_dir
         self.parallel = parallel
         self.split = split
+        self.cheat_feedback = cheat_feedback
         
         # Logging and market state
         self.resume_dir = resume_dir
@@ -1007,9 +1009,14 @@ class SimulationEnvironment:
         """Run agents one at a time (original behavior)."""
         # Hide ground truth from agents
         safe_questions = self._get_safe_active_questions(active_questions)
-        
+
+        # Cheat-feedback context: pass real questions (with ground truth) lazily
+        cheat_ctx = None
+        if self.cheat_feedback:
+            cheat_ctx = (active_questions, self.scorer, self.matcher)
+
         forecast_interface = SimForecastInterface(
-            safe_questions, 
+            safe_questions,
             self.current_aggregates,
             self.prediction_histories,
             self.current_date,
@@ -1019,6 +1026,7 @@ class SimulationEnvironment:
             resolved_agent_predictions=self.resolved_agent_predictions,
             histories_lock=self._histories_lock,
             market_csv_path=self.market_csv_path,
+            cheat_feedback_ctx=cheat_ctx,
         )
         forecast_interface.source_name = getattr(self, 'source_name', 'openforesight')
         forecast_interface.source_context = getattr(self, 'source_context', '')
@@ -1029,16 +1037,21 @@ class SimulationEnvironment:
     
     def _run_agents_parallel(self, active_questions: List[Question]):
         """Run agents in parallel using thread pool."""
-        
+
         # Hide ground truth from agents
         safe_questions = self._get_safe_active_questions(active_questions)
-        
+
+        # Cheat-feedback context: pass real questions (with ground truth) lazily
+        cheat_ctx = None
+        if self.cheat_feedback:
+            cheat_ctx = (active_questions, self.scorer, self.matcher)
+
         def run_agent(agent):
             """Execute a single agent's turn."""
             # Each agent gets its own forecast interface instance
             # (they share the same underlying histories dict, but with thread-safe access)
             forecast_interface = SimForecastInterface(
-                safe_questions, 
+                safe_questions,
                 self.current_aggregates,
                 self.prediction_histories,
                 self.current_date,
@@ -1048,6 +1061,7 @@ class SimulationEnvironment:
                 resolved_agent_predictions=self.resolved_agent_predictions,
                 histories_lock=self._histories_lock,
                 market_csv_path=self.market_csv_path,
+                cheat_feedback_ctx=cheat_ctx,
             )
             forecast_interface.source_name = getattr(self, 'source_name', 'openforesight')
             forecast_interface.source_context = getattr(self, 'source_context', '')
@@ -1357,10 +1371,80 @@ class SimulationEnvironment:
 
 
 
+def _compute_agent_cheat_feedback(agent_id, questions, histories, scorer, matcher, sim_date, detail="full"):
+    """Compute privileged cheat-feedback for a single agent on today's predictions.
+
+    Returns ``{'items': [...], 'summary': {...}}`` or empty dict if no
+    predictions were updated today.
+    """
+    items = []
+    for q in questions:
+        if not q.ground_truth_answer:
+            continue
+        history = histories.get(q.qid)
+        if not history:
+            continue
+        preds = history.predictions.get(agent_id, [])
+        if not preds:
+            continue
+        current = preds[-1]
+        # Only include if prediction was made/updated today
+        if current.day != sim_date:
+            continue
+        current_brier = scorer.score_prediction(
+            current, q.ground_truth_answer, matcher,
+            question_id=q.qid, question_title=q.title,
+        )
+        previous_brier = None
+        direction = "first_prediction"
+        if len(preds) >= 2:
+            prev = preds[-2]
+            previous_brier = scorer.score_prediction(
+                prev, q.ground_truth_answer, matcher,
+                question_id=q.qid, question_title=q.title,
+            )
+            if current_brier > previous_brier:
+                direction = "improved"
+            elif current_brier < previous_brier:
+                direction = "worsened"
+            else:
+                direction = "unchanged"
+        else:
+            previous_brier = 0.0  # abstainer baseline
+            if current_brier > 0.0:
+                direction = "improved"
+            elif current_brier < 0.0:
+                direction = "worsened"
+            else:
+                direction = "unchanged"
+
+        item = {"qid": q.qid, "title": q.title, "direction": direction}
+        if detail == "full":
+            item["current_brier"] = current_brier
+            item["previous_brier"] = previous_brier
+        items.append(item)
+
+    if not items:
+        return {}
+
+    n = len(items)
+    improved = sum(1 for i in items if i["direction"] == "improved")
+    worsened = sum(1 for i in items if i["direction"] == "worsened")
+    summary = {
+        "total": n,
+        "improved": improved,
+        "worsened": worsened,
+        "unchanged": n - improved - worsened,
+    }
+    if detail == "full" and n > 0:
+        summary["avg_brier"] = sum(i["current_brier"] for i in items) / n
+    return {"items": items, "summary": summary}
+
+
 class SimForecastInterface:
     """
     Agent's interface to forecasting questions.
-    
+
     Thread-safe for parallel agent execution.
     """
     
@@ -1374,7 +1458,8 @@ class SimForecastInterface:
                  resolution_events: List[Dict[str, Any]] = None,
                  resolved_agent_predictions: Dict[str, Dict[str, Dict[str, Any]]] = None,
                  histories_lock: Lock = None,
-                 market_csv_path: str = None):
+                 market_csv_path: str = None,
+                 cheat_feedback_ctx: Optional[Tuple] = None):
         self.questions = {q.qid: q for q in questions}
         self.aggregates = aggregates
         self.histories = histories
@@ -1387,6 +1472,8 @@ class SimForecastInterface:
         self._histories_lock = histories_lock or Lock()
         self._market_csv_path = market_csv_path
         self._day_complete = False
+        # Cheat feedback context: (questions_with_truth, scorer, matcher) or None
+        self._cheat_feedback_ctx = cheat_feedback_ctx
         
     def set_agent_context(self, agent_id: str):
         self.current_agent_id = agent_id
@@ -1399,7 +1486,21 @@ class SimForecastInterface:
     def is_day_complete(self) -> bool:
         """Check if agent has signaled day completion."""
         return self._day_complete
-    
+
+    def get_cheat_feedback(self, detail: str = "full") -> dict:
+        """Compute privileged cheat-feedback for the current agent.
+
+        Returns ``{'items': [...], 'summary': {...}}`` when enabled,
+        or ``{}`` when cheat-feedback is disabled.
+        """
+        if not self._cheat_feedback_ctx or not self.current_agent_id:
+            return {}
+        questions, scorer, matcher = self._cheat_feedback_ctx
+        return _compute_agent_cheat_feedback(
+            self.current_agent_id, questions, self.histories,
+            scorer, matcher, self.sim_date, detail,
+        )
+
     def submit_prediction(self, prediction: PredictionSubmission) -> None:
         """Record a probabilistic prediction (thread-safe)."""
         if not self.current_agent_id:

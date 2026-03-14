@@ -5,15 +5,15 @@
 # Usage: python aisa_scripts/run_sim/submit_sim_aisa.py --config configs/allq_warmup_only_aisa.yaml --runs 1 --gpus 1 --memory 80 --time 12:00:00
 
 # --- Simulation Meta ---
-sim_name: "allq_warmup_only_aisa"
+sim_name: "allq_warmup_only_aisa_skysports2025"
 start_date: "2025-05-01"
 end_date: "2025-04-25"       # Minimal loop: warmup day (04-24) + 1 day (04-25)
 lookback_days: 7
 search_cutoff_days: 0
-split: "test"
+split: "skysports2025"
 
 # Load the FULL question set (resolution_end decoupled from end_date)
-resolution_end: "2025-08-23"
+resolution_end: "2025-12-15"
 
 # --- Data Paths ---
 dataset: "openforesight"

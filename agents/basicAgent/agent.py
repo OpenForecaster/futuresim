@@ -689,6 +689,17 @@ You have {self.config.max_actions} actions available. Begin."""
         else:
             memory_prompt = self._build_plain_memory_prompt(current_date)
 
+        # Prepend privileged cheat-feedback when enabled
+        if self.config.cheat_feedback:
+            cheat_data = forecast_interface.get_cheat_feedback(
+                detail=self.config.cheat_feedback_detail
+            )
+            if cheat_data.get("items"):
+                cheat_section = FeedbackHandler.format_cheat_feedback(
+                    cheat_data, self.config.cheat_feedback_detail
+                )
+                memory_prompt = cheat_section + "\n\n" + memory_prompt
+
         messages.append({"role": "user", "content": memory_prompt})
         response, usage = self.inference.chat(messages, self.config.sampling_params)
         self._timer.record_tokens(usage)

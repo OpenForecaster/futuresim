@@ -91,10 +91,6 @@ def parse_args():
     
     # Processing
     parser.add_argument(
-        "--batch_size", type=int, default=32,
-        help="Batch size for embedding (default: 32)"
-    )
-    parser.add_argument(
         "--worker_id", type=int, default=0,
         help="Worker ID for parallel processing (0-indexed)"
     )
@@ -195,25 +191,25 @@ def create_chunks_for_articles(
 
 
 def load_embedding_model(model_path: str):
-    """Load embedding model using vLLM (V0 engine, see notes/embed_aisa_changes.md)."""
+    """Load embedding model using vLLM."""
     from vllm import LLM
-    return LLM(model=model_path, task="embed", trust_remote_code=True)
+    # vLLM 0.13+ uses convert='embed' instead of task='embed'
+    return LLM(model=model_path, convert="embed", trust_remote_code=True)
 
 
-def embed_texts(texts: List[str], model, batch_size: int = 32) -> np.ndarray:
+def embed_texts(texts: List[str], model) -> np.ndarray:
     """Embed texts using vLLM.
-
+    
     Per official Qwen3-Embedding docs: NO instruction prefix for documents.
     Only queries need instruction prefix.
     """
-    # Truncate very long texts by character count (safety net)
+    # Truncate to fit model context (32k max, use 30k for safety)
     texts = [t[:30000] for t in texts]
-
-    # vLLM V0 handles batching internally — pass all texts at once
+    
+    # vLLM handles batching internally
     outputs = model.embed(texts)
-    embeddings = np.array(
-        [o.outputs.embedding for o in outputs], dtype=np.float32
-    )
+    embeddings = np.array([o.outputs.embedding for o in outputs], dtype=np.float32)
+    
     return embeddings
 
 
@@ -328,7 +324,7 @@ def main():
             continue
         
         print(f"  Embedding...")
-        embeddings = embed_texts(chunk_texts, model, args.batch_size)
+        embeddings = embed_texts(chunk_texts, model)
         print(f"  Embedding shape: {embeddings.shape}")
         
         # Save config on first successful embedding (worker 0 only)
