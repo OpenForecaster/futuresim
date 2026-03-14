@@ -1,0 +1,3 @@
+- implement question-wise memory the model can fetch + meta insights that go in the context directly
+- try mem0
+- make yaml memories a tool where only titles are shown to the model initially and then it can fetch a memory it wants.

@@ -54,8 +54,8 @@ class LanceDBSearchTool(BaseSearchTool):
             return
         
         if not self._model_path and self._config.get("model"):
-            # Try default path with model name from config
-            self._model_path = f"/is/cluster/fast/sgoel/models/{self._config['model']}"
+            # Use model name from LanceDB config (no hardcoded path prefix)
+            self._model_path = self._config["model"]
         
         if self._model_path:
             try:

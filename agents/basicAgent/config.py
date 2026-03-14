@@ -29,6 +29,10 @@ class AgentConfig:
     # Single agent mode - adjusts prompt to focus on accuracy only (no peer/market language)
     single_agent_mode: bool = False
 
+    # Cheat feedback: provide privileged directional-correctness feedback before memory update
+    cheat_feedback: bool = False
+    cheat_feedback_detail: str = "full"  # "full" (show Brier scores) or "direction" (only improved/worsened)
+
     # GPT-OSS Harmony prompt placement:
     # - "instructions" (default): task text goes to Responses API `instructions`.
     # - "first_user": task text is prepended to the first user message.

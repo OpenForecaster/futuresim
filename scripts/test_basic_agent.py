@@ -373,6 +373,8 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
         search_cutoff_days = agent_def.get('search_cutoff_days', defaults.get('search_cutoff_days', getattr(args, 'search_cutoff_days', 0)))
         enable_memory = agent_def.get('enable_memory', defaults.get('enable_memory', True))
         singleans = agent_def.get('singleans', defaults.get('singleans', False))
+        cheat_feedback = agent_def.get('cheat_feedback', defaults.get('cheat_feedback', getattr(args, 'cheat_feedback', False)))
+        cheat_feedback_detail = agent_def.get('cheat_feedback_detail', defaults.get('cheat_feedback_detail', getattr(args, 'cheat_feedback_detail', 'full')))
         gptoss_prompt_mode = agent_def.get(
             'gptoss_prompt_mode',
             defaults.get('gptoss_prompt_mode', getattr(args, 'gptoss_prompt_mode', 'instructions'))
@@ -430,8 +432,10 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
             gptoss_responses_max_retries=gptoss_responses_max_retries,
             gptoss_retry_backoff_base_s=gptoss_retry_backoff_base_s,
             gptoss_retry_backoff_max_s=gptoss_retry_backoff_max_s,
+            cheat_feedback=cheat_feedback,
+            cheat_feedback_detail=cheat_feedback_detail,
         )
-        
+
         # GPT-OSS Harmony tool calling: only when using vLLM + enable_tools + gpt-oss weights.
         use_gptoss_harmony = (
             provider == "vllm"
@@ -546,6 +550,10 @@ def main():
                        help="Run agents in parallel (default: True)")
     parser.add_argument("--no_parallel", action="store_true",
                        help="Disable parallel agent execution")
+    parser.add_argument("--cheat_feedback", action="store_true", default=False,
+                       help="Provide agents with privileged directional-correctness feedback before memory update")
+    parser.add_argument("--cheat_feedback_detail", choices=["full", "direction"], default="full",
+                       help="Cheat feedback detail level: 'full' (Brier scores) or 'direction' (labels only)")
     
     # Single-agent settings (used when no config file)
     parser.add_argument("--scaffold", choices=["basic", "allQ", "allq", "allqd", "og"], default="basic",
@@ -1069,8 +1077,9 @@ def main():
             gptoss_responses_max_retries=args.gptoss_responses_max_retries,
             gptoss_retry_backoff_base_s=args.gptoss_retry_backoff_base_s,
             gptoss_retry_backoff_max_s=args.gptoss_retry_backoff_max_s,
+            cheat_feedback=getattr(args, 'cheat_feedback', False),
+            cheat_feedback_detail=getattr(args, 'cheat_feedback_detail', 'full'),
         )
-        
         use_gptoss_harmony = (
             args.provider == "vllm"
             and bool(getattr(args, "vllm_enable_tools", False))
@@ -1150,7 +1159,8 @@ def main():
         resolution_end=resolution_end,
         parallel=args.parallel,
         split=args.split,
-        resume_dir=args.resume if args.resume else None
+        resume_dir=args.resume if args.resume else None,
+        cheat_feedback=getattr(args, 'cheat_feedback', False),
     )
     
     # Add all agents

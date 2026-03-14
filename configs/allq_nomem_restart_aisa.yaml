@@ -7,16 +7,16 @@
 # Usage: python aisa_scripts/run_sim/submit_sim_aisa.py --config configs/allq_nomem_restart_aisa.yaml --runs 1 --gpus 1 --memory 80 --time 2-00:00:00
 
 # --- Restart ---
-restart_from: "/mnt/nfs/home/ac146091/forecast-sim/logs/current_sim/allq_warmup_only_aisa_r00/26-02-22-00-17-36"
+restart_from: "/mnt/nfs/home/ac146091/forecast-sim/logs/current_sim/allq_warmup_only_aisa_skysports2025_r00/26-02-27-18-30-36"
 restart_from_day: "2025-04-25"
 
 # --- Simulation Meta ---
-sim_name: "allq_nomem_deepseek_aisa"
+sim_name: "allq_nomem_deepseek_aisa_skysports2025"
 start_date: "2025-05-01"
-end_date: "2025-08-23"
+end_date: "2025-12-14"
 lookback_days: 7
 search_cutoff_days: 0
-split: "test"
+split: "skysports2025"
 
 # --- Data Paths ---
 dataset: "openforesight"
