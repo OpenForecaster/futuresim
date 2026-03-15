@@ -92,7 +92,13 @@ class AllQAgent(BasicAgent):
         
         # Setup handlers for this "day" (Day 0)
         self._setup_warmup_day(forecast_interface, current_date)
-        
+
+        # Collect per-question memo entries from parallel warmup threads.
+        # Python list.append is thread-safe (GIL), so no lock needed.
+        from agents.utils.memory import ActiveMemory
+        if isinstance(self._memory, ActiveMemory):
+            self._warmup_memo_entries = []
+
         # Set agent context so submissions are recorded correctly
         forecast_interface.current_agent_id = self.agent_id
 
@@ -140,15 +146,31 @@ class AllQAgent(BasicAgent):
                         ) from e
             
         self.warmed_up = True
-        
+
+        # Active memory: seed memo_df from per-question warmup conversations.
+        from agents.utils.memory import ActiveMemory
+        if isinstance(self._memory, ActiveMemory) and hasattr(self, '_warmup_memo_entries'):
+            entries = self._warmup_memo_entries
+            print(f"[{self.agent_id}] Seeding memo_df with {len(entries)} warmup entries...")
+            for entry in entries:
+                self._memory.memo_add(
+                    qid=entry["qid"],
+                    question=entry["question"],
+                    memory=entry["memory"],
+                    confidence=entry.get("confidence"),
+                    category=entry.get("category"),
+                )
+            self._memory.save(current_date)
+            del self._warmup_memo_entries
+
         # End timing and save stats for Day 0
         self._timer.end_day()
         if self.config.memory_dir:
             self._timer.save_day_stats(self.config.memory_dir, current_date)
-            
+
         # Reset timer for subsequent standard days
         self._timer.reset()
-        
+
         print(f"[{self.agent_id}] Warmup complete.")
 
     def _process_single_question(self, q, current_date, forecast_interface):
@@ -156,13 +178,65 @@ class AllQAgent(BasicAgent):
         # customized prompt for single-question focus
         system_prompt = self._build_warmup_system_prompt(current_date, q, forecast_interface=forecast_interface)
         messages = [{"role": "user", "content": system_prompt}]
-        
+
         # Run mini-loop for this question
         self._run_warmup_loop(messages, forecast_interface, q.qid)
 
-    def act(self, 
-            doc_interface, 
-            forecast_interface, 
+        # Ask the LLM to produce a memo entry from this warmup conversation.
+        # The model has full context (search results, reasoning, prediction) and
+        # decides what's worth remembering, just like end-of-day memory updates.
+        if hasattr(self, '_warmup_memo_entries'):
+            memo_entry = self._request_warmup_memo(messages, q.qid, q.title)
+            if memo_entry:
+                self._warmup_memo_entries.append(memo_entry)
+
+    def _request_warmup_memo(self, messages: List[Dict], qid, question_title: str) -> Optional[Dict]:
+        """Ask the LLM to produce a memo entry from the warmup conversation.
+
+        Makes one additional LLM call with the full conversation context,
+        letting the model decide what's worth remembering — same as end-of-day
+        memory updates.
+        """
+        from agents.utils.forecast_parser import extract_memo_ops
+
+        memo_prompt = f"""You just finished researching and predicting question {qid}: "{question_title}".
+
+Write a concise memo entry capturing your key reasoning, evidence, and any calibration notes worth remembering for future updates. Max 500 chars.
+
+<memo_add>
+qid: {qid}
+question: {question_title}
+memory: Your key reasoning and evidence here (max 500 chars)
+confidence: your_confidence_float
+category: topic_category
+</memo_add>
+
+Output exactly one <memo_add> block. No other text needed."""
+
+        memo_messages = messages + [{"role": "user", "content": memo_prompt}]
+        try:
+            response, usage = self.inference.chat(memo_messages, self.config.sampling_params)
+            self._timer.record_tokens(usage)
+            self._timer.record_cost(usage.get("cost", 0), "llm")
+        except Exception as e:
+            print(f"[{self.agent_id}] Warmup memo LLM call failed for qid {qid}: {e}")
+            return None
+
+        adds, _, _ = extract_memo_ops(response)
+        if adds:
+            add = adds[0]
+            return {
+                "qid": str(add.get("qid", qid)),
+                "question": str(add.get("question", question_title)),
+                "memory": str(add.get("memory", ""))[:500],
+                "confidence": add.get("confidence"),
+                "category": add.get("category"),
+            }
+        return None
+
+    def act(self,
+            doc_interface,
+            forecast_interface,
             current_date: date) -> List[Dict[str, Any]]:
         """
         Override act to skip Day 0 if warmup was done.

@@ -16,7 +16,7 @@ class AgentConfig:
     singleans: bool = False
     memory_dir: Optional[str] = None
     enable_memory: bool = True
-    memory_format: str = "structured"  # "structured" (YAML entries) or "plain" (legacy text)
+    memory_format: str = "structured"  # "structured" (YAML entries), "plain" (legacy text), or "active" (memo_df + reduced structured)
     sampling_params: Optional[Dict[str, Any]] = None
     
     # Search

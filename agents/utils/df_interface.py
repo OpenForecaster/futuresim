@@ -137,13 +137,14 @@ class DfInterface:
             'columns_desc': "\n".join(columns_desc),
         }
     
-    def execute_query(self, code: str) -> Tuple[str, Optional[str]]:
+    def execute_query(self, code: str, extra_context: dict = None) -> Tuple[str, Optional[str]]:
         """
         Execute pandas code on the DataFrame.
-        
+
         Args:
             code: Python code to execute (should be an expression or statements)
-            
+            extra_context: Additional variables to inject into the sandbox
+
         Returns:
             (result_string, error_message)
             If successful: (formatted_result, None)
@@ -152,7 +153,8 @@ class DfInterface:
         df = self.load_df()
         return self._executor.execute(
             df, code,
-            current_date=self.current_date
+            current_date=self.current_date,
+            extra_context=extra_context
         )
     
     def invalidate_cache(self) -> None:

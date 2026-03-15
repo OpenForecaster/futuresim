@@ -150,9 +150,23 @@ def prepare_restart_directory(source_dir: str, restart_day: str, output_dir: str
                 os.makedirs(dst_memory_dir, exist_ok=True)
                 
                 for mem_file in os.listdir(src_memory_dir):
-                    if mem_file.endswith(".txt"):
+                    # Support all memory formats:
+                    #   plain:      YYYY-MM-DD.txt
+                    #   structured: YYYY-MM-DD.yaml
+                    #   active:     YYYY-MM-DD.yaml + memo_YYYY-MM-DD.csv
+                    if mem_file.endswith(".txt") or mem_file.endswith(".yaml"):
                         try:
-                            file_date = date.fromisoformat(mem_file[:-4])  # Remove .txt
+                            file_date = date.fromisoformat(mem_file.rsplit(".", 1)[0])
+                            if file_date < restart_date:
+                                shutil.copy(
+                                    os.path.join(src_memory_dir, mem_file),
+                                    os.path.join(dst_memory_dir, mem_file)
+                                )
+                        except ValueError:
+                            continue
+                    elif mem_file.startswith("memo_") and mem_file.endswith(".csv"):
+                        try:
+                            file_date = date.fromisoformat(mem_file[len("memo_"):-len(".csv")])
                             if file_date < restart_date:
                                 shutil.copy(
                                     os.path.join(src_memory_dir, mem_file),
@@ -372,6 +386,7 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
         reasoning = agent_def.get('reasoning', defaults.get('reasoning', None))
         search_cutoff_days = agent_def.get('search_cutoff_days', defaults.get('search_cutoff_days', getattr(args, 'search_cutoff_days', 0)))
         enable_memory = agent_def.get('enable_memory', defaults.get('enable_memory', True))
+        memory_format = agent_def.get('memory_format', defaults.get('memory_format', 'structured'))
         singleans = agent_def.get('singleans', defaults.get('singleans', False))
         cheat_feedback = agent_def.get('cheat_feedback', defaults.get('cheat_feedback', getattr(args, 'cheat_feedback', False)))
         cheat_feedback_detail = agent_def.get('cheat_feedback_detail', defaults.get('cheat_feedback_detail', getattr(args, 'cheat_feedback_detail', 'full')))
@@ -418,6 +433,7 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
             max_submit_retries=max_retries,
             memory_dir=agent_dir,  # Per-agent memory directory
             enable_memory=enable_memory,
+            memory_format=memory_format,
             singleans=singleans,
             sampling_params={
                 'temperature': temperature,

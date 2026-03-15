@@ -4,17 +4,18 @@ BasicAgent: Main agent class for LLM-based forecasting.
 Uses chain-of-thought with <reasoning> and <action type="..."> tags.
 """
 
+import re
 from datetime import date, timedelta
 from typing import List, Dict, Any, Optional, Tuple
 
 from agents.base import BaseAgent
-from agents.utils.forecast_parser import parse_action, extract_memory, extract_memory_ops
+from agents.utils.forecast_parser import parse_action, extract_memory, extract_memory_ops, extract_memo_ops
 from agents.utils.timing import AgentTimer
 from environment.interfaces import PredictionSubmission
 
 from .config import AgentConfig
 from .memory import BasicMemory
-from agents.utils.memory import StructuredMemory
+from agents.utils.memory import StructuredMemory, ActiveMemory
 from .query import QueryHandler
 from .search import SearchHandler
 from .feedback import FeedbackHandler
@@ -51,7 +52,9 @@ class BasicAgent(BaseAgent):
         
         # Handlers
         if self.config.enable_memory:
-            if self.config.memory_format == "structured":
+            if self.config.memory_format == "active":
+                self._memory = ActiveMemory(agent_id, self.config.memory_dir)
+            elif self.config.memory_format == "structured":
                 self._memory = StructuredMemory(agent_id, self.config.memory_dir)
             else:
                 self._memory = BasicMemory(agent_id, self.config.memory_dir)
@@ -87,7 +90,8 @@ class BasicAgent(BaseAgent):
         # Start timing for the day
         self._timer.reset()
         self._timer.start_day()
-        
+        self._day_qids = set()  # Track QIDs the agent interacts with today
+
         # Load memory for this date (loads most recent snapshot before current_date)
         if self._memory is not None:
             self._memory.set_date(current_date)
@@ -183,7 +187,11 @@ class BasicAgent(BaseAgent):
             self._timer.record_cost(usage.get("cost", 0), "llm")
 
             messages.append({"role": "assistant", "content": response})
-            
+
+            # Track QIDs mentioned in reasoning/code (for active memory expansion)
+            if hasattr(self, '_day_qids'):
+                self._day_qids.update(re.findall(r'(?:qid|QID)\W{0,10}(\d+)', response))
+
             # Parse and handle the action
             parsed = parse_action(response, self.config.max_outcomes_per_question)
             
@@ -223,8 +231,11 @@ class BasicAgent(BaseAgent):
         actions_remaining -= 1
         
         if parsed.code:
+            extra_ctx = None
+            if isinstance(self._memory, ActiveMemory):
+                extra_ctx = {"memo_df": self._memory.get_memo_df()}
             with self._timer.track("df_query"):
-                result, error = self._query_handler.execute(parsed.code)
+                result, error = self._query_handler.execute(parsed.code, extra_context=extra_ctx)
             self._log_action(forecast_interface, messages, response, "query", actions_remaining, qid=qid, reasoning=reasoning)
             
             if error:
@@ -319,6 +330,8 @@ class BasicAgent(BaseAgent):
             
             # Include submitted qids in log metadata
             submitted_qids = [f['qid'] for f in submitted]
+            if hasattr(self, '_day_qids'):
+                self._day_qids.update(str(q) for q in submitted_qids)
             self._log_action(forecast_interface, messages, response, "submit", 
                            actions_remaining, qid=log_qid, submitted_qids=submitted_qids,
                            num_forecasts=len(submitted), dropped_forecasts=dropped_forecasts, reasoning=reasoning)
@@ -535,7 +548,32 @@ Example (if options are ["Candidate A", "Candidate B", "Candidate C"]):
         memory_section = ""
         if self._memory is not None:
             memory_content = self._memory.get()
-            if memory_content:
+            if isinstance(self._memory, ActiveMemory):
+                # Active memory: meta-insights inline + memo_df documentation
+                meta_part = ""
+                if memory_content:
+                    meta_part = f"""### Meta-Insights ({self._memory.entry_count} entries)
+<memory>
+{memory_content}
+</memory>
+
+"""
+                memo_count = self._memory.memo_count
+                memory_section = f"""## YOUR MEMORY
+{meta_part}### Question-Specific Memory (memo_df: {memo_count} entries)
+You have a DataFrame `memo_df` with your question-specific notes (reasoning, evidence, confidence).
+Query it using the "query" action alongside `df`. Both DataFrames are available in the same sandbox.
+Columns: qid (str), question (str), last_updated (str), memory (str), confidence (float), category (str)
+
+Example:
+```python
+print(memo_df[memo_df['category'] == 'sports'][['qid', 'memory']].head())
+```
+
+Use meta-insights and memo_df to inform today's forecasts. Entry IDs in brackets (e.g. [a1b2c3d4]) can be used to delete stale meta-insight entries at end of day.
+
+"""
+            elif memory_content:
                 if isinstance(self._memory, StructuredMemory):
                     memory_section = f"""## YOUR MEMORY ({self._memory.entry_count} entries)
 <memory>
@@ -614,11 +652,10 @@ Column descriptions:
 ## CODE EXECUTION ENVIRONMENT
 Your Python code runs in a sandbox with these variables pre-defined:
 - `df`: the pandas DataFrame
-- `pd`: pandas module  
+- `pd`: pandas module
 - `today`: date object for {current_date}
 - `date`, `datetime`, `timedelta`: from datetime module
-
-Import statements are not available. Standard builtins (len, str, int, float, min, max, sum, sorted, range, etc.) are available.
+{('- `memo_df`: your question-specific memory DataFrame (query with print())' + chr(10)) if isinstance(self._memory, ActiveMemory) else ''}Import statements are not available. Standard builtins (len, str, int, float, min, max, sum, sorted, range, etc.) are available.
 
 ## RESPONSE FORMAT
 Every response must have <reasoning> followed by exactly ONE <action> block.
@@ -684,7 +721,9 @@ You have {self.config.max_actions} actions available. Begin."""
         For StructuredMemory: uses add/delete operations on individual entries.
         For BasicMemory (legacy): uses full replacement via <memory> tags.
         """
-        if isinstance(self._memory, StructuredMemory):
+        if isinstance(self._memory, ActiveMemory):
+            memory_prompt = self._build_active_memory_prompt(current_date, day_qids=getattr(self, '_day_qids', None))
+        elif isinstance(self._memory, StructuredMemory):
             memory_prompt = self._build_structured_memory_prompt(current_date)
         else:
             memory_prompt = self._build_plain_memory_prompt(current_date)
@@ -713,7 +752,9 @@ You have {self.config.max_actions} actions available. Begin."""
             {"phase": "memory_update", "current_memory_len": len(self._memory), "reasoning": reasoning}
         )
 
-        if isinstance(self._memory, StructuredMemory):
+        if isinstance(self._memory, ActiveMemory):
+            self._apply_active_memory_ops(response, current_date)
+        elif isinstance(self._memory, StructuredMemory):
             self._apply_structured_memory_ops(response)
         else:
             new_memory = extract_memory(response)
@@ -799,3 +840,105 @@ Current memory length: {len(self._memory)} characters"""
             old_memory = extract_memory(response)
             if old_memory is not None:
                 self._memory.update(old_memory)
+
+    # =========================================================================
+    # Active Memory (memo_df + reduced meta-insights)
+    # =========================================================================
+
+    def _build_active_memory_prompt(self, current_date: date, day_qids: set = None) -> str:
+        """Build the active memory update prompt (memo_df + meta-insights)."""
+        memo_summary = self._memory.memo_summary(expanded_qids=day_qids)
+        meta_content = self._memory.get()
+        meta_section = ""
+        if meta_content:
+            meta_section = f"""Current meta-insight entries:
+<memory>
+{meta_content}
+</memory>
+
+"""
+        return f"""End of day {current_date}. You can now update your memory.
+
+Your memory has two layers, both retained between days. Everything else resets.
+Tomorrow you get: search over news articles and the DataFrame (active question predictions, resolved question ground truths, your final predictions on resolved questions).
+
+## 1. QUESTION-SPECIFIC NOTES (memo_df: {self._memory.memo_count} entries)
+
+Current entries:
+{memo_summary}
+
+Store question-specific reasoning, evidence, and confidence. Be concise — max 500 chars per entry.
+Only store what is NOT recoverable from the DataFrame or search (e.g., your reasoning, hard-to-find evidence, calibration notes for specific questions).
+
+Add or update entries (you may add/update as many as needed):
+<memo_add>
+qid: Q123
+question: Will X happen by Y?
+memory: Your reasoning and key evidence (max 500 chars)
+confidence: 0.7
+category: politics
+</memo_add>
+
+Update an existing entry (only changed fields needed alongside memory):
+<memo_update qid="Q123">
+memory: Updated reasoning with new evidence (max 500 chars)
+confidence: 0.8
+</memo_update>
+
+Delete a stale entry:
+<memo_delete qid="Q123"/>
+
+## 2. META-INSIGHTS ({self._memory.entry_count}/15 entries, {len(self._memory)} chars)
+
+Cross-question patterns and calibration notes. NOT for question-specific reasoning (use memo_df for that).
+{meta_section}Update meta-insights:
+<memory_add>
+name: Short descriptive title (max 150 chars)
+type: reasoning|calibration|insight|fact
+qids: Q72, Q108 (comma-separated, or leave empty)
+content: Your content here (max 400 chars). Focus on cross-question patterns.
+</memory_add>
+
+<memory_delete>ENTRY_ID_HERE</memory_delete>
+
+First reflect on today's session, then update both layers as needed:
+<reasoning>
+Reflect on today's forecasting session...
+</reasoning>
+
+If no updates needed, just output <reasoning>...</reasoning> without any memory tags."""
+
+    def _apply_active_memory_ops(self, response: str, current_date: date) -> None:
+        """Apply active memory operations from agent response."""
+        # Parse memo_df operations
+        memo_adds, memo_updates, memo_deletes = extract_memo_ops(response)
+
+        for qid in memo_deletes:
+            self._memory.memo_delete(qid)
+        for add in memo_adds:
+            self._memory.memo_add(
+                qid=add["qid"],
+                question=add.get("question", ""),
+                memory=add["memory"],
+                confidence=add.get("confidence"),
+                category=add.get("category", ""),
+            )
+        for upd in memo_updates:
+            self._memory.memo_update(
+                qid=upd["qid"],
+                memory=upd["memory"],
+                confidence=upd.get("confidence"),
+                category=upd.get("category"),
+            )
+
+        # Parse meta-insight operations (reuse existing parser)
+        meta_adds, meta_deletes = extract_memory_ops(response)
+        for entry_id in meta_deletes:
+            self._memory.delete_entry(entry_id)
+        for add in meta_adds:
+            self._memory.add_entry(
+                add["name"], add["type"], add.get("qids", ""), add["content"]
+            )
+
+        # Persist both layers
+        self._memory.save(current_date)

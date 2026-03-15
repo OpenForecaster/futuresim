@@ -1,17 +1,9 @@
-# Memory A/B test: MEMORY ENABLED restart.
-# Restarts from shared warmup run with enable_memory=true (default).
-#
-# Before using: replace <WARMUP_RUN_DIR> with the actual output directory
-# from the warmup-only run (allq_warmup_only_aisa).
+# Active memory full run: memo_df + reduced structured meta-insights.
 #
 # Usage: python aisa_scripts/run_sim/submit_sim_aisa.py --config configs/allq_mem_restart_aisa.yaml --runs 1 --gpus 1 --memory 80 --time 2-00:00:00
 
-# --- Restart ---
-restart_from: "/mnt/nfs/home/ac146091/forecast-sim/logs/current_sim/allq_warmup_only_aisa_r00/26-02-22-00-17-36"
-restart_from_day: "2025-04-25"
-
 # --- Simulation Meta ---
-sim_name: "allq_mem_deepseek_aisa"
+sim_name: "allq_active_mem_deepseek_aisa"
 start_date: "2025-05-01"
 end_date: "2025-08-23"
 lookback_days: 7
@@ -43,19 +35,20 @@ rate_limit: 32.0
 parallel: true
 
 # --- Cheat Feedback (privileged directional-correctness before memory update) ---
-cheat_feedback: true
-cheat_feedback_detail: "direction"  # "full" (Brier scores) or "direction" (labels only)
+# cheat_feedback: true
+# cheat_feedback_detail: "direction"  # "full" (Brier scores) or "direction" (labels only)
 
 # --- Agents Configuration ---
 defaults:
   provider: "openrouter"
   scaffold: "allQ"
-  max_actions: 10
+  max_actions: 20
   warmup_max_actions: 10
   temperature: 0.7
   max_tokens: 2048
   max_retries: 3
   enable_memory: true
+  memory_format: "active"
 
 agents:
   - model: "deepseek/deepseek-v3.2"
