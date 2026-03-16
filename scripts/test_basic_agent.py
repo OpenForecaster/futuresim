@@ -261,6 +261,7 @@ def create_inference_provider(provider: str, model: str, args):
             model,
             max_model_len=agent_max_model_len,
             gpu_memory_utilization=getattr(args, "vllm_gpu_mem", 0.3),
+            timeout=getattr(args, "vllm_request_timeout", 120.0),
             max_num_seqs=getattr(args, "vllm_max_num_seqs", 8),
             tensor_parallel_size=getattr(args, "vllm_tensor_parallel_size", 1),
             data_parallel_size=getattr(args, "vllm_data_parallel_size", 1),
@@ -710,6 +711,8 @@ def main():
                        help="Optional vLLM all-to-all backend (e.g. allgather_reducescatter, deepep_high_throughput)")
     parser.add_argument("--vllm_startup_timeout", type=float, default=300.0,
                        help="vLLM server startup timeout in seconds (default 300)")
+    parser.add_argument("--vllm_request_timeout", type=float, default=120.0,
+                       help="vLLM request timeout in seconds for chat/embeddings calls (default 120)")
     parser.add_argument("--vllm_enable_tools", action="store_true", default=False,
                        help="Start vLLM servers with tool-calling enabled (required for native Qwen tool calls)")
     parser.add_argument("--vllm_tool_call_parser", default=None,
@@ -1004,6 +1007,7 @@ def main():
             matcher_max_model_len = args.max_model_len
         matcher_provider = VLLMInference(args.matcher, max_model_len=matcher_max_model_len, 
                                           gpu_memory_utilization=args.matcher_gpu_mem,
+                                          timeout=getattr(args, "vllm_request_timeout", 120.0),
                                           max_num_seqs=getattr(args, "vllm_max_num_seqs", 8),
                                           startup_timeout=getattr(args, "vllm_startup_timeout", 300.0),
                                           rope_scaling=matcher_rope_scaling,
@@ -1044,6 +1048,7 @@ def main():
                     args.embedding_model,
                     max_model_len=embedding_max_model_len,
                     gpu_memory_utilization=args.embedding_gpu_mem,
+                    timeout=getattr(args, "vllm_request_timeout", 120.0),
                     max_num_seqs=getattr(args, "vllm_max_num_seqs", 8),
                     startup_timeout=getattr(args, "vllm_startup_timeout", 300.0),
                     rope_scaling=embedding_rope_scaling,
@@ -1109,6 +1114,7 @@ def main():
                 args.model_path,
                 max_model_len=agent_max_model_len,
                 gpu_memory_utilization=getattr(args, "vllm_gpu_mem", 0.3),
+                timeout=getattr(args, "vllm_request_timeout", 120.0),
                 max_num_seqs=getattr(args, "vllm_max_num_seqs", 8),
                 tensor_parallel_size=getattr(args, "vllm_tensor_parallel_size", 1),
                 data_parallel_size=getattr(args, "vllm_data_parallel_size", 1),

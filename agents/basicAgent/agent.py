@@ -705,7 +705,7 @@ Note: "to" date is capped at {cutoff_desc} (no future leakage).
 {self._search_results_description()}
 You can use search to gather evidence before submitting forecasts.
 """
-            search_advice = """
+            search_advice = f"""
 
 You have access to a news article database. {self._search_results_description()}"""
         

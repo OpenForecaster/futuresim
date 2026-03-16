@@ -51,6 +51,7 @@ embedding_max_model_len: 32768
 # --- vLLM Agent Runtime ---
 vllm_gpu_mem: 0.85
 vllm_tensor_parallel_size: 2
+vllm_request_timeout: 300
 vllm_enable_tools: false
 language_model_only: true
 

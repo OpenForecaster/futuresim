@@ -35,7 +35,7 @@ resources:
 # --- Data Paths ---
 dataset: "openforesight"
 dataset_path: "${FSIM_DATASET_PATH}"
-dataset_cache: "${FSIM_DATASET_CACHE}"
+dataset_cache: null
 min_forecasters: 10
 resolved_only: true
 output_base: "${FSIM_OUTPUT_BASE}"

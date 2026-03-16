@@ -1,5 +1,6 @@
 from agents.basicAgent import AgentConfig, BasicAgent
 from agents.gptossAgent.tools import build_action_tools as build_gptoss_tools
+from agents.qwenAgent import QwenBasicAgent
 from agents.qwenAgent.tools import build_action_tools as build_qwen_tools
 from agents.utils.budget import BudgetSettings, BudgetTracker
 
@@ -121,3 +122,17 @@ def test_search_tool_descriptions_mention_chunk_limits():
     assert "roughly 321 tokens long" in gptoss_search["description"]
     assert "up to 7 retrieved article chunks" in qwen_search["function"]["description"]
     assert "roughly 321 tokens long" in qwen_search["function"]["description"]
+
+
+def test_qwen_logging_payload_includes_full_messages_and_tools():
+    payload = QwenBasicAgent._build_model_input_for_logging(
+        messages=[
+            {"role": "user", "content": "initial"},
+            {"role": "tool", "name": "search_news", "tool_call_id": "call_1", "content": "SEARCH RESULTS"},
+        ],
+        tools=[{"function": {"name": "submit_forecasts"}}],
+    )
+
+    assert '"role": "tool"' in payload
+    assert '"content": "SEARCH RESULTS"' in payload
+    assert '"name": "submit_forecasts"' in payload

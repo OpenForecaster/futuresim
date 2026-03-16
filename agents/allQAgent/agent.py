@@ -555,7 +555,7 @@ Key Mechanics:
         submit_num = 1
         if self._search_handler.is_available:
              submit_num = 2
-             search_section = """
+             search_section = f"""
 ### 1. Search News Articles
 <action type="search">
 your search query here

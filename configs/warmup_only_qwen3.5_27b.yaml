@@ -52,6 +52,7 @@ embedding_max_model_len: 32768
 vllm_gpu_mem: 0.85
 vllm_tensor_parallel_size: 2
 vllm_startup_timeout: 900
+vllm_request_timeout: 300
 vllm_enable_tools: true
 vllm_tool_call_parser: "qwen3_coder"
 language_model_only: true

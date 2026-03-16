@@ -132,6 +132,7 @@ class QwenBasicAgent(BasicAgent):
                 submit_only = [t for t in tools if t.get("function", {}).get("name") == "submit_forecasts"]
                 if submit_only:
                     effective_tools = submit_only
+            model_input_payload = self._build_model_input_for_logging(messages=messages, tools=effective_tools)
 
             try:
                 with self._timer.track("llm"):
@@ -161,6 +162,7 @@ class QwenBasicAgent(BasicAgent):
                     budget=budget,
                     qid=target_qid,
                     error=str(e),
+                    prompt_override=model_input_payload,
                 )
                 messages.append(
                     {
@@ -207,6 +209,7 @@ class QwenBasicAgent(BasicAgent):
                 finish_reason=finish_reason,
                 usage=usage,
                 reasoning_tokens=reasoning_tokens_turn,
+                prompt_override=model_input_payload,
             )
 
             if parsed is None:
@@ -339,6 +342,14 @@ class QwenBasicAgent(BasicAgent):
         if "prompt_tokens_details" not in usage and "input_tokens_details" in usage:
             usage["prompt_tokens_details"] = usage.get("input_tokens_details")
         return usage
+
+    @staticmethod
+    def _build_model_input_for_logging(*, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]]) -> str:
+        payload = {
+            "messages": messages,
+            "tools": tools,
+        }
+        return json.dumps(payload, ensure_ascii=False)
 
     @staticmethod
     def _append_assistant_message(*, messages: List[Dict[str, Any]], assistant_message: Dict[str, Any]) -> None:
@@ -570,17 +581,19 @@ class QwenBasicAgent(BasicAgent):
         phase: str,
         budget: Optional[BudgetTracker] = None,
         qid: Optional[str] = None,
+        prompt_override: Optional[str] = None,
         **extra,
     ) -> None:
-        last_user = ""
-        for m in reversed(messages):
-            if m.get("role") == "user":
-                content = m.get("content")
-                if isinstance(content, str):
-                    last_user = content
-                else:
-                    last_user = str(content)
-                break
+        last_user = prompt_override if isinstance(prompt_override, str) else ""
+        if not last_user:
+            for m in reversed(messages):
+                if m.get("role") == "user":
+                    content = m.get("content")
+                    if isinstance(content, str):
+                        last_user = content
+                    else:
+                        last_user = str(content)
+                    break
         metadata = {"phase": phase, "qid": qid, **extra}
         if budget is not None:
             metadata.update(budget.metadata())

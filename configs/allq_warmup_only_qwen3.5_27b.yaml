@@ -1,4 +1,4 @@
-# Warmup-only run using local Qwen3.5-27B via vLLM.
+# Warmup-only run using local Qwen3.5-27B via vLLM with the Qwen-native AllQ scaffold.
 # Runs Day 0 warmup + 2 loop days, then stops.
 # Use the output directory as restart_from for the mem/nomem restart configs.
 #
@@ -8,7 +8,7 @@
 run_script: "run_sim.sh"
 
 # --- Simulation Meta ---
-sim_name: "allq_warmup_only_qwen3.5-27b"
+sim_name: "qwenallq_warmup_only_qwen3.5-27b"
 start_date: "2025-05-01"
 end_date: "2025-04-25"       # Minimal loop: warmup day (04-24) + 1 day (04-25)
 lookback_days: 7
@@ -52,7 +52,10 @@ embedding_max_model_len: 32768
 vllm_gpu_mem: 0.85
 vllm_tensor_parallel_size: 2
 vllm_max_num_seqs: 64
-vllm_enable_tools: false
+vllm_startup_timeout: 900
+vllm_request_timeout: 300
+vllm_enable_tools: true
+vllm_tool_call_parser: "qwen3_coder"
 language_model_only: true
 
 # --- Local 3-GPU Pinning ---
@@ -67,7 +70,7 @@ parallel: true
 # --- Agents Configuration ---
 defaults:
   provider: "vllm"
-  scaffold: "allQ"
+  scaffold: "qwenallq"
   max_actions: 50
   warmup_max_actions: 20
   temperature: 0.7
