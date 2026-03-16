@@ -38,20 +38,9 @@ from datetime import datetime, date
 # Add project root to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-# Load .env file if exists
-env_path = os.path.join(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')), '.env')
-if os.path.exists(env_path):
-    print(f"Loading environment from {env_path}")
-    with open(env_path, 'r') as f:
-        for line in f:
-            line = line.strip()
-            if line and not line.startswith('#') and '=' in line:
-                key, value = line.split('=', 1)
-                key = key.strip()
-                # Keep values already exported by launcher scripts and only fill gaps.
-                # Expand simple env references (e.g. $HOME) for direct Python runs.
-                parsed_value = os.path.expandvars(value.strip().strip('"').strip("'"))
-                os.environ.setdefault(key, parsed_value)
+from pathing import REPO_ROOT, expand_env_tree, load_repo_env, raise_for_unresolved_env_vars
+
+load_repo_env(REPO_ROOT)
 
 from environment.env import SimulationEnvironment, SimForecastInterface
 from agents.basicAgent import BasicAgent, AgentConfig
@@ -62,9 +51,12 @@ from agents.qwenAgent import QwenBasicAgent, QwenAllQAgent
 
 
 # Default paths
-DATASET_PATH = "/is/cluster/fast/sgoel/forecasting/qs/OpenForesight/data/"
-MODEL_PATH = "/is/cluster/fast/rolmedo/models/qwen3-4b-it-2507"
-CURRENT_SIM_DIR = "/is/cluster/fast/sgoel/forecasting/current_sim"
+DATASET_PATH = os.getenv("FSIM_DATASET_PATH", "/is/cluster/fast/sgoel/forecasting/qs/OpenForesight/data/")
+DATASET_CACHE = os.getenv("FSIM_DATASET_CACHE", "/is/cluster/fast/sgoel/forecasting/qs/cache")
+MODEL_PATH = os.getenv("FSIM_DEFAULT_MODEL_PATH", "/is/cluster/fast/rolmedo/models/qwen3-4b-it-2507")
+CURRENT_SIM_DIR = os.getenv("FSIM_OUTPUT_BASE", "/is/cluster/fast/sgoel/forecasting/current_sim")
+MATCHER_PATH = os.getenv("FSIM_MATCHER_MODEL", "/fast/rolmedo/models/qwen3-4b-it-2507")
+EMBEDDING_MODEL_PATH = os.getenv("FSIM_EMBEDDING_MODEL", "/is/cluster/fast/sgoel/models/Qwen3-Embedding-8B")
 
 
 class ThreadSafeLLM:
@@ -91,6 +83,12 @@ def save_config(output_dir: str, args: argparse.Namespace, extra: dict = None):
     with open(config_path, 'w') as f:
         json.dump(config, f, indent=2, default=str)
     print(f"Config saved to {config_path}")
+
+
+def _optional_int(value):
+    if value is None:
+        return None
+    return int(value)
 
 
 def prepare_restart_directory(source_dir: str, restart_day: str, output_dir: str) -> None:
@@ -245,7 +243,9 @@ def load_agents_config(config_path: str) -> dict:
         raise ImportError("PyYAML required for config files. Install with: pip install pyyaml")
     
     with open(config_path, 'r') as f:
-        return yaml.safe_load(f)
+        config = expand_env_tree(yaml.safe_load(f))
+    raise_for_unresolved_env_vars(config, f"agents config {config_path}")
+    return config
 
 
 def create_inference_provider(provider: str, model: str, args):
@@ -377,8 +377,49 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
         inference_provider = create_inference_provider(provider, model, args)
         
         # Build agent config with merged settings
-        max_actions = agent_def.get('max_actions', defaults.get('max_actions', args.max_actions))
-        warmup_max_actions = agent_def.get('warmup_max_actions', defaults.get('warmup_max_actions', getattr(args, 'warmup_max_actions', 10)))
+        max_actions = _optional_int(agent_def.get('max_actions', defaults.get('max_actions', args.max_actions)))
+        warmup_max_actions = _optional_int(
+            agent_def.get('warmup_max_actions', defaults.get('warmup_max_actions', getattr(args, 'warmup_max_actions', None)))
+        )
+        max_total_tokens = _optional_int(
+            agent_def.get('max_total_tokens', defaults.get('max_total_tokens', getattr(args, 'max_total_tokens', None)))
+        )
+        warmup_max_total_tokens = _optional_int(
+            agent_def.get(
+                'warmup_max_total_tokens',
+                defaults.get('warmup_max_total_tokens', getattr(args, 'warmup_max_total_tokens', None))
+            )
+        )
+        submit_reserve_tokens = _optional_int(
+            agent_def.get(
+                'submit_reserve_tokens',
+                defaults.get('submit_reserve_tokens', getattr(args, 'submit_reserve_tokens', 4096))
+            )
+        )
+        warmup_submit_reserve_tokens = _optional_int(
+            agent_def.get(
+                'warmup_submit_reserve_tokens',
+                defaults.get('warmup_submit_reserve_tokens', getattr(args, 'warmup_submit_reserve_tokens', None))
+            )
+        )
+        force_submit_threshold_tokens = _optional_int(
+            agent_def.get(
+                'force_submit_threshold_tokens',
+                defaults.get(
+                    'force_submit_threshold_tokens',
+                    getattr(args, 'force_submit_threshold_tokens', 8192),
+                )
+            )
+        )
+        warmup_force_submit_threshold_tokens = _optional_int(
+            agent_def.get(
+                'warmup_force_submit_threshold_tokens',
+                defaults.get(
+                    'warmup_force_submit_threshold_tokens',
+                    getattr(args, 'warmup_force_submit_threshold_tokens', None),
+                )
+            )
+        )
         warmup_parallelism = agent_def.get('warmup_parallelism', defaults.get('warmup_parallelism', getattr(args, 'warmup_parallelism', 20)))
         max_retries = agent_def.get('max_retries', defaults.get('max_retries', args.max_retries))
         temperature = agent_def.get('temperature', defaults.get('temperature', args.temperature))
@@ -429,6 +470,12 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
         agent_config = AgentConfig(
             max_actions=max_actions,
             warmup_max_actions=warmup_max_actions,
+            max_total_tokens=max_total_tokens,
+            warmup_max_total_tokens=warmup_max_total_tokens,
+            submit_reserve_tokens=submit_reserve_tokens,
+            warmup_submit_reserve_tokens=warmup_submit_reserve_tokens,
+            force_submit_threshold_tokens=force_submit_threshold_tokens,
+            warmup_force_submit_threshold_tokens=warmup_force_submit_threshold_tokens,
             warmup_parallelism=warmup_parallelism,
             max_submit_retries=max_retries,
             memory_dir=agent_dir,  # Per-agent memory directory
@@ -453,24 +500,8 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
         )
 
         # GPT-OSS Harmony tool calling: only when using vLLM + enable_tools + gpt-oss weights.
-        use_gptoss_harmony = (
-            provider == "vllm"
-            and bool(getattr(args, "vllm_enable_tools", False))
-            and ("gpt-oss" in str(model).lower())
-        )
-        use_qwen_native_tools = (
-            provider == "vllm"
-            and bool(getattr(args, "vllm_enable_tools", False))
-            and _is_qwen_model(model)
-        )
-
         if scaffold == 'basic':
-            if use_gptoss_harmony:
-                agent_cls = GPTOSSBasicAgent
-            elif use_qwen_native_tools:
-                agent_cls = QwenBasicAgent
-            else:
-                agent_cls = BasicAgent
+            agent_cls = BasicAgent
             agent = agent_cls(
                 agent_id=agent_id,
                 inference_provider=inference_provider,
@@ -479,12 +510,7 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
                 search_tool=search_tool
             )
         elif scaffold in ('allQ', 'allq'):
-            if use_gptoss_harmony:
-                agent_cls = GPTOSSAllQAgent
-            elif use_qwen_native_tools:
-                agent_cls = QwenAllQAgent
-            else:
-                agent_cls = AllQAgent
+            agent_cls = AllQAgent
             agent = agent_cls(
                 agent_id=agent_id,
                 inference_provider=inference_provider,
@@ -492,6 +518,40 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
                 model_name=model,
                 search_tool=search_tool,
                 start_date=args.sim_start_date  # Passed from create_agents call
+            )
+        elif scaffold == 'qwenbasic':
+            agent = QwenBasicAgent(
+                agent_id=agent_id,
+                inference_provider=inference_provider,
+                config=agent_config,
+                model_name=model,
+                search_tool=search_tool
+            )
+        elif scaffold == 'qwenallq':
+            agent = QwenAllQAgent(
+                agent_id=agent_id,
+                inference_provider=inference_provider,
+                config=agent_config,
+                model_name=model,
+                search_tool=search_tool,
+                start_date=args.sim_start_date
+            )
+        elif scaffold == 'gptossbasic':
+            agent = GPTOSSBasicAgent(
+                agent_id=agent_id,
+                inference_provider=inference_provider,
+                config=agent_config,
+                model_name=model,
+                search_tool=search_tool
+            )
+        elif scaffold == 'gptossallq':
+            agent = GPTOSSAllQAgent(
+                agent_id=agent_id,
+                inference_provider=inference_provider,
+                config=agent_config,
+                model_name=model,
+                search_tool=search_tool,
+                start_date=args.sim_start_date
             )
         elif scaffold == 'allqd':
             agent = AllQDailyAgent(
@@ -513,7 +573,8 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
             )
         else:
             raise ValueError(
-                f"Unknown scaffold: {scaffold}. Only 'basic', 'allQ', 'allqd', and 'og' are supported."
+                f"Unknown scaffold: {scaffold}. Only 'basic', 'allQ', 'allqd', 'og', "
+                "'qwenbasic', 'qwenallq', 'gptossbasic', and 'gptossallq' are supported."
             )
         
         agents.append(agent)
@@ -550,7 +611,7 @@ def main():
     parser.add_argument("--dataset_path", default=DATASET_PATH,
                        help="Path to local dataset (for openforesight)")
     parser.add_argument("--dataset_cache", 
-                       default="/is/cluster/fast/sgoel/forecasting/qs/cache",
+                       default=DATASET_CACHE,
                        help="Cache directory for fetched datasets")
     parser.add_argument("--output_base", default=CURRENT_SIM_DIR,
                        help="Base directory for simulation outputs")
@@ -572,8 +633,8 @@ def main():
                        help="Cheat feedback detail level: 'full' (Brier scores) or 'direction' (labels only)")
     
     # Single-agent settings (used when no config file)
-    parser.add_argument("--scaffold", choices=["basic", "allQ", "allq", "allqd", "og"], default="basic",
-                       help="Agent scaffold to use (default: basic)")
+    parser.add_argument("--scaffold", choices=["basic", "allQ", "allq", "allqd", "og", "qwenbasic", "qwenallq", "gptossbasic", "gptossallq"], default="basic",
+                       help="Agent scaffold to use (default: basic). Qwen/GPT-OSS variants must be selected explicitly.")
     parser.add_argument("--provider", choices=["vllm", "openrouter"], default="openrouter",
                        help="Inference provider: 'vllm' (local) or 'openrouter' (API)")
     parser.add_argument("--model_path", default=MODEL_PATH,
@@ -593,10 +654,22 @@ def main():
                        help="Run without LLM (for testing setup)")
     
     # Agent settings
-    parser.add_argument("--max_actions", type=int, default=10,
-                       help="Max actions per day (queries + submissions)")
-    parser.add_argument("--warmup_max_actions", type=int, default=10,
-                       help="Max actions per question during warmup phase (AllQAgent only)")
+    parser.add_argument("--max_actions", type=int, default=None,
+                       help="Optional action budget per day (queries + submissions)")
+    parser.add_argument("--warmup_max_actions", type=int, default=None,
+                       help="Optional action budget per question during warmup phase (AllQAgent only)")
+    parser.add_argument("--max_total_tokens", type=int, default=None,
+                       help="Optional total token budget per day/question loop (counts input + output tokens per LLM call)")
+    parser.add_argument("--warmup_max_total_tokens", type=int, default=None,
+                       help="Optional total token budget per warmup question loop")
+    parser.add_argument("--submit_reserve_tokens", type=int, default=4096,
+                       help="Reserved tokens to keep available for a final submit (default 4096)")
+    parser.add_argument("--warmup_submit_reserve_tokens", type=int, default=None,
+                       help="Optional warmup-specific submit reserve tokens")
+    parser.add_argument("--force_submit_threshold_tokens", type=int, default=8192,
+                       help="Force-submit once remaining token budget is at or below this threshold (default 8192)")
+    parser.add_argument("--warmup_force_submit_threshold_tokens", type=int, default=None,
+                       help="Optional warmup-specific force-submit threshold tokens")
     parser.add_argument("--warmup_parallelism", type=int, default=20,
                        help="Number of concurrent threads for warmup phase (default 20)")
     parser.add_argument("--max_retries", type=int, default=3,
@@ -658,13 +731,13 @@ def main():
     # Answer matching settings
     parser.add_argument("--matching", choices=["exact", "openrouter", "vllm"], default="vllm",
                        help="Answer matching mode: 'exact', 'openrouter', or 'vllm'")
-    parser.add_argument("--matcher", default="/fast/rolmedo/models/qwen3-4b-it-2507",
+    parser.add_argument("--matcher", default=MATCHER_PATH,
                        help="Matcher model: OpenRouter model ID or VLLM model path")
     
     # Search settings
     parser.add_argument("--search_db", default="",
                        help="Path to LanceDB directory for article search (optional)")
-    parser.add_argument("--embedding_model", default="/is/cluster/fast/sgoel/models/Qwen3-Embedding-8B",
+    parser.add_argument("--embedding_model", default=EMBEDDING_MODEL_PATH,
                        help="Path to embedding model for semantic search")
     parser.add_argument("--embedding_gpu_mem", type=float, default=0.4,
                        help="GPU memory fraction for embedding model (0.0-1.0, default 0.4)")
@@ -693,7 +766,8 @@ def main():
         print(f"Loading configuration from {args.config}")
         with open(args.config, 'r') as f:
             import yaml
-            config = yaml.safe_load(f)
+            config = expand_env_tree(yaml.safe_load(f))
+        raise_for_unresolved_env_vars(config, f"run config {args.config}")
             
         # Set defaults from config
         parser.set_defaults(**config)
@@ -712,7 +786,8 @@ def main():
         print(f"Loading configuration from {config_path}")
         
         with open(config_path, 'r') as f:
-            config = json.load(f)
+            config = expand_env_tree(json.load(f))
+        raise_for_unresolved_env_vars(config, f"resume config {config_path}")
             
         # Set defaults from config
         parser.set_defaults(**config)
@@ -1077,6 +1152,12 @@ def main():
         agent_config = AgentConfig(
             max_actions=args.max_actions,
             warmup_max_actions=args.warmup_max_actions,
+            max_total_tokens=args.max_total_tokens,
+            warmup_max_total_tokens=args.warmup_max_total_tokens,
+            submit_reserve_tokens=args.submit_reserve_tokens,
+            warmup_submit_reserve_tokens=args.warmup_submit_reserve_tokens,
+            force_submit_threshold_tokens=args.force_submit_threshold_tokens,
+            warmup_force_submit_threshold_tokens=args.warmup_force_submit_threshold_tokens,
             warmup_parallelism=args.warmup_parallelism,
             max_submit_retries=args.max_retries,
             memory_dir=agent_dir,
@@ -1096,24 +1177,8 @@ def main():
             cheat_feedback=getattr(args, 'cheat_feedback', False),
             cheat_feedback_detail=getattr(args, 'cheat_feedback_detail', 'full'),
         )
-        use_gptoss_harmony = (
-            args.provider == "vllm"
-            and bool(getattr(args, "vllm_enable_tools", False))
-            and ("gpt-oss" in str(model_name).lower())
-        )
-        use_qwen_native_tools = (
-            args.provider == "vllm"
-            and bool(getattr(args, "vllm_enable_tools", False))
-            and _is_qwen_model(model_name)
-        )
-
         if args.scaffold == 'basic':
-            if use_gptoss_harmony:
-                agent_cls = GPTOSSBasicAgent
-            elif use_qwen_native_tools:
-                agent_cls = QwenBasicAgent
-            else:
-                agent_cls = BasicAgent
+            agent_cls = BasicAgent
             agent = agent_cls(
                 agent_id=agent_id,
                 inference_provider=inference_provider,
@@ -1122,13 +1187,42 @@ def main():
                 search_tool=search_tool
             )
         elif args.scaffold in ['allQ', 'allq']:
-            if use_gptoss_harmony:
-                agent_cls = GPTOSSAllQAgent
-            elif use_qwen_native_tools:
-                agent_cls = QwenAllQAgent
-            else:
-                agent_cls = AllQAgent
+            agent_cls = AllQAgent
             agent = agent_cls(
+                agent_id=agent_id,
+                inference_provider=inference_provider,
+                config=agent_config,
+                model_name=model_name,
+                search_tool=search_tool,
+                start_date=sim_start
+            )
+        elif args.scaffold == 'qwenbasic':
+            agent = QwenBasicAgent(
+                agent_id=agent_id,
+                inference_provider=inference_provider,
+                config=agent_config,
+                model_name=model_name,
+                search_tool=search_tool
+            )
+        elif args.scaffold == 'qwenallq':
+            agent = QwenAllQAgent(
+                agent_id=agent_id,
+                inference_provider=inference_provider,
+                config=agent_config,
+                model_name=model_name,
+                search_tool=search_tool,
+                start_date=sim_start
+            )
+        elif args.scaffold == 'gptossbasic':
+            agent = GPTOSSBasicAgent(
+                agent_id=agent_id,
+                inference_provider=inference_provider,
+                config=agent_config,
+                model_name=model_name,
+                search_tool=search_tool
+            )
+        elif args.scaffold == 'gptossallq':
+            agent = GPTOSSAllQAgent(
                 agent_id=agent_id,
                 inference_provider=inference_provider,
                 config=agent_config,
@@ -1153,6 +1247,11 @@ def main():
                 model_name=model_name,
                 search_tool=search_tool,
                 start_date=sim_start
+            )
+        else:
+            raise ValueError(
+                f"Unknown scaffold: {args.scaffold}. Only 'basic', 'allQ', 'allqd', 'og', "
+                "'qwenbasic', 'qwenallq', 'gptossbasic', and 'gptossallq' are supported."
             )
         agents.append(agent)
         print(f"  Created agent: {agent_id}")

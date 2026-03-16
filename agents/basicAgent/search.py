@@ -21,6 +21,12 @@ class SearchHandler:
     @property
     def is_available(self) -> bool:
         return self._search_tool is not None and self._search_tool.is_available
+
+    @property
+    def chunk_tokens(self) -> Optional[int]:
+        if self._search_tool is None:
+            return None
+        return getattr(self._search_tool, "chunk_tokens", None)
     
     def set_date(self, current_date: date) -> None:
         self._current_date = current_date
@@ -85,6 +91,6 @@ class SearchHandler:
             if r.url:
                 lines.append(f"URL: {r.url}")
             lines.append("")
-            lines.append(r.snippet)  # Full chunk content (already 512 tokens max)
+            lines.append(r.snippet)  # Full chunk content; chunk size comes from the search backend config.
             lines.append("")
         return "\n".join(lines)

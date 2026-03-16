@@ -12,12 +12,12 @@ search_cutoff_days: 0
 split: "test"            
 
 # --- Data Paths ---
-dataset: "/is/cluster/fast/sgoel/forecasting/qs/OpenForesight/data/"
-output_base: "/is/cluster/fast/sgoel/forecasting/current_sim"
+dataset: ""
+output_base: "${FSIM_OUTPUT_BASE}"
 
 # --- Search Settings ---
-search_db: "/is/cluster/fast/sgoel/forecasting/news/deduped_articles/lance/Qwen3-Embedding-8B"
-embedding_model: "/is/cluster/fast/sgoel/models/Qwen3-Embedding-8B"
+search_db: "${FSIM_SEARCH_DB}"
+embedding_model: "${FSIM_EMBEDDING_MODEL}"
 embedding_gpu_mem: 0.7
 
 # --- Answer Matching ---

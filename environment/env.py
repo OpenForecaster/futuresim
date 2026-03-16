@@ -1125,10 +1125,13 @@ class SimulationEnvironment:
                 if agent_id in self.agent_snapshot_peer:
                     self.agent_snapshot_peer[agent_id] += peer_score
         
-        # Update cumulative time-weighted scores
+        # Count resolved snapshot predictions even if the time-weighted window is empty
+        # (e.g. warmup forecasts made after the official resolution date).
         per_agent_event: Dict[str, Dict[str, Any]] = {}
-        for agent_id, score in result.agent_scores.items():
+        event_agent_ids = set(final_snapshot) | set(result.agent_scores)
+        for agent_id in event_agent_ids:
             pred = final_snapshot.get(agent_id)
+            tw_peer = float(result.agent_scores.get(agent_id, 0.0))
             best_outcome, best_prob = self._get_top_outcome(pred)
             is_accurate = False
             if pred is not None:
@@ -1141,28 +1144,29 @@ class SimulationEnvironment:
 
             per_agent_event[agent_id] = {
                 "brier": raw_brier_scores.get(agent_id),
-                "tw_peer": float(score),
+                "tw_peer": tw_peer,
                 "best_outcome": best_outcome,
                 "best_prob": best_prob,
                 "is_accurate": bool(is_accurate),
             }
 
             if agent_id in self.agent_scores:
-                self.agent_scores[agent_id] += score
-                if pred is None:
-                    continue
+                self.agent_scores[agent_id] += tw_peer
 
-                self.agent_questions[agent_id] = self.agent_questions.get(agent_id, 0) + 1
-                self.agent_exp_acc_sum[agent_id] = self.agent_exp_acc_sum.get(agent_id, 0.0) + self._get_truth_probability_mass(
-                    pred,
-                    q.ground_truth_answer,
-                    question_id=q.qid,
-                    question_title=q.title
-                )
-                if is_accurate:
-                    self.agent_correct[agent_id] = self.agent_correct.get(agent_id, 0) + 1
-                else:
-                    self.agent_wrong[agent_id] = self.agent_wrong.get(agent_id, 0) + 1
+            if pred is None:
+                continue
+
+            self.agent_questions[agent_id] = self.agent_questions.get(agent_id, 0) + 1
+            self.agent_exp_acc_sum[agent_id] = self.agent_exp_acc_sum.get(agent_id, 0.0) + self._get_truth_probability_mass(
+                pred,
+                q.ground_truth_answer,
+                question_id=q.qid,
+                question_title=q.title
+            )
+            if is_accurate:
+                self.agent_correct[agent_id] = self.agent_correct.get(agent_id, 0) + 1
+            else:
+                self.agent_wrong[agent_id] = self.agent_wrong.get(agent_id, 0) + 1
                 
         self.logger.log_resolution(
             self.current_date, q.qid, 
@@ -1282,15 +1286,18 @@ class SimulationEnvironment:
                         raw_brier = record.get("raw_brier", {})
                         snapshot_peer = record.get("snapshot_peer", {})
                         
-                        # Add to cumulative scores
+                        # Restore snapshot-based metrics even when time-weighted scores were empty.
                         per_agent_event: Dict[str, Dict[str, Any]] = {}
-                        for aid, score in scores.items():
+                        event_agent_ids = set(final_snapshot) | set(scores) | set(raw_brier) | set(snapshot_peer)
+                        for aid in event_agent_ids:
+                            score = float(scores.get(aid, 0.0))
                             self.agent_scores[aid] = self.agent_scores.get(aid, 0.0) + score
-                            self.agent_questions[aid] = self.agent_questions.get(aid, 0) + 1
+
                             pred = final_snapshot.get(aid)
                             best_outcome, best_prob = self._get_top_outcome(pred)
                             is_accurate = False
                             if pred and ground_truth:
+                                self.agent_questions[aid] = self.agent_questions.get(aid, 0) + 1
                                 self.agent_exp_acc_sum[aid] = self.agent_exp_acc_sum.get(aid, 0.0) + self._get_truth_probability_mass(
                                     pred,
                                     ground_truth,
@@ -1315,10 +1322,10 @@ class SimulationEnvironment:
                                 elif score < 0:
                                     self.agent_wrong[aid] = self.agent_wrong.get(aid, 0) + 1
                                     is_accurate = False
-                            
+
                             per_agent_event[aid] = {
                                 "brier": raw_brier.get(aid),
-                                "tw_peer": float(score),
+                                "tw_peer": score,
                                 "best_outcome": best_outcome,
                                 "best_prob": best_prob,
                                 "is_accurate": bool(is_accurate),

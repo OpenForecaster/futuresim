@@ -14,18 +14,18 @@ split: "test"            # Dataset split: train, test, or validation
 # --- Data Paths ---
 # --- Data Paths ---
 dataset: "openforesight"  # Options: "openforesight", "metaculus_binary", "metaculus_mcq"
-dataset_path: "/is/cluster/fast/sgoel/forecasting/qs/OpenForesight/data/"  # For openforesight
-dataset_cache: "/is/cluster/fast/sgoel/forecasting/qs/cache"  # For cached sources
+dataset_path: "${FSIM_DATASET_PATH}"  # For openforesight
+dataset_cache: "${FSIM_DATASET_CACHE}"  # For cached sources
 # Metaculus Filtering
 min_forecasters: 0 # Minimum number of forecasters required
 resolved_only: false # Only load resolved questions
-output_base: "/is/cluster/fast/sgoel/forecasting/current_sim"
+output_base: "${FSIM_OUTPUT_BASE}"
 
 
 # --- Search Settings ---
 # Leave search_db empty to disable search
-search_db: "/is/cluster/fast/sgoel/forecasting/news/deduped_articles/lance/Qwen3-Embedding-8B"
-embedding_model: "/is/cluster/fast/sgoel/models/Qwen3-Embedding-8B"
+search_db: "${FSIM_SEARCH_DB}"
+embedding_model: "${FSIM_EMBEDDING_MODEL}"
 embedding_gpu_mem: 0.7
 
 # --- Answer Matching ---

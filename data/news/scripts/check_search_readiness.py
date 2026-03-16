@@ -19,7 +19,7 @@ from typing import Dict, Iterable, Optional, Set, Tuple
 import pyarrow.parquet as pq
 
 
-DEFAULT_NEWS_BASE = Path("/is/cluster/fast/sgoel/forecasting/news")
+DEFAULT_NEWS_BASE = Path(os.getenv("FSIM_NEWS_BASE", "/is/cluster/fast/sgoel/forecasting/news"))
 DEFAULT_PARQUET_DIR = DEFAULT_NEWS_BASE / "deduped_articles" / "data"
 DEFAULT_EMBEDDINGS_DIR = (
     DEFAULT_NEWS_BASE / "deduped_articles" / "embeddings" / "Qwen3-Embedding-8B"
@@ -213,4 +213,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

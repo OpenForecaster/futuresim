@@ -13,8 +13,19 @@ def build_action_tools(
     enable_query: bool,
     enable_search: bool,
     max_outcomes_per_question: int,
+    max_search_results: int = 5,
+    search_chunk_tokens: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     tools: List[Dict[str, Any]] = []
+    if search_chunk_tokens is None:
+        search_results_description = (
+            f"Search returns up to {max_search_results} retrieved article chunks."
+        )
+    else:
+        search_results_description = (
+            f"Search returns up to {max_search_results} retrieved article chunks, "
+            f"each roughly {search_chunk_tokens} tokens long."
+        )
 
     if enable_query:
         tools.append(
@@ -47,6 +58,7 @@ def build_action_tools(
                 "name": "search_news",
                 "description": (
                     "Search the news article database for evidence. "
+                    f"{search_results_description} "
                     "Example: search for 'Fed rate cut 2026 inflation'."
                 ),
                 "strict": True,

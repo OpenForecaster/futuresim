@@ -17,16 +17,16 @@ resolution_end: "2025-12-15"
 
 # --- Data Paths ---
 dataset: "openforesight"
-dataset_path: "nikhilchandak/OpenForesight"
-dataset_cache: "/mnt/nfs/datasets_ac/cache/huggingface/datasets"
+dataset_path: "${FSIM_DATASET_PATH}"
+dataset_cache: "${FSIM_DATASET_CACHE}"
 min_forecasters: 10
 resolved_only: true
-output_base: "logs/current_sim"
+output_base: "${FSIM_OUTPUT_BASE}"
 warmup_parallelism: 64
 
 # --- Search Settings ---
-search_db: "/mnt/nfs/datasets_ac/news/deduped_articles/lance/Qwen3-Embedding-8B"
-embedding_model: "/mnt/nfs/datasets_ac/models/Qwen3-Embedding-8B"
+search_db: "${FSIM_SEARCH_DB}"
+embedding_model: "${FSIM_EMBEDDING_MODEL}"
 embedding_gpu_mem: 0.7
 
 # --- Answer Matching ---

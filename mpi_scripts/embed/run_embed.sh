@@ -9,18 +9,29 @@ set -euo pipefail
 export PATH="/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 source ~/.bashrc 2>/dev/null || true
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
+export FSIM_REPO_DIR="${FSIM_REPO_DIR:-${REPO_DIR}}"
+
+if [ -f "${REPO_DIR}/.env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "${REPO_DIR}/.env"
+  set +a
+fi
+
 # Filelock fix for /is/cluster/fast
 export SOFT_FILELOCK=1
-export HF_HOME=/is/cluster/fast/sgoel/hfcache
+NEWS_BASE="${FSIM_NEWS_BASE:-/is/cluster/fast/sgoel/forecasting/news}"
+export HF_HOME="${FSIM_HF_HOME:-/is/cluster/fast/sgoel/hfcache}"
 
 # Paths
-REPO_DIR="/home/sgoel/forecast-sim"
-ARTICLES_DIR="/is/cluster/fast/sgoel/forecasting/news/deduped_articles/data"
-OUTPUT_DIR="/is/cluster/fast/sgoel/forecasting/news/deduped_articles/embeddings"
+ARTICLES_DIR="${FSIM_NEWS_ARTICLES_DIR:-${NEWS_BASE}/deduped_articles/data}"
+OUTPUT_DIR="${FSIM_NEWS_EMBEDDINGS_DIR:-${NEWS_BASE}/deduped_articles/embeddings}"
 
 # Model
 MODEL="Qwen3-Embedding-8B"
-MODEL_PATH="/is/cluster/fast/sgoel/models/Qwen3-Embedding-8B"
+MODEL_PATH="${FSIM_EMBEDDING_MODEL:-/is/cluster/fast/sgoel/models/Qwen3-Embedding-8B}"
 
 # Date range (2023 onwards)
 START_DATE="2023-01-01"
@@ -34,7 +45,7 @@ NUM_WORKERS=${2:-1}
 module load cuda/12.1
 
 # Activate environment
-source ~/forecast-sim/.venv/bin/activate
+source "${REPO_DIR}/.venv/bin/activate"
 cd "$REPO_DIR"
 
 echo "Starting embedding job..."

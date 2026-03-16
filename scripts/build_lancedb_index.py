@@ -81,7 +81,7 @@ def _has_fts_index(table, indices) -> bool:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--db_path", default="/is/cluster/fast/sgoel/forecasting/news/deduped_articles/lance/Qwen3-Embedding-8B")
+    parser.add_argument("--db_path", default=os.environ.get("FSIM_SEARCH_DB", "/is/cluster/fast/sgoel/forecasting/news/deduped_articles/lance/Qwen3-Embedding-8B"))
     parser.add_argument("--table_name", default="articles")
     parser.add_argument("--num_partitions", type=int, default=256, help="IVF partitions")
     parser.add_argument("--num_sub_vectors", type=int, default=64, help="PQ sub-vectors (must divide vector dim, e.g. 64 for 4096-dim)")
@@ -137,7 +137,7 @@ def main():
         "--tantivy_index_root",
         default=os.environ.get(
             "TANTIVY_INDEX_ROOT",
-            "/lustre/home/sgoel/forecasting/lancedb_tantivy_indices",
+            os.environ.get("FSIM_TANTIVY_INDEX_ROOT", "/lustre/home/sgoel/forecasting/lancedb_tantivy_indices"),
         ),
         help=(
             "Root directory for external Tantivy index data when DB path lacks lock support "

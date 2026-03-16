@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from agents.allQAgent.agent import AllQAgent
 from agents.basicAgent.agent import BasicAgent
+from agents.utils.budget import BudgetTracker
 from agents.gptossAgent.tools import extract_reasoning_token_count
 from agents.utils.forecast_parser import ParsedAction
 from environment.interfaces import PredictionSubmission
@@ -59,24 +60,26 @@ class QwenBasicAgent(BasicAgent):
         prefix = base_prompt
         if "## RESPONSE FORMAT" in base_prompt:
             prefix = base_prompt.split("## RESPONSE FORMAT", 1)[0].rstrip()
+        start_budget = self._build_start_budget_status()
+        start_block = f"\nBudget at start:\n{start_budget}\n\nBegin." if start_budget else "\nBegin."
 
         return (
             f"{prefix}\n\n"
             "## RESPONSE FORMAT\n"
             "Use function tools as defined in the tool schema. Call exactly one tool per turn.\n\n"
             "## INTERACTION FLOW\n"
-            f"You have {self.config.max_actions} actions per day. Each query/search/submit consumes 1 action.\n"
+            f"{self._build_budget_overview()}\n"
             "When ready to move on, call `next_day()`.\n\n"
             "## SUBMISSION RULES\n"
-            "- You may call `submit_forecasts` multiple times in a single day until actions run out.\n"
+            "- You may call `submit_forecasts` multiple times in a single day until the active loop budget runs out.\n"
             "- Each `submit_forecasts` call must include exactly one forecast for exactly one qid.\n"
             "- You may update earlier same-day forecasts by submitting again for the same qid.\n"
+            f"{start_block}"
         )
 
-    @staticmethod
-    def _build_final_submit_tool_instruction(target_qid: str) -> str:
+    def _build_final_submit_tool_instruction(self, target_qid: str, budget: BudgetTracker) -> str:
         return (
-            "FINAL ACTION (last chance): You have exactly 1 action remaining and MUST submit your best guess forecast now.\n"
+            f"{self._build_force_submit_preamble(budget)}\n"
             f"Target question ID: {target_qid}\n"
             "Call exactly one tool: submit_forecasts.\n"
             "Do NOT call query_df, search_news, or next_day.\n"
@@ -91,9 +94,13 @@ class QwenBasicAgent(BasicAgent):
         target_qid: Optional[str] = None,
         enable_query: bool = True,
         enable_search: Optional[bool] = None,
+        warmup_budget: bool = False,
         max_actions: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
-        actions_remaining = int(max_actions if max_actions is not None else self.config.max_actions)
+        budget = self._create_budget_tracker(
+            warmup=warmup_budget,
+            max_actions_override=max_actions,
+        )
         all_forecasts: List[Dict[str, Any]] = []
 
         if enable_search is None:
@@ -102,22 +109,24 @@ class QwenBasicAgent(BasicAgent):
             enable_query=enable_query,
             enable_search=enable_search,
             max_outcomes_per_question=self.config.max_outcomes_per_question,
+            max_search_results=self.config.max_search_results,
+            search_chunk_tokens=self._search_handler.chunk_tokens,
         )
 
         final_submit_prompt_injected = False
         final_submit_retry_used = False
 
-        while actions_remaining > 0:
-            if target_qid is not None and actions_remaining == 1 and not final_submit_prompt_injected:
+        while not budget.is_exhausted():
+            force_final_submit_turn = target_qid is not None and budget.should_force_submit()
+            if force_final_submit_turn and not final_submit_prompt_injected:
                 messages.append(
                     {
                         "role": "user",
-                        "content": self._build_final_submit_tool_instruction(target_qid),
+                        "content": self._build_final_submit_tool_instruction(target_qid, budget),
                     }
                 )
                 final_submit_prompt_injected = True
 
-            force_final_submit_turn = target_qid is not None and actions_remaining == 1
             effective_tools = tools
             if force_final_submit_turn:
                 submit_only = [t for t in tools if t.get("function", {}).get("name") == "submit_forecasts"]
@@ -142,27 +151,28 @@ class QwenBasicAgent(BasicAgent):
                 if force_final_submit_turn:
                     break
 
-                actions_remaining -= 1
+                budget.consume_action()
                 err_msg = f"LLM ERROR after retries: {e}"
                 self._log_qwen_action(
                     forecast_interface=forecast_interface,
                     messages=messages,
                     rendered_response=err_msg,
                     phase="llm_error",
-                    actions_remaining=actions_remaining,
+                    budget=budget,
                     qid=target_qid,
                     error=str(e),
                 )
                 messages.append(
                     {
                         "role": "user",
-                        "content": f"{err_msg}\n\nActions remaining: {actions_remaining}",
+                        "content": budget.format_feedback(err_msg),
                     }
                 )
                 continue
 
             usage = self._normalize_chat_usage(resp_json)
             self._timer.record_tokens(usage)
+            budget.record_usage(usage)
             reasoning_tokens_turn = extract_reasoning_token_count({"usage": usage})
 
             parsed, assistant_text, tool_calls = chat_response_to_action(resp_json)
@@ -192,7 +202,7 @@ class QwenBasicAgent(BasicAgent):
                 messages=messages,
                 rendered_response=rendered,
                 phase="llm",
-                actions_remaining=actions_remaining,
+                budget=budget,
                 qid=target_qid,
                 finish_reason=finish_reason,
                 usage=usage,
@@ -200,42 +210,39 @@ class QwenBasicAgent(BasicAgent):
             )
 
             if parsed is None:
-                actions_remaining -= 1
-                feedback = (
-                    "No tool call detected. You MUST call exactly one tool each turn.\n\n"
-                    f"Actions remaining: {actions_remaining}"
-                )
-                messages.append({"role": "user", "content": feedback})
+                budget.consume_action()
+                feedback = "No tool call detected. You MUST call exactly one tool each turn."
+                messages.append({"role": "user", "content": budget.format_feedback(feedback)})
                 continue
 
             if parsed.action_type == "next":
                 break
 
             if parsed.action_type == "query":
-                actions_remaining = self._qwen_handle_query(
+                self._qwen_handle_query(
                     messages=messages,
                     parsed=parsed,
                     tool_call=tool_calls[0] if tool_calls else None,
-                    actions_remaining=actions_remaining,
+                    budget=budget,
                 )
                 continue
 
             if parsed.action_type == "search":
-                actions_remaining = self._qwen_handle_search(
+                self._qwen_handle_search(
                     messages=messages,
                     parsed=parsed,
                     tool_call=tool_calls[0] if tool_calls else None,
-                    actions_remaining=actions_remaining,
+                    budget=budget,
                 )
                 continue
 
             if parsed.action_type == "submit":
-                actions_remaining, submitted = self._qwen_handle_submit(
+                submitted = self._qwen_handle_submit(
                     messages=messages,
                     forecast_interface=forecast_interface,
                     parsed=parsed,
                     tool_call=tool_calls[0] if tool_calls else None,
-                    actions_remaining=actions_remaining,
+                    budget=budget,
                     target_qid=target_qid,
                 )
                 all_forecasts.extend(submitted)
@@ -243,12 +250,12 @@ class QwenBasicAgent(BasicAgent):
                     break
                 continue
 
-            actions_remaining -= 1
+            budget.consume_action()
             err = parsed.error or "Unknown action/tool."
             messages.append(
                 {
                     "role": "user",
-                    "content": f"Invalid action: {err}\n\nActions remaining: {actions_remaining}",
+                    "content": budget.format_feedback(f"Invalid action: {err}"),
                 }
             )
 
@@ -381,26 +388,25 @@ class QwenBasicAgent(BasicAgent):
         messages: List[Dict[str, Any]],
         parsed: ParsedAction,
         tool_call: Optional[Dict[str, Any]],
-        actions_remaining: int,
-    ) -> int:
-        actions_remaining -= 1
+        budget: BudgetTracker,
+    ) -> None:
+        budget.consume_action()
         if parsed.code:
             with self._timer.track("df_query"):
                 result, error = self._query_handler.execute(parsed.code)
             if error:
-                feedback = f"QUERY ERROR: {error}\n\nActions remaining: {actions_remaining}"
+                feedback = f"QUERY ERROR: {error}"
             else:
-                feedback = f"QUERY RESULT:\n{result}\n\nActions remaining: {actions_remaining}"
+                feedback = f"QUERY RESULT:\n{result}"
         else:
-            feedback = f"QUERY ERROR: {parsed.error or 'Missing code'}\n\nActions remaining: {actions_remaining}"
+            feedback = f"QUERY ERROR: {parsed.error or 'Missing code'}"
 
         self._append_tool_output_message(
             messages,
             tool_call=tool_call,
             tool_name="query_df",
-            output=feedback,
+            output=budget.format_feedback(feedback),
         )
-        return actions_remaining
 
     def _qwen_handle_search(
         self,
@@ -408,28 +414,28 @@ class QwenBasicAgent(BasicAgent):
         messages: List[Dict[str, Any]],
         parsed: ParsedAction,
         tool_call: Optional[Dict[str, Any]],
-        actions_remaining: int,
-    ) -> int:
-        actions_remaining -= 1
+        budget: BudgetTracker,
+    ) -> None:
+        budget.consume_action()
         if not self._search_handler.is_available:
-            feedback = f"SEARCH ERROR: Search is not available.\n\nActions remaining: {actions_remaining}"
+            feedback = "SEARCH ERROR: Search is not available."
             self._append_tool_output_message(
                 messages,
                 tool_call=tool_call,
                 tool_name="search_news",
-                output=feedback,
+                output=budget.format_feedback(feedback),
             )
-            return actions_remaining
+            return
 
         if not parsed.query:
-            feedback = f"SEARCH ERROR: Missing query.\n\nActions remaining: {actions_remaining}"
+            feedback = "SEARCH ERROR: Missing query."
             self._append_tool_output_message(
                 messages,
                 tool_call=tool_call,
                 tool_name="search_news",
-                output=feedback,
+                output=budget.format_feedback(feedback),
             )
-            return actions_remaining
+            return
 
         min_date = None
         max_date = None
@@ -456,16 +462,15 @@ class QwenBasicAgent(BasicAgent):
                 max_date=max_date,
             )
         if error:
-            feedback = f"SEARCH ERROR: {error}\n\nActions remaining: {actions_remaining}"
+            feedback = f"SEARCH ERROR: {error}"
         else:
-            feedback = f"SEARCH RESULTS:\n{result}\n\nActions remaining: {actions_remaining}"
+            feedback = f"SEARCH RESULTS:\n{result}"
         self._append_tool_output_message(
             messages,
             tool_call=tool_call,
             tool_name="search_news",
-            output=feedback,
+            output=budget.format_feedback(feedback),
         )
-        return actions_remaining
 
     def _qwen_handle_submit(
         self,
@@ -474,10 +479,10 @@ class QwenBasicAgent(BasicAgent):
         forecast_interface,
         parsed: ParsedAction,
         tool_call: Optional[Dict[str, Any]],
-        actions_remaining: int,
+        budget: BudgetTracker,
         target_qid: Optional[str],
-    ) -> Tuple[int, List[Dict[str, Any]]]:
-        actions_remaining -= 1
+    ) -> List[Dict[str, Any]]:
+        budget.consume_action()
         submitted: List[Dict[str, Any]] = []
         submit_errors: List[str] = []
         dropped_forecasts = 0
@@ -505,8 +510,7 @@ class QwenBasicAgent(BasicAgent):
                 title = self._query_handler.get_question_title(sub["qid"])
                 title_str = f" ({title})" if title else ""
                 feedback = (
-                    f"Submitted forecast for qid={sub['qid']}{title_str}: {outcomes_str}. "
-                    f"Actions remaining: {actions_remaining}"
+                    f"Submitted forecast for qid={sub['qid']}{title_str}: {outcomes_str}."
                 )
                 if dropped_forecasts > 0:
                     feedback += (
@@ -515,17 +519,17 @@ class QwenBasicAgent(BasicAgent):
                     )
             else:
                 detail = "; ".join(submit_errors) if submit_errors else "Forecast submission failed."
-                feedback = f"SUBMIT ERROR: {detail}\n\nActions remaining: {actions_remaining}"
+                feedback = f"SUBMIT ERROR: {detail}"
         else:
-            feedback = f"SUBMIT ERROR: {parsed.error or 'No valid forecasts'}\n\nActions remaining: {actions_remaining}"
+            feedback = f"SUBMIT ERROR: {parsed.error or 'No valid forecasts'}"
 
         self._append_tool_output_message(
             messages,
             tool_call=tool_call,
             tool_name="submit_forecasts",
-            output=feedback,
+            output=budget.format_feedback(feedback),
         )
-        return actions_remaining, submitted
+        return submitted
 
     @staticmethod
     def _render_turn_for_logging(assistant_text: str, tool_calls: List[Dict[str, Any]]) -> str:
@@ -564,7 +568,7 @@ class QwenBasicAgent(BasicAgent):
         messages: List[Dict[str, Any]],
         rendered_response: str,
         phase: str,
-        actions_remaining: int,
+        budget: Optional[BudgetTracker] = None,
         qid: Optional[str] = None,
         **extra,
     ) -> None:
@@ -577,7 +581,9 @@ class QwenBasicAgent(BasicAgent):
                 else:
                     last_user = str(content)
                 break
-        metadata = {"phase": phase, "actions_remaining": actions_remaining, "qid": qid, **extra}
+        metadata = {"phase": phase, "qid": qid, **extra}
+        if budget is not None:
+            metadata.update(budget.metadata())
         forecast_interface.log_model_output(last_user, rendered_response, metadata)
 
 
@@ -604,16 +610,19 @@ class QwenAllQAgent(AllQAgent, QwenBasicAgent):
             forecast_interface=forecast_interface,
             target_qid=target_qid,
             enable_query=False,
-            max_actions=getattr(self.config, "warmup_max_actions", 10),
+            warmup_budget=True,
+            max_actions=self.config.warmup_max_actions,
         )
 
-    @staticmethod
-    def _rewrite_allq_warmup_prompt_for_qwen(base_prompt: str) -> str:
+    def _rewrite_allq_warmup_prompt_for_qwen(self, base_prompt: str) -> str:
         prefix = base_prompt
         if "## RESPONSE FORMAT" in base_prompt:
             prefix = base_prompt.split("## RESPONSE FORMAT", 1)[0].rstrip()
+        start_budget = self._build_start_budget_status(warmup=True)
+        start_block = f"\nBudget at start:\n{start_budget}" if start_budget else ""
         return (
             f"{prefix}\n\n"
             "## RESPONSE FORMAT\n"
             "Use function tools as defined in the tool schema. Call exactly one tool per turn.\n"
+            f"{start_block}\n"
         )

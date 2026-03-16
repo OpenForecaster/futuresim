@@ -12,6 +12,8 @@ from pathlib import Path
 import htcondor2 as htcondor
 
 JOB_BID = 15
+REPO_ROOT = Path(__file__).resolve().parents[3]
+NEWS_LOG_BASE = Path(os.getenv("FSIM_NEWS_LOG_BASE", str(REPO_ROOT / "logs" / "news")))
 
 def launch_dedup_job(
         jsonl_path: str,
@@ -22,14 +24,14 @@ def launch_dedup_job(
 ):
     """Launch HTCondor job to deduplicate JSONL files."""
     
-    LOG_PATH = "/fast/sgoel/logs/forecasting-sim/news/dedup"
+    LOG_PATH = str(NEWS_LOG_BASE / "dedup")
     
     log_dir = Path(LOG_PATH)
     os.makedirs(log_dir, exist_ok=True)
     
     cluster_job_log = str(log_dir / "$(Cluster).$(Process)")
     
-    executable = '/home/sgoel/forecast-sim/data/news/condor/run_dedup.sh'
+    executable = str(REPO_ROOT / "data" / "news" / "condor" / "run_dedup.sh")
     
     if job_memory is None:
         job_memory = job_cpus * 16

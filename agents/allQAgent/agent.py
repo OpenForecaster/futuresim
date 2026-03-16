@@ -5,6 +5,7 @@ import time
 from agents.basicAgent.agent import BasicAgent
 from agents.basicAgent.config import AgentConfig
 from agents.utils.forecast_parser import parse_action, parse_answer_probability, ParsedAction
+from agents.utils.budget import BudgetTracker
 
 class AllQAgent(BasicAgent):
     """
@@ -42,16 +43,16 @@ class AllQAgent(BasicAgent):
         )
         return any(marker in msg for marker in fatal_markers)
 
-    def _build_warmup_final_submit_instruction(self, target_qid: str) -> str:
+    def _build_warmup_final_submit_instruction(self, target_qid: str, budget: BudgetTracker) -> str:
         """
-        Build a strict, last-action instruction that forces a submission attempt.
-        This is injected as an extra user turn when only one action remains.
+        Build a strict final-submit instruction once the loop budget becomes binding.
 
         This is warmup-only and always targets a single question id.
         """
-        if getattr(self.config, "singleans", False):
+        preamble = self._build_force_submit_preamble(budget)
+        if self.config.singleans:
             return (
-                "FINAL ACTION (last chance): You have exactly 1 action remaining and must submit now.\n"
+                f"{preamble}\n"
                 f"Target question ID: {target_qid}\n"
                 "Do NOT search, query, or skip.\n"
                 "Respond ONLY with:\n"
@@ -61,21 +62,12 @@ class AllQAgent(BasicAgent):
             )
 
         return (
-            "FINAL ACTION (last chance): You have exactly 1 action remaining and must submit now.\n"
+            f"{preamble}\n"
             f"Target question ID: {target_qid}\n"
             "Do NOT use search, query, or next.\n"
             "Return exactly one submit action for this qid only:\n"
             f"<action type=\"submit\"><forecast qid=\"{target_qid}\">...</forecast></action>"
         )
-
-    @staticmethod
-    def _with_actions_remaining(content: str, actions_remaining: int) -> str:
-        """Ensure user-feedback messages explicitly carry the remaining-action count."""
-        if "Actions remaining:" in content:
-            return content
-        if content.endswith("\n"):
-            return f"{content}Actions remaining: {actions_remaining}"
-        return f"{content}\n\nActions remaining: {actions_remaining}"
 
     def warmup(self, forecast_interface, current_date: date) -> None:
         """
@@ -108,8 +100,24 @@ class AllQAgent(BasicAgent):
         from inference.vllm import VLLMInference
         if isinstance(self.inference, VLLMInference):
             print(f"[{self.agent_id}] Warming up agent vLLM server before parallel warmup...")
-            # Fail fast: if startup/warmup fails, abort instead of spending hours on retries.
-            self.inference.chat([{"role": "user", "content": "ping"}], {"temperature": 0.0, "max_tokens": 1})
+            # Fail fast: do not fan out 64 warmup threads until a real generation succeeds.
+            probe_messages = [{"role": "user", "content": "ping"}]
+            probe_params = {"temperature": 0.0, "max_tokens": 1}
+            probe_response = ""
+            for attempt in range(3):
+                probe_response, _ = self.inference.chat(probe_messages, probe_params)
+                if probe_response and probe_response.strip():
+                    break
+                if attempt < 2:
+                    print(
+                        f"[{self.agent_id}] Initial vLLM probe returned empty output; retrying ({attempt + 1}/3)...",
+                        flush=True,
+                    )
+                    time.sleep(5)
+            if not probe_response or not probe_response.strip():
+                raise RuntimeError(
+                    "Initial vLLM warmup probe failed; aborting before parallel warmup."
+                )
         
         # Parallel execution for warmup
         from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -299,20 +307,19 @@ Output exactly one <memo_add> block. No other text needed."""
         - Submit MUST be for target_qid (enforced by prompt mostly, but logic handles generic submit)
         - All actions are tagged with target_qid for searchable logs
         """
-        actions_remaining = self.config.warmup_max_actions
+        budget = self._create_budget_tracker(warmup=True)
         final_submit_prompt_injected = False
         final_submit_retry_used = False
         empty_retries = 0
         max_empty_retries = 2  # retry up to 2 times on empty responses mid-loop
 
-        while actions_remaining > 0:
-            is_final_turn = actions_remaining == 1
-            # Last-action guardrail: explicitly force a submit attempt.
-            if is_final_turn and not final_submit_prompt_injected:
+        while not budget.is_exhausted():
+            force_submit_turn = budget.should_force_submit()
+            if force_submit_turn and not final_submit_prompt_injected:
                 messages.append(
                     {
                         "role": "user",
-                        "content": self._build_warmup_final_submit_instruction(target_qid),
+                        "content": self._build_warmup_final_submit_instruction(target_qid, budget),
                     }
                 )
                 final_submit_prompt_injected = True
@@ -322,7 +329,7 @@ Output exactly one <memo_add> block. No other text needed."""
                 response, usage = self.inference.chat(messages, self.config.sampling_params)
 
             if not response or not response.strip():
-                if is_final_turn and not final_submit_retry_used:
+                if force_submit_turn and not final_submit_retry_used:
                     final_submit_retry_used = True
                     continue
                 # Retry empty responses a few times before giving up
@@ -333,7 +340,7 @@ Output exactly one <memo_add> block. No other text needed."""
                 print(f"  [{self.agent_id}] Empty response in warmup after {max_empty_retries} retries, skipping Q.")
                 self._log_action(
                     forecast_interface, messages, response or "", "warmup_empty_skip",
-                    actions_remaining, qid=target_qid,
+                    budget, qid=target_qid,
                 )
                 break
                 
@@ -343,22 +350,23 @@ Output exactly one <memo_add> block. No other text needed."""
             reasoning = usage.get("_reasoning_content") if usage else None
             self._timer.record_tokens(usage)
             self._timer.record_cost(usage.get("cost", 0), "llm")
+            budget.record_usage(usage)
 
             # singleans mode: accept <answer>/<probability> tags and submit a single-outcome forecast.
-            if getattr(self.config, "singleans", False):
+            if self.config.singleans:
                 answer, prob, err = parse_answer_probability(response)
                 if err:
-                    if is_final_turn and not final_submit_retry_used:
+                    if force_submit_turn and not final_submit_retry_used:
                         final_submit_retry_used = True
                         continue
                     messages.append({"role": "assistant", "content": response})
-                    actions_remaining -= 1
+                    budget.consume_action()
                     self._log_action(
                         forecast_interface,
                         messages,
                         response,
                         "warmup_singleans_parse_error",
-                        actions_remaining,
+                        budget,
                         qid=target_qid,
                         error=err,
                         reasoning=reasoning,
@@ -367,15 +375,9 @@ Output exactly one <memo_add> block. No other text needed."""
                         "Format error: In singleans mode you must output:\n"
                         "<answer>...</answer>\n"
                         "<probability>...</probability>\n\n"
-                        f"Parser error: {err}\n\nActions remaining: {actions_remaining}"
+                        f"Parser error: {err}"
                     )
-                    feedback = self._add_exhaustion_warning(feedback, actions_remaining)
-                    messages.append(
-                        {
-                            "role": "user",
-                            "content": self._with_actions_remaining(feedback, actions_remaining),
-                        }
-                    )
+                    messages.append({"role": "user", "content": budget.format_feedback(feedback)})
                     continue
 
                 messages.append({"role": "assistant", "content": response})
@@ -387,12 +389,12 @@ Output exactly one <memo_add> block. No other text needed."""
                     error=None,
                 )
                 # Only end this question if submission actually succeeded.
-                actions_remaining, submitted = self._handle_submit(
+                submitted = self._handle_submit(
                     messages,
                     forecast_interface,
                     response,
                     parsed,
-                    actions_remaining,
+                    budget,
                     qid=target_qid,
                     reasoning=reasoning,
                 )
@@ -411,7 +413,7 @@ Output exactly one <memo_add> block. No other text needed."""
                 and bool(valid_forecasts)
                 and self._forecasts_within_probability_bounds(valid_forecasts)
             )
-            if is_final_turn and not final_submit_retry_used and not has_valid_final_submit:
+            if force_submit_turn and not final_submit_retry_used and not has_valid_final_submit:
                 final_submit_retry_used = True
                 continue
 
@@ -421,26 +423,21 @@ Output exactly one <memo_add> block. No other text needed."""
                 # In warmup, 'next' isn't really appropriate as we want them to submit.
                 # But if they insist on skipping, we break.
                 self._log_action(forecast_interface, messages, response, "warmup_skip", 
-                               actions_remaining, qid=target_qid, reasoning=reasoning)
+                               budget, qid=target_qid, reasoning=reasoning)
                 print(f"  [{self.agent_id}] Agent chose 'next' (skipping submission).")
                 break
             
             elif parsed.action_type == "query":
                 # Queries are disabled in warmup (no DataFrame access)
-                actions_remaining -= 1
+                budget.consume_action()
                 self._log_action(forecast_interface, messages, response, "warmup_query_disabled",
-                               actions_remaining, qid=target_qid, reasoning=reasoning)
+                               budget, qid=target_qid, reasoning=reasoning)
                 feedback = "Error: Database queries are not available in this per-question focused mode. Please use search or submit your forecast."
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": self._with_actions_remaining(feedback, actions_remaining),
-                    }
-                )
+                messages.append({"role": "user", "content": budget.format_feedback(feedback)})
             
             elif parsed.action_type == "search":
-                actions_remaining = self._handle_search(
-                    messages, forecast_interface, response, parsed, actions_remaining, 
+                self._handle_search(
+                    messages, forecast_interface, response, parsed, budget, 
                     qid=target_qid, reasoning=reasoning
                 )
             
@@ -455,8 +452,8 @@ Output exactly one <memo_add> block. No other text needed."""
                 parsed.forecasts = valid_forecasts
                 
                 if valid_forecasts:
-                    actions_remaining, submitted = self._handle_submit(
-                        messages, forecast_interface, response, parsed, actions_remaining, 
+                    submitted = self._handle_submit(
+                        messages, forecast_interface, response, parsed, budget, 
                         qid=target_qid, reasoning=reasoning
                     )
                     # End interaction immediately after successful submission.
@@ -465,20 +462,15 @@ Output exactly one <memo_add> block. No other text needed."""
                     continue
                 else:
                     # If no valid forecasts, warn agent
-                    actions_remaining -= 1
+                    budget.consume_action()
                     self._log_action(forecast_interface, messages, response, "warmup_submit_wrong_qid",
-                                   actions_remaining, qid=target_qid, reasoning=reasoning)
+                                   budget, qid=target_qid, reasoning=reasoning)
                     feedback = f"Error: You must submit a forecast for question {target_qid}. You submitted for different IDs or none."
-                    messages.append(
-                        {
-                            "role": "user",
-                            "content": self._with_actions_remaining(feedback, actions_remaining),
-                        }
-                    )
+                    messages.append({"role": "user", "content": budget.format_feedback(feedback)})
                 
             else:
-                actions_remaining = self._handle_invalid(
-                    messages, forecast_interface, response, parsed, actions_remaining, 
+                self._handle_invalid(
+                    messages, forecast_interface, response, parsed, budget, 
                     qid=target_qid, reasoning=reasoning
                 )
 
@@ -554,6 +546,8 @@ Key Mechanics:
         Builds a focused prompt for Day 0 warmup.
         Includes Brier score context and question details.
         """
+        budget_start_status = self._build_start_budget_status(warmup=True)
+        budget_start_block = f"\nBudget at start:\n{budget_start_status}" if budget_start_status else ""
 
         # Borrowing structure from BasicAgent._build_instructions but simplified
         
@@ -572,6 +566,7 @@ Optional date filtering:
 your search query here
 </action>
 
+{self._search_results_description()}
 You can search for recent news to inform your forecast.
 """
 
@@ -613,7 +608,7 @@ Answer Type: {q.answer_type}
 {scoring_section}
 
 ## ACTIONS
-You have {self.config.warmup_max_actions} actions to research and forecast this question.
+{self._build_budget_overview(warmup=True, per_question=True)}
 
 {search_section}
 
@@ -640,6 +635,8 @@ You have {self.config.warmup_max_actions} actions to research and forecast this 
 <action type="...">
 ...
 </action>
+
+{budget_start_block}
 """
 
 

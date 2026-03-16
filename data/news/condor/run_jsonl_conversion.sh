@@ -8,8 +8,11 @@ set -euo pipefail
 export PATH="/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 source ~/.bashrc 2>/dev/null || true
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd -- "${SCRIPT_DIR}/../../.." && pwd)"
+
 # Activate environment
-source ~/forecast-sim/.venv/bin/activate
+source "${REPO_DIR}/.venv/bin/activate"
 
 # Parse arguments
 JSON_DIR=$1
@@ -21,7 +24,7 @@ EXTRA_ARGS="$@"
 mkdir -p "$OUTPUT_DIR"
 
 # Run conversion
-cd /home/sgoel/forecast-sim
+cd "${REPO_DIR}"
 python data/news/scripts/to_jsonl.py "$JSON_DIR" --output_dir "$OUTPUT_DIR" $EXTRA_ARGS
 
 echo "JSONL conversion complete!"

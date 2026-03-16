@@ -14,11 +14,22 @@ Usage:
 """
 
 import argparse
+import os
 import re
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from pathing import expand_env_tree, load_repo_env, raise_for_unresolved_env_vars
+
+load_repo_env(REPO_ROOT)
+DEFAULT_SIM_LOG_BASE = Path(os.getenv("FSIM_SIM_LOG_BASE", str(REPO_ROOT / "logs" / "sims")))
 
 
 def _parse_set_kv(s: str) -> tuple[str, Any]:
@@ -129,8 +140,7 @@ def submit_sim_job(
     if resume_path:
         run_dir = Path(resume_path)
     else:
-        # Logs go to /fast/sgoel/logs/forecasting-sim/sims/<base_name>/<unique_name>
-        log_base = Path("/fast/nchandak/logs/forecasting-sim/sims")
+        log_base = Path(str(config.get("log_base", DEFAULT_SIM_LOG_BASE)))
         run_dir = log_base / base_sim_name / unique_name
         run_dir.mkdir(parents=True, exist_ok=True)
     
@@ -250,6 +260,8 @@ def main():
         for s in args.set_values:
             k, v = _parse_set_kv(s)
             _set_in_config(base_config, k, v)
+    base_config = expand_env_tree(base_config)
+    raise_for_unresolved_env_vars(base_config, f"submit config {args.config}")
         
     print(f"Submitting {args.runs} simulation job(s)...")
     print(f"  Config: {args.config}")
@@ -295,7 +307,7 @@ def main():
     print(f"\nAll jobs submitted! Cluster IDs: {cluster_ids}")
     
     sim_name = base_config.get("sim_name", "sim_run")
-    log_base = Path("/fast/nchandak/logs/forecasting-sim/sims")
+    log_base = Path(str(base_config.get("log_base", DEFAULT_SIM_LOG_BASE)))
     print(f"Logs: {log_base / sim_name}/")
 
 

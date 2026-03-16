@@ -10,6 +10,7 @@ from typing import List, Dict, Any, Optional, Tuple
 
 from agents.base import BaseAgent
 from agents.utils.forecast_parser import parse_action, extract_memory, extract_memory_ops, extract_memo_ops
+from agents.utils.budget import BudgetSettings, BudgetTracker
 from agents.utils.timing import AgentTimer
 from environment.interfaces import PredictionSubmission
 
@@ -27,7 +28,7 @@ class BasicAgent(BaseAgent):
     
     Interaction flow per day:
     1. Receives system prompt with DataFrame schema and scoring rules
-    2. Can take up to max_actions per day, including:
+    2. Can take query/search/submit/next actions, subject to configured loop budgets:
        - query: Execute Python code to explore the DataFrame
        - search: Search news articles for context (if enabled)
        - get_article: Retrieve full article content
@@ -132,6 +133,101 @@ class BasicAgent(BaseAgent):
         )
         self._search_handler.set_date(current_date)
         self._forecast_interface = forecast_interface
+
+    def _get_budget_settings(self, *, warmup: bool = False) -> BudgetSettings:
+        """Resolve loop-budget settings for day or warmup loops."""
+        if warmup:
+            return BudgetSettings(
+                max_actions=self.config.warmup_max_actions,
+                max_total_tokens=self.config.warmup_max_total_tokens,
+                submit_reserve_tokens=(
+                    self.config.warmup_submit_reserve_tokens
+                    or self.config.submit_reserve_tokens
+                ),
+                force_submit_threshold_tokens=(
+                    self.config.warmup_force_submit_threshold_tokens
+                    or self.config.force_submit_threshold_tokens
+                ),
+            )
+        return BudgetSettings(
+            max_actions=self.config.max_actions,
+            max_total_tokens=self.config.max_total_tokens,
+            submit_reserve_tokens=self.config.submit_reserve_tokens,
+            force_submit_threshold_tokens=self.config.force_submit_threshold_tokens,
+        )
+
+    def _create_budget_tracker(
+        self,
+        *,
+        warmup: bool = False,
+        max_actions_override: Optional[int] = None,
+    ) -> BudgetTracker:
+        settings = self._get_budget_settings(warmup=warmup)
+        if max_actions_override is not None:
+            settings = BudgetSettings(
+                max_actions=max_actions_override,
+                max_total_tokens=settings.max_total_tokens,
+                submit_reserve_tokens=settings.submit_reserve_tokens,
+                force_submit_threshold_tokens=settings.force_submit_threshold_tokens,
+            )
+        return BudgetTracker(settings)
+
+    def _build_budget_overview(self, *, warmup: bool = False, per_question: bool = False) -> str:
+        """Human-readable budget instructions for prompts."""
+        settings = self._get_budget_settings(warmup=warmup)
+        lines: List[str] = []
+        if settings.max_actions is not None:
+            if per_question:
+                lines.append(f"You have {settings.max_actions} actions to research and forecast this question.")
+            else:
+                lines.append(
+                    f"You have {settings.max_actions} actions per day. Each query, search, or submission uses 1 action."
+                )
+        if settings.max_total_tokens is not None:
+            scope = "this question loop" if per_question else "this day"
+            lines.append(
+                f"You have a total token budget of {settings.max_total_tokens} tokens for {scope}. "
+                "Every model call consumes its full input + output tokens from this budget."
+            )
+            lines.append(
+                f"Keep at least {settings.submit_reserve_tokens} tokens in reserve for a final submit. "
+                f"Force-submit once the remaining token budget is at or below {settings.force_submit_threshold_tokens}."
+            )
+        if settings.max_actions is not None and settings.max_total_tokens is not None:
+            lines.append("If both budgets are configured, both are enforced and the loop ends when either one is exhausted.")
+        return "\n".join(lines)
+
+    def _build_start_budget_status(
+        self,
+        *,
+        warmup: bool = False,
+        max_actions_override: Optional[int] = None,
+    ) -> str:
+        """Render the initial remaining-budget status for prompt seeds."""
+        tracker = self._create_budget_tracker(
+            warmup=warmup,
+            max_actions_override=max_actions_override,
+        )
+        return tracker.status_text()
+
+    def _build_force_submit_preamble(self, budget: BudgetTracker) -> str:
+        """Shared force-submit wording for action/token-constrained loops."""
+        lines = [
+            "FINAL ACTION: You MUST submit your best guess forecast now."
+        ]
+        status = budget.status_text()
+        if status:
+            lines.append(status)
+        return "\n".join(lines)
+
+    def _search_results_description(self) -> str:
+        chunk_tokens = self._search_handler.chunk_tokens
+        if chunk_tokens is None:
+            return f"Search returns up to {self.config.max_search_results} retrieved article chunks."
+        return (
+            f"Search returns up to {self.config.max_search_results} retrieved article chunks, "
+            f"each roughly {chunk_tokens} tokens long."
+        )
     
     # =========================================================================
     # Action Loop
@@ -139,16 +235,16 @@ class BasicAgent(BaseAgent):
 
     def _run_action_loop(self, messages: List[Dict], forecast_interface) -> List[Dict]:
         """
-        Main action loop: process agent responses until actions exhausted or day ended.
+        Main action loop: process agent responses until the loop budget is exhausted or the day ends.
         
         Returns list of all submitted forecasts.
         """
-        actions_remaining = self.config.max_actions
+        budget = self._create_budget_tracker()
         all_forecasts = []
         empty_retries = 0
         max_empty_retries = 2
-        
-        while actions_remaining > 0:
+
+        while not budget.is_exhausted():
             # Get agent response (track LLM time)
             try:
                 with self._timer.track("llm"):
@@ -160,7 +256,7 @@ class BasicAgent(BaseAgent):
                     messages,
                     "",
                     "llm_error",
-                    actions_remaining,
+                    budget,
                     error=str(e),
                 )
                 break
@@ -173,7 +269,7 @@ class BasicAgent(BaseAgent):
                     print(f"  [{self.agent_id}] Empty LLM response, retrying ({empty_retries}/{max_empty_retries})")
                     continue
                 print(f"  [{self.agent_id}] Empty LLM response after {max_empty_retries} retries, ending turn")
-                self._log_action(forecast_interface, messages, response or "", "api_failure", actions_remaining)
+                self._log_action(forecast_interface, messages, response or "", "api_failure", budget)
                 break
             
             # Successful response — reset empty retry counter
@@ -185,6 +281,7 @@ class BasicAgent(BaseAgent):
             # Record token usage and cost
             self._timer.record_tokens(usage)
             self._timer.record_cost(usage.get("cost", 0), "llm")
+            budget.record_usage(usage)
 
             messages.append({"role": "assistant", "content": response})
 
@@ -196,28 +293,28 @@ class BasicAgent(BaseAgent):
             parsed = parse_action(response, self.config.max_outcomes_per_question)
             
             if parsed.action_type == "next":
-                self._log_action(forecast_interface, messages, response, "next_day", actions_remaining, reasoning=reasoning)
+                self._log_action(forecast_interface, messages, response, "next_day", budget, reasoning=reasoning)
                 break
             
             elif parsed.action_type == "query":
-                actions_remaining = self._handle_query(
-                    messages, forecast_interface, response, parsed, actions_remaining, reasoning=reasoning
+                self._handle_query(
+                    messages, forecast_interface, response, parsed, budget, reasoning=reasoning
                 )
             
             elif parsed.action_type == "search":
-                actions_remaining = self._handle_search(
-                    messages, forecast_interface, response, parsed, actions_remaining, reasoning=reasoning
+                self._handle_search(
+                    messages, forecast_interface, response, parsed, budget, reasoning=reasoning
                 )
             
             elif parsed.action_type == "submit":
-                actions_remaining, forecasts = self._handle_submit(
-                    messages, forecast_interface, response, parsed, actions_remaining, reasoning=reasoning
+                forecasts = self._handle_submit(
+                    messages, forecast_interface, response, parsed, budget, reasoning=reasoning
                 )
                 all_forecasts.extend(forecasts)
             
             else:
-                actions_remaining = self._handle_invalid(
-                    messages, forecast_interface, response, parsed, actions_remaining, reasoning=reasoning
+                self._handle_invalid(
+                    messages, forecast_interface, response, parsed, budget, reasoning=reasoning
                 )
         
         return all_forecasts
@@ -226,9 +323,9 @@ class BasicAgent(BaseAgent):
     # Action Handlers
     # =========================================================================
     
-    def _handle_query(self, messages, forecast_interface, response, parsed, actions_remaining, qid: str = None, reasoning=None) -> int:
-        """Handle query action. Returns updated actions_remaining."""
-        actions_remaining -= 1
+    def _handle_query(self, messages, forecast_interface, response, parsed, budget: BudgetTracker, qid: str = None, reasoning=None) -> None:
+        """Handle query action."""
+        budget.consume_action()
         
         if parsed.code:
             extra_ctx = None
@@ -236,28 +333,25 @@ class BasicAgent(BaseAgent):
                 extra_ctx = {"memo_df": self._memory.get_memo_df()}
             with self._timer.track("df_query"):
                 result, error = self._query_handler.execute(parsed.code, extra_context=extra_ctx)
-            self._log_action(forecast_interface, messages, response, "query", actions_remaining, qid=qid, reasoning=reasoning)
+            self._log_action(forecast_interface, messages, response, "query", budget, qid=qid, reasoning=reasoning)
             
             if error:
-                feedback = f"QUERY ERROR: {error}\n\nActions remaining: {actions_remaining}"
+                feedback = f"QUERY ERROR: {error}"
             else:
-                feedback = f"QUERY RESULT:\n{result}\n\nActions remaining: {actions_remaining}"
+                feedback = f"QUERY RESULT:\n{result}"
         else:
-            self._log_action(forecast_interface, messages, response, "query_error", 
-                           actions_remaining, qid=qid, error=parsed.error, reasoning=reasoning)
-            feedback = f"ERROR: {parsed.error}\n\nActions remaining: {actions_remaining}"
+            self._log_action(forecast_interface, messages, response, "query_error", budget, qid=qid, error=parsed.error, reasoning=reasoning)
+            feedback = f"ERROR: {parsed.error}"
         
-        feedback = self._add_exhaustion_warning(feedback, actions_remaining)
-        messages.append({"role": "user", "content": feedback})
-        return actions_remaining
+        messages.append({"role": "user", "content": budget.format_feedback(feedback)})
     
-    def _handle_search(self, messages, forecast_interface, response, parsed, actions_remaining, qid: str = None, reasoning=None) -> int:
+    def _handle_search(self, messages, forecast_interface, response, parsed, budget: BudgetTracker, qid: str = None, reasoning=None) -> None:
         """Handle search action. Returns full chunk content directly."""
-        actions_remaining -= 1
+        budget.consume_action()
         
         if not self._search_handler.is_available:
-            self._log_action(forecast_interface, messages, response, "search_unavailable", actions_remaining, qid=qid, reasoning=reasoning)
-            feedback = f"SEARCH ERROR: Search is not available.\n\nActions remaining: {actions_remaining}"
+            self._log_action(forecast_interface, messages, response, "search_unavailable", budget, qid=qid, reasoning=reasoning)
+            feedback = "SEARCH ERROR: Search is not available."
         elif parsed.query:
             # Parse date range if provided
             min_date = None
@@ -282,25 +376,22 @@ class BasicAgent(BaseAgent):
                     min_date=min_date,
                     max_date=max_date,
                 )
-            self._log_action(forecast_interface, messages, response, "search", actions_remaining, qid=qid, reasoning=reasoning)
+            self._log_action(forecast_interface, messages, response, "search", budget, qid=qid, reasoning=reasoning)
             
             if error:
-                feedback = f"SEARCH ERROR: {error}\n\nActions remaining: {actions_remaining}"
+                feedback = f"SEARCH ERROR: {error}"
             else:
-                feedback = f"SEARCH RESULTS:\n{result}\n\nActions remaining: {actions_remaining}"
+                feedback = f"SEARCH RESULTS:\n{result}"
         else:
-            self._log_action(forecast_interface, messages, response, "search_error", 
-                           actions_remaining, qid=qid, error=parsed.error, reasoning=reasoning)
-            feedback = f"SEARCH ERROR: No query provided.\n\nActions remaining: {actions_remaining}"
+            self._log_action(forecast_interface, messages, response, "search_error", budget, qid=qid, error=parsed.error, reasoning=reasoning)
+            feedback = "SEARCH ERROR: No query provided."
         
-        feedback = self._add_exhaustion_warning(feedback, actions_remaining)
-        messages.append({"role": "user", "content": feedback})
-        return actions_remaining
+        messages.append({"role": "user", "content": budget.format_feedback(feedback)})
     
-    def _handle_submit(self, messages, forecast_interface, response, parsed, actions_remaining, qid: str = None, reasoning=None) -> Tuple[int, List]:
-        """Handle submit action. Returns (updated actions_remaining, list of submitted forecasts)."""
+    def _handle_submit(self, messages, forecast_interface, response, parsed, budget: BudgetTracker, qid: str = None, reasoning=None) -> List:
+        """Handle submit action. Returns list of submitted forecasts."""
         submitted = []
-        actions_remaining -= 1  # Always consume action
+        budget.consume_action()
         dropped_forecasts = 0
         
         # For logging: use provided qid, or infer from forecasts
@@ -332,63 +423,50 @@ class BasicAgent(BaseAgent):
             submitted_qids = [f['qid'] for f in submitted]
             if hasattr(self, '_day_qids'):
                 self._day_qids.update(str(q) for q in submitted_qids)
-            self._log_action(forecast_interface, messages, response, "submit", 
-                           actions_remaining, qid=log_qid, submitted_qids=submitted_qids,
+            self._log_action(forecast_interface, messages, response, "submit", budget, qid=log_qid, submitted_qids=submitted_qids,
                            num_forecasts=len(submitted), dropped_forecasts=dropped_forecasts, reasoning=reasoning)
             if submitted:
-                # feedback = f"Submitted forecast for qid={sub['qid']}. Actions remaining: {actions_remaining}"
                 sub = submitted[0]
                 outcomes_str = ", ".join(f"{k}: {v:.2f}" for k, v in sub['outcomes'].items())
                 title = self._query_handler.get_question_title(sub['qid'])
                 title_str = f" ({title})" if title else ""
-                feedback = f"Submitted forecast for qid={sub['qid']}{title_str}: {outcomes_str}. Actions remaining: {actions_remaining}"
+                feedback = f"Submitted forecast for qid={sub['qid']}{title_str}: {outcomes_str}."
                 if dropped_forecasts > 0:
                     feedback += f"\nIgnored {dropped_forecasts} extra forecast block(s); submit exactly one qid per action."
             else:
-                feedback = f"SUBMIT ERROR: No valid forecast submitted.\n\nActions remaining: {actions_remaining}"
+                feedback = "SUBMIT ERROR: No valid forecast submitted."
         else:
             # Parse error - still consumed action
-            self._log_action(forecast_interface, messages, response, "submit_error",
-                           actions_remaining, qid=log_qid, error=parsed.error, reasoning=reasoning)
-            feedback = f"SUBMIT ERROR: {parsed.error}\n\nActions remaining: {actions_remaining}"
+            self._log_action(forecast_interface, messages, response, "submit_error", budget, qid=log_qid, error=parsed.error, reasoning=reasoning)
+            feedback = f"SUBMIT ERROR: {parsed.error}"
         
-        feedback = self._add_exhaustion_warning(feedback, actions_remaining)
-        messages.append({"role": "user", "content": feedback})
-        return actions_remaining, submitted
+        messages.append({"role": "user", "content": budget.format_feedback(feedback)})
+        return submitted
     
-    def _handle_invalid(self, messages, forecast_interface, response, parsed, actions_remaining, qid: str = None, reasoning=None) -> int:
-        """Handle invalid/unknown action. Returns updated actions_remaining."""
-        actions_remaining -= 1
-        self._log_action(forecast_interface, messages, response, "invalid", 
-                        actions_remaining, qid=qid, error=parsed.error, reasoning=reasoning)
+    def _handle_invalid(self, messages, forecast_interface, response, parsed, budget: BudgetTracker, qid: str = None, reasoning=None) -> None:
+        """Handle invalid/unknown action."""
+        budget.consume_action()
+        self._log_action(forecast_interface, messages, response, "invalid", budget, qid=qid, error=parsed.error, reasoning=reasoning)
         
         error_msg = parsed.error or 'Use <action type="...">...</action> format.'
-        feedback = f"No valid action found. {error_msg}\n\nActions remaining: {actions_remaining}"
-        feedback = self._add_exhaustion_warning(feedback, actions_remaining)
-        messages.append({"role": "user", "content": feedback})
-        return actions_remaining
+        feedback = f"No valid action found. {error_msg}"
+        messages.append({"role": "user", "content": budget.format_feedback(feedback)})
     
     # =========================================================================
     # Helpers
     # =========================================================================
     
     def _log_action(self, forecast_interface, messages, response, phase, 
-                   actions_remaining, qid: str = None, **extra) -> None:
+                   budget: BudgetTracker, qid: str = None, **extra) -> None:
         """Log model output with metadata. qid indicates the question context if known."""
         last_user = messages[-2]["content"] if len(messages) >= 2 else ""
         metadata = {
             "phase": phase, 
-            "actions_remaining": actions_remaining, 
             "qid": qid,
+            **budget.metadata(),
             **extra
         }
         forecast_interface.log_model_output(last_user, response, metadata)
-    
-    def _add_exhaustion_warning(self, feedback: str, actions_remaining: int) -> str:
-        """Add warning if actions are exhausted."""
-        if actions_remaining == 0:
-            feedback += "\n\nNo more actions available. Your day ends now."
-        return feedback
 
     def _record_matcher_timing(self, duration: float, cost: float = 0) -> None:
         """Record answer matcher latency and cost in timing stats."""
@@ -544,6 +622,8 @@ Example (if options are ["Candidate A", "Candidate B", "Candidate C"]):
     def _build_instructions(self, current_date: date) -> str:
         """Build the instructions for the agent including data info and rules."""
         df_info = self._query_handler.get_info()
+        budget_start_status = self._build_start_budget_status()
+        budget_start_block = f"Budget at start:\n{budget_start_status}\n\n" if budget_start_status else ""
         
         memory_section = ""
         if self._memory is not None:
@@ -622,11 +702,12 @@ your search query here
 </action>
 
 Note: "to" date is capped at {cutoff_desc} (no future leakage).
+{self._search_results_description()}
 You can use search to gather evidence before submitting forecasts.
 """
             search_advice = """
 
-You have access to a news article database. You can search it to gather information before making predictions."""
+You have access to a news article database. {self._search_results_description()}"""
         
         return f"""You are a forecasting agent. Today is {current_date}. Your goal: make accurate probability predictions.
 
@@ -695,7 +776,7 @@ Use `print()` to ensure you see output. We are not executing in a jupyter notebo
 <action type="next"/>
 
 ## INTERACTION FLOW
-You have {self.config.max_actions} actions per day. Each query, search, or submission uses 1 action.
+{self._build_budget_overview()}
 You can interleave queries, searches, and submissions as needed.
 When ready to move on, use <action type="next"/> to end your day.
 {memory_flow_note}
@@ -710,8 +791,7 @@ When ready to move on, use <action type="next"/> to end your day.
 - Probabilities must sum to ≤ 1.0
 
 ---
-
-You have {self.config.max_actions} actions available. Begin."""
+{budget_start_block}Begin."""
     
     def _prompt_memory_update(self, messages: List[Dict[str, str]],
                                forecast_interface, current_date: date) -> None:

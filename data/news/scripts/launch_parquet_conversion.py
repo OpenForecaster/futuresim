@@ -14,6 +14,8 @@ from pathlib import Path
 import htcondor2 as htcondor
 
 JOB_BID = 15
+REPO_ROOT = Path(__file__).resolve().parents[3]
+NEWS_LOG_BASE = Path(os.getenv("FSIM_NEWS_LOG_BASE", str(REPO_ROOT / "logs" / "news")))
 
 def launch_parquet_conversion_job(
         input_dirs: list,
@@ -26,14 +28,14 @@ def launch_parquet_conversion_job(
 ):
     """Launch HTCondor job to convert JSONL to Parquet."""
     
-    LOG_PATH = "/fast/sgoel/logs/forecasting-sim/news/parquet_conversion"
+    LOG_PATH = str(NEWS_LOG_BASE / "parquet_conversion")
     
     log_dir = Path(LOG_PATH)
     os.makedirs(log_dir, exist_ok=True)
     
     cluster_job_log = str(log_dir / "$(Cluster).$(Process)")
     
-    executable = '/home/sgoel/forecast-sim/data/news/condor/run_parquet_conversion.sh'
+    executable = str(REPO_ROOT / "data" / "news" / "condor" / "run_parquet_conversion.sh")
     
     if job_memory is None:
         job_memory = job_cpus * 16

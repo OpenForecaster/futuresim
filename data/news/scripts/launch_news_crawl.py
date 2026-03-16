@@ -21,6 +21,8 @@ from datetime import datetime
 import htcondor2 as htcondor
 
 JOB_BID = 15
+REPO_ROOT = Path(__file__).resolve().parents[3]
+NEWS_LOG_BASE = Path(os.getenv("FSIM_NEWS_LOG_BASE", str(REPO_ROOT / "logs" / "news")))
 
 
 def launch_news_crawl_job(
@@ -32,14 +34,14 @@ def launch_news_crawl_job(
 ):
     """Launch HTCondor job to download news from CommonCrawl."""
     
-    LOG_PATH = "/fast/sgoel/logs/forecasting-sim/news/crawl"
+    LOG_PATH = str(NEWS_LOG_BASE / "crawl")
     
     log_dir = Path(LOG_PATH)
     os.makedirs(log_dir, exist_ok=True)
     
     cluster_job_log = str(log_dir / "$(Cluster).$(Process)")
     
-    executable = '/home/sgoel/forecast-sim/data/news/condor/run_news_crawl.sh'
+    executable = str(REPO_ROOT / "data" / "news" / "condor" / "run_news_crawl.sh")
     
     # Pass dates as arguments to the shell script
     args_str = f"{start_date}"

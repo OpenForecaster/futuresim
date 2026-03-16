@@ -102,6 +102,12 @@ def _model_short_name(model: str) -> str:
     return name.split(":")[0]
 
 
+def _optional_int(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    return int(value)
+
+
 def _agent_defs_from_config(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
     defaults = cfg.get("defaults") or {}
     agents = cfg.get("agents") or []
@@ -150,9 +156,48 @@ def _build_expected_agent_specs(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
         counts[base] = counts.get(base, 0) + 1
         agent_id = f"{base}_{counts[base]:03d}"
 
-        max_actions = int(a.get("max_actions", defaults.get("max_actions", cfg.get("max_actions", 10))))
-        warmup_max_actions = int(
-            a.get("warmup_max_actions", defaults.get("warmup_max_actions", cfg.get("warmup_max_actions", 10)))
+        max_actions = _optional_int(a.get("max_actions", defaults.get("max_actions", cfg.get("max_actions", None))))
+        warmup_max_actions = _optional_int(
+            a.get("warmup_max_actions", defaults.get("warmup_max_actions", cfg.get("warmup_max_actions", None)))
+        )
+        max_total_tokens = _optional_int(
+            a.get("max_total_tokens", defaults.get("max_total_tokens", cfg.get("max_total_tokens", None)))
+        )
+        warmup_max_total_tokens = _optional_int(
+            a.get(
+                "warmup_max_total_tokens",
+                defaults.get("warmup_max_total_tokens", cfg.get("warmup_max_total_tokens", None)),
+            )
+        )
+        submit_reserve_tokens = _optional_int(
+            a.get(
+                "submit_reserve_tokens",
+                defaults.get("submit_reserve_tokens", cfg.get("submit_reserve_tokens", 4096)),
+            )
+        )
+        warmup_submit_reserve_tokens = _optional_int(
+            a.get(
+                "warmup_submit_reserve_tokens",
+                defaults.get("warmup_submit_reserve_tokens", cfg.get("warmup_submit_reserve_tokens", None)),
+            )
+        )
+        force_submit_threshold_tokens = _optional_int(
+            a.get(
+                "force_submit_threshold_tokens",
+                defaults.get(
+                    "force_submit_threshold_tokens",
+                    cfg.get("force_submit_threshold_tokens", 8192),
+                ),
+            )
+        )
+        warmup_force_submit_threshold_tokens = _optional_int(
+            a.get(
+                "warmup_force_submit_threshold_tokens",
+                defaults.get(
+                    "warmup_force_submit_threshold_tokens",
+                    cfg.get("warmup_force_submit_threshold_tokens", None),
+                ),
+            )
         )
         warmup_parallelism = int(
             a.get("warmup_parallelism", defaults.get("warmup_parallelism", cfg.get("warmup_parallelism", 20)))
@@ -209,6 +254,12 @@ def _build_expected_agent_specs(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
             "config": AgentConfig(
                 max_actions=max_actions,
                 warmup_max_actions=warmup_max_actions,
+                max_total_tokens=max_total_tokens,
+                warmup_max_total_tokens=warmup_max_total_tokens,
+                submit_reserve_tokens=submit_reserve_tokens,
+                warmup_submit_reserve_tokens=warmup_submit_reserve_tokens,
+                force_submit_threshold_tokens=force_submit_threshold_tokens,
+                warmup_force_submit_threshold_tokens=warmup_force_submit_threshold_tokens,
                 warmup_parallelism=warmup_parallelism,
                 max_submit_retries=max_retries,
                 memory_dir="",  # patched later
@@ -478,7 +529,7 @@ def _render_prompt_payload(agent: Any, day: date) -> Dict[str, Any]:
         instructions_for_api, conversation = agent._seed_harmony_conversation(
             instructions,
             day,
-            actions_remaining=int(agent.config.max_actions),
+            budget_status_text=agent._build_start_budget_status(),
         )
         raw_payload = agent._build_model_input_for_logging(
             instructions=instructions_for_api,

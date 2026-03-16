@@ -53,7 +53,7 @@ else
         echo "  [SUCCESS] Installed tantivy and pylance."
     else
         echo "ERROR: Failed to install tantivy/pylance in project venv."
-        echo "       Run manually: source ~/forecast-sim/.venv/bin/activate && uv pip install tantivy pylance"
+        echo "       Run manually: source ${REPO_ROOT}/.venv/bin/activate && uv pip install tantivy pylance"
         exit 2
     fi
 fi
@@ -66,7 +66,7 @@ if python3 "$REPO_ROOT/data/news/scripts/ensure_nltk_data.py"; then
     echo "  [SUCCESS] NLTK data ready."
 else
     echo "ERROR: Could not ensure NLTK data. CCNews crawl will fail with missing punkt_tab."
-    echo "       Try: source ~/forecast-sim/.venv/bin/activate && python3 $REPO_ROOT/data/news/scripts/ensure_nltk_data.py"
+    echo "       Try: source ${REPO_ROOT}/.venv/bin/activate && python3 ${REPO_ROOT}/data/news/scripts/ensure_nltk_data.py"
     exit 2
 fi
 
