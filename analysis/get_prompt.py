@@ -40,6 +40,8 @@ from agents.allQAgent import AllQAgent
 from agents.allQAgent.agent import AllQDailyAgent
 from agents.gptossAgent import GPTOSSBasicAgent, GPTOSSAllQAgent
 from agents.ogAgent import OgAgent
+from agents.qwenAgent import QwenBasicAgent, QwenAllQAgent
+from agents.qwenAgent.tools import build_action_tools
 from environment.env import SimulationEnvironment, SimForecastInterface
 
 
@@ -172,7 +174,7 @@ def _build_expected_agent_specs(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
         submit_reserve_tokens = _optional_int(
             a.get(
                 "submit_reserve_tokens",
-                defaults.get("submit_reserve_tokens", cfg.get("submit_reserve_tokens", 4096)),
+                defaults.get("submit_reserve_tokens", cfg.get("submit_reserve_tokens", 8192)),
             )
         )
         warmup_submit_reserve_tokens = _optional_int(
@@ -186,7 +188,7 @@ def _build_expected_agent_specs(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "force_submit_threshold_tokens",
                 defaults.get(
                     "force_submit_threshold_tokens",
-                    cfg.get("force_submit_threshold_tokens", 8192),
+                    cfg.get("force_submit_threshold_tokens", 16384),
                 ),
             )
         )
@@ -271,6 +273,7 @@ def _build_expected_agent_specs(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
                     **({"reasoning": reasoning} if reasoning is not None else {}),
                 },
                 search_cutoff_days=search_cutoff_days,
+                timegap_days=int(cfg.get("timegap_days", 1)),
                 single_agent_mode=(len(defs) == 1),
                 gptoss_prompt_mode=gptoss_prompt_mode,
                 gptoss_reasoning_effort=gptoss_reasoning_effort,
@@ -383,12 +386,16 @@ def _build_environment_for_day_start(
         resolution_end=resolution_end,
         parallel=bool(cfg.get("parallel", False)),
         split=str(cfg.get("split", "test")),
+        prepend_train_resolution_start=cfg.get("prepend_train_resolution_start"),
+        prepend_train_resolution_end=cfg.get("prepend_train_resolution_end"),
+        subsample_per_month=cfg.get("subsample_per_month"),
+        timegap_days=int(cfg.get("timegap_days", 1)),
         resume_dir=str(tmpdir),
         min_forecasters=int(cfg.get("min_forecasters", 0)),
         resolved_only=bool(cfg.get("resolved_only", False)),
     )
 
-    # Restore uses last_date+1; force back to requested day-start.
+    # Restore advances by the configured cadence; force back to requested day-start.
     env.current_date = day
 
     # Recompute aggregates and market snapshot for this day-start state.
@@ -433,6 +440,25 @@ def _instantiate_agent(spec: Dict[str, Any], run_dir: Path, cfg: Dict[str, Any],
     if scaffold in ("allQ", "allq"):
         cls = GPTOSSAllQAgent if use_gptoss_harmony else AllQAgent
         return cls(
+            agent_id=agent_id,
+            inference_provider=None,
+            config=agent_cfg,
+            model_name=model,
+            search_tool=search_tool,
+            start_date=sim_start_day,
+        )
+
+    if scaffold == "qwenbasic":
+        return QwenBasicAgent(
+            agent_id=agent_id,
+            inference_provider=None,
+            config=agent_cfg,
+            model_name=model,
+            search_tool=search_tool,
+        )
+
+    if scaffold == "qwenallq":
+        return QwenAllQAgent(
             agent_id=agent_id,
             inference_provider=None,
             config=agent_cfg,
@@ -523,6 +549,21 @@ def _render_prompt_payload(agent: Any, day: date) -> Dict[str, Any]:
     # Keep memory behavior aligned with runtime.
     if getattr(agent, "_memory", None) is not None:
         agent._memory.set_date(day)
+
+    if isinstance(agent, QwenBasicAgent):
+        instructions = agent._build_qwen_instructions(day)
+        tools = build_action_tools(
+            enable_query=True,
+            enable_search=bool(agent._search_handler.is_available),
+            max_outcomes_per_question=agent.config.max_outcomes_per_question,
+            max_search_results=agent.config.max_search_results,
+            search_chunk_tokens=agent._search_handler.chunk_tokens,
+        )
+        return {
+            "prompt_mode": "qwen_chat_completions_tools",
+            "messages": [{"role": "user", "content": instructions}],
+            "tools": tools,
+        }
 
     if isinstance(agent, GPTOSSBasicAgent):
         instructions = agent._build_harmony_instructions(day)

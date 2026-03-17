@@ -181,11 +181,11 @@ class GPTOSSBasicAgent(BasicAgent):
             "Use function tools as defined in the tool schema, following the signatures, constraints and following the format in examples. You can call one tool per turn.\n\n"
             "## INTERACTION FLOW\n"
             f"{self._build_budget_overview()}\n"
-            "When ready to move on, call `next_day()`.\n\n"
+            "When ready to move on, call `next_day()` to end this session.\n\n"
             "## SUBMISSION RULES\n"
-            "- You may call `submit_forecasts` multiple times in a single day until the active loop budget runs out.\n"
+            "- You may call `submit_forecasts` multiple times in a single session until the active loop budget runs out.\n"
             "- Each `submit_forecasts` call must include exactly one forecast for exactly one qid.\n"
-            "- You may update earlier same-day forecasts by submitting again for the same qid.\n"
+            "- You may update earlier same-session forecasts by submitting again for the same qid.\n"
         )
 
     def _build_final_submit_tool_instruction(self, target_qid: str, budget: BudgetTracker) -> str:
@@ -231,6 +231,13 @@ class GPTOSSBasicAgent(BasicAgent):
             max_search_results=self.config.max_search_results,
             search_chunk_tokens=self._search_handler.chunk_tokens,
         )
+        budget.bootstrap_context(
+            {
+                "instructions": instructions,
+                "conversation": conversation,
+                "tools": tools,
+            }
+        )
         prompt_mode = self._get_gptoss_prompt_mode()
         reasoning_effort = str(getattr(self.config, "gptoss_reasoning_effort", "medium") or "medium").strip().lower()
         include_reasoning = bool(getattr(self.config, "gptoss_include_reasoning", True))
@@ -241,8 +248,10 @@ class GPTOSSBasicAgent(BasicAgent):
             # Last-action guardrail for per-question runs: force a submit attempt.
             force_final_submit_turn = target_qid is not None and budget.should_force_submit()
             if force_final_submit_turn and not final_submit_prompt_injected:
-                conversation.append(
-                    {"role": "user", "content": self._build_final_submit_tool_instruction(target_qid, budget)}
+                self._append_with_budget(
+                    conversation,
+                    budget,
+                    {"role": "user", "content": self._build_final_submit_tool_instruction(target_qid, budget)},
                 )
                 final_submit_prompt_injected = True
 
@@ -304,11 +313,13 @@ class GPTOSSBasicAgent(BasicAgent):
                     error=str(e),
                     prompt_override=model_input_payload,
                 )
-                conversation.append(
+                self._append_with_budget(
+                    conversation,
+                    budget,
                     {
                         "role": "user",
                         "content": budget.format_feedback(err_msg),
-                    }
+                    },
                 )
                 continue
 
@@ -392,7 +403,7 @@ class GPTOSSBasicAgent(BasicAgent):
                 break
 
             # Persist assistant side of the turn in Harmony-like structure.
-            self._append_assistant_turns(
+            appended_items = self._append_assistant_turns(
                 conversation=conversation,
                 assistant_messages=assistant_messages,
                 assistant_text=assistant_text,
@@ -401,6 +412,8 @@ class GPTOSSBasicAgent(BasicAgent):
                 reasoning_text=reasoning_text,
                 replay_mode=str(getattr(self.config, "gptoss_replay_mode", "raw_recommended") or "raw_recommended"),
             )
+            for item in appended_items:
+                budget.record_appended_item(item)
 
             # Log a compact representation (don’t shove huge JSON into logs).
             rendered = self._render_turn_for_logging(assistant_text, tool_calls)
@@ -434,7 +447,11 @@ class GPTOSSBasicAgent(BasicAgent):
                     feedback = (
                         "No tool call detected. You MUST call exactly one tool each turn."
                     )
-                conversation.append({"role": "user", "content": budget.format_feedback(feedback)})
+                self._append_with_budget(
+                    conversation,
+                    budget,
+                    {"role": "user", "content": budget.format_feedback(feedback)},
+                )
                 continue
 
             if parsed.action_type == "next":
@@ -481,11 +498,13 @@ class GPTOSSBasicAgent(BasicAgent):
             # Invalid / unknown
             budget.consume_action()
             err = parsed.error or "Unknown action/tool."
-            conversation.append(
+            self._append_with_budget(
+                conversation,
+                budget,
                 {
                     "role": "user",
                     "content": budget.format_feedback(f"Invalid action: {err}"),
-                }
+                },
             )
 
         return all_forecasts
@@ -752,27 +771,26 @@ class GPTOSSBasicAgent(BasicAgent):
         tool_call: Optional[Dict[str, Any]],
         tool_name: str,
         output: str,
-    ) -> None:
+    ) -> Dict[str, Any]:
         if isinstance(tool_call, dict) and isinstance(tool_call.get("call_id"), str):
-            conversation.append(
-                {
-                    "type": "function_call_output",
-                    "call_id": tool_call["call_id"],
-                    "output": output,
-                }
-            )
-            return
+            message = {
+                "type": "function_call_output",
+                "call_id": tool_call["call_id"],
+                "output": output,
+            }
+            conversation.append(message)
+            return message
 
         # Fallback for providers that do not expose call_id.
-        conversation.append(
-            {
-                "role": "tool",
-                "name": f"functions.{tool_name}",
-                "channel": "commentary",
-                "recipient": "assistant",
-                "content": output,
-            }
-        )
+        message = {
+            "role": "tool",
+            "name": f"functions.{tool_name}",
+            "channel": "commentary",
+            "recipient": "assistant",
+            "content": output,
+        }
+        conversation.append(message)
+        return message
 
     @staticmethod
     def _append_assistant_turns(
@@ -784,10 +802,11 @@ class GPTOSSBasicAgent(BasicAgent):
         tool_calls: List[Dict[str, Any]],
         reasoning_text: str,
         replay_mode: str,
-    ) -> None:
+    ) -> List[Dict[str, Any]]:
+        appended: List[Dict[str, Any]] = []
         if tool_calls and replay_mode == "raw_recommended" and replay_items:
             conversation.extend(replay_items)
-            return
+            return list(replay_items)
 
         # If a final channel message exists, drop earlier analysis messages to
         # avoid replaying stale chain-of-thought into later turns.
@@ -808,13 +827,13 @@ class GPTOSSBasicAgent(BasicAgent):
         has_analysis_message = any((m.get("channel") == "analysis") for m in assistant_messages)
         # Keep CoT for subsequent sampling when tools are being called.
         if tool_calls and reasoning_text and not has_analysis_message:
-            conversation.append(
-                {
-                    "role": "assistant",
-                    "channel": "analysis",
-                    "content": reasoning_text,
-                }
-            )
+            message = {
+                "role": "assistant",
+                "channel": "analysis",
+                "content": reasoning_text,
+            }
+            conversation.append(message)
+            appended.append(message)
 
         # Preserve explicit assistant messages from model output when available.
         if assistant_messages:
@@ -822,24 +841,26 @@ class GPTOSSBasicAgent(BasicAgent):
                 content = m.get("content")
                 if not isinstance(content, str) or not content.strip():
                     continue
-                conversation.append(
-                    {
-                        "role": "assistant",
-                        "channel": m.get("channel"),
-                        "recipient": m.get("recipient"),
-                        "content_type": m.get("content_type"),
-                        "content": content,
-                    }
-                )
+                message = {
+                    "role": "assistant",
+                    "channel": m.get("channel"),
+                    "recipient": m.get("recipient"),
+                    "content_type": m.get("content_type"),
+                    "content": content,
+                }
+                conversation.append(message)
+                appended.append(message)
         elif assistant_text and assistant_text.strip():
             # Fallback: if we only got flattened output text, preserve it with a sensible channel.
-            conversation.append(
-                {
-                    "role": "assistant",
-                    "channel": "commentary" if tool_calls else "final",
-                    "content": assistant_text.strip(),
-                }
-            )
+            message = {
+                "role": "assistant",
+                "channel": "commentary" if tool_calls else "final",
+                "content": assistant_text.strip(),
+            }
+            conversation.append(message)
+            appended.append(message)
+
+        return appended
 
     # =========================================================================
     # Tool handlers
@@ -866,12 +887,13 @@ class GPTOSSBasicAgent(BasicAgent):
         else:
             feedback = f"QUERY ERROR: {parsed.error or 'Missing code'}"
 
-        self._append_tool_output_message(
+        appended = self._append_tool_output_message(
             conversation,
             tool_call=tool_call,
             tool_name="query_df",
             output=budget.format_feedback(feedback),
         )
+        budget.record_appended_item(appended)
 
     def _harmony_handle_search(
         self,
@@ -886,22 +908,24 @@ class GPTOSSBasicAgent(BasicAgent):
         budget.consume_action()
         if not self._search_handler.is_available:
             feedback = "SEARCH ERROR: Search is not available."
-            self._append_tool_output_message(
+            appended = self._append_tool_output_message(
                 conversation,
                 tool_call=tool_call,
                 tool_name="search_news",
                 output=budget.format_feedback(feedback),
             )
+            budget.record_appended_item(appended)
             return
 
         if not parsed.query:
             feedback = "SEARCH ERROR: Missing query."
-            self._append_tool_output_message(
+            appended = self._append_tool_output_message(
                 conversation,
                 tool_call=tool_call,
                 tool_name="search_news",
                 output=budget.format_feedback(feedback),
             )
+            budget.record_appended_item(appended)
             return
 
         min_date = None
@@ -930,12 +954,13 @@ class GPTOSSBasicAgent(BasicAgent):
             feedback = f"SEARCH ERROR: {error}"
         else:
             feedback = f"SEARCH RESULTS:\n{result}"
-        self._append_tool_output_message(
+        appended = self._append_tool_output_message(
             conversation,
             tool_call=tool_call,
             tool_name="search_news",
             output=budget.format_feedback(feedback),
         )
+        budget.record_appended_item(appended)
 
     def _harmony_handle_submit(
         self,
@@ -991,12 +1016,13 @@ class GPTOSSBasicAgent(BasicAgent):
         else:
             feedback = f"SUBMIT ERROR: {parsed.error or 'No valid forecasts'}"
 
-        self._append_tool_output_message(
+        appended = self._append_tool_output_message(
             conversation,
             tool_call=tool_call,
             tool_name="submit_forecasts",
             output=budget.format_feedback(feedback),
         )
+        budget.record_appended_item(appended)
         return submitted
 
     # =========================================================================
@@ -1014,10 +1040,10 @@ class GPTOSSBasicAgent(BasicAgent):
         if self._memory is None:
             return
 
-        memory_prompt = f"""End of day {current_date}. You can now update your memory.
+        memory_prompt = f"""End of session {current_date}. You can now update your memory.
 
 ## MEMORY UPDATE
-Your memory is the ONLY thing that carries over to tomorrow. Everything else resets. Tomorrow you get: search over news articles and access to the DataFrame (active question predictions, resolved question ground truths, and your final predictions on resolved questions).
+{self._build_memory_carryover_note(current_date)}
 
 Store things NOT recoverable from those tools:
 1. Reasoning behind predictions and how you did on resolved questions that might help with unresolved questions — once a question resolves, your prediction remains visible but your reasoning is lost from the DataFrame. Example: "Q149: PSG 0.70 because Sky Bet implied 55% and Inter eliminated in semis."

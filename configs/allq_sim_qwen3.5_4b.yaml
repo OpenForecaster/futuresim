@@ -1,14 +1,13 @@
-# AllQ simulation using local Qwen3.5-4B via vLLM, with cumulative token budgets.
+# AllQ simulation using local Qwen3.5-4B via vLLM, with context-window budgets.
 #
 # Usage:
 #   python mpi_scripts/run_sim/submit_sim.py --config configs/allq_sim_qwen3.5_4b.yaml --runs 1
 #
 # Notes:
 # - Uses explicit `qwenallq` scaffold for the Qwen native tool-calling agent path.
-# - `max_total_tokens` / `warmup_max_total_tokens` count cumulative input + output tokens,
-#   so they are intentionally larger than the 65k vLLM context length.
+# - `max_total_tokens` / `warmup_max_total_tokens` track current prompt occupancy/headroom.
 # - This config uses token budgets only (no action cap).
-# - `131072` is 2 x 65536, i.e. about twice the agent max context length.
+# - This config targets the full 262144-token Qwen3.5 context window.
 
 # --- Run Script (CUDA 12.9 needed for Qwen3.5 FlashInfer GDN kernels) ---
 run_script: "run_sim.sh"
@@ -50,8 +49,8 @@ embedding_gpu_mem: 0.7
 matching: "openrouter"
 matcher: "deepseek/deepseek-v3.2"
 matcher_gpu_mem: 0.0
-max_model_len: 131072
-agent_max_model_len: 131072
+max_model_len: 262144
+agent_max_model_len: 262144
 embedding_max_model_len: 32768
 
 # --- vLLM Agent Runtime ---
@@ -75,12 +74,12 @@ parallel: true
 defaults:
   provider: "vllm"
   scaffold: "qwenallq"
-  max_total_tokens: 131072
-  warmup_max_total_tokens: 131072
-  submit_reserve_tokens: 4096
-  force_submit_threshold_tokens: 8192
+  max_total_tokens: 262144
+  warmup_max_total_tokens: 262144
+  submit_reserve_tokens: 8192
+  force_submit_threshold_tokens: 16384
   temperature: 0.7
-  max_tokens: 8192
+  max_tokens: 4096
   max_retries: 3
 
 agents:

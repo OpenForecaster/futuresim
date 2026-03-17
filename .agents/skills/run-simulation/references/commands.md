@@ -72,6 +72,19 @@ python mpi_scripts/run_sim/submit_sim.py \
 - Common artifacts:
   - `config.json`
   - `actions.jsonl`
-  - `daily_metrics.csv`
+  - `daily_metrics.csv` (one cumulative row per wakeup session)
+  - `test_daily_metrics.csv` (same metrics, test questions only)
   - `agents/<agent_id>/model_outputs.jsonl`
   - `agents/<agent_id>/memory/`
+
+## OpenForesight Session And Split Knobs
+
+Useful shared config fields for OpenForesight runs:
+
+- `timegap_days`: wake the agent every `N` days instead of daily
+- `split`: main split to simulate, usually `train` or `test`
+- `prepend_train_resolution_start`
+- `prepend_train_resolution_end`
+- `subsample_per_month`
+
+The OpenForesight loader uses the main `split` plus an optional prepended `train` window. Prepended questions are tagged with `source_split="train"` and the main split keeps its own `source_split`, which is what enables `test_daily_metrics.csv`.

@@ -10,9 +10,9 @@ class AgentConfig:
     warmup_max_actions: Optional[int] = None
     max_total_tokens: Optional[int] = None
     warmup_max_total_tokens: Optional[int] = None
-    submit_reserve_tokens: int = 4096
+    submit_reserve_tokens: int = 8192
     warmup_submit_reserve_tokens: Optional[int] = None
-    force_submit_threshold_tokens: int = 8192
+    force_submit_threshold_tokens: int = 16384
     warmup_force_submit_threshold_tokens: Optional[int] = None
     warmup_parallelism: int = 20  # Default higher parallelism for warmup
     max_submit_retries: int = 3
@@ -31,6 +31,7 @@ class AgentConfig:
     snippet_max_chars: int = 2000
     article_max_chars: int = 4000
     search_cutoff_days: int = 0
+    timegap_days: int = 1
     
     # Single agent mode - adjusts prompt to focus on accuracy only (no peer/market language)
     single_agent_mode: bool = False
@@ -87,3 +88,6 @@ class AgentConfig:
             raise ValueError(
                 "warmup_force_submit_threshold_tokens must be >= warmup_submit_reserve_tokens"
             )
+
+        if self.timegap_days <= 0:
+            raise ValueError("timegap_days must be >= 1")

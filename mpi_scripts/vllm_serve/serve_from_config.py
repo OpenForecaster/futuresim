@@ -46,6 +46,7 @@ def main() -> int:
     served_model_name = cfg.get("served_model_name")
 
     enable_tools = _as_bool(cfg.get("enable_tools"), default=False)
+    enable_prefix_caching = _as_bool(cfg.get("enable_prefix_caching"), default=True)
     tool_call_parser = cfg.get("tool_call_parser", "openai")
     harmony_non_strict_cfg = cfg.get("harmony_non_strict")
     harmony_non_strict = (
@@ -82,6 +83,8 @@ def main() -> int:
     # Tool calling flags (require newer vLLM).
     if enable_tools:
         cmd += ["--enable-auto-tool-choice", "--tool-call-parser", str(tool_call_parser)]
+    if enable_prefix_caching:
+        cmd += ["--enable-prefix-caching"]
 
     env = os.environ.copy()
     existing_pythonpath = env.get("PYTHONPATH", "")

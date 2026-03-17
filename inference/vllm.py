@@ -112,6 +112,7 @@ class VLLMInference:
                  enable_tools: bool = False,
                  tool_call_parser: Optional[str] = None,
                  tool_parser_plugin: Optional[str] = None,
+                 enable_prefix_caching: bool = True,
                  cuda_visible_devices: Optional[str] = None,
                  language_model_only: bool = False,
                  **kwargs):
@@ -130,6 +131,9 @@ class VLLMInference:
             enable_tools: Start vLLM with tool-calling flags (requires newer vLLM).
             tool_call_parser: Optional parser name for --tool-call-parser.
             tool_parser_plugin: Optional plugin module for --tool-parser-plugin.
+            enable_prefix_caching: Enable vLLM automatic prefix caching for
+                repeated chat prefixes. Good default for agent/matcher chat
+                servers; keep disabled for embedding/pooling servers.
             language_model_only: Skip vision encoder for multimodal models (vLLM >=0.12).
             **kwargs: Additional args (ignored for server mode)
         """
@@ -151,6 +155,7 @@ class VLLMInference:
         self.enable_tools = enable_tools
         self.tool_call_parser = (tool_call_parser or "").strip() or None
         self.tool_parser_plugin = (tool_parser_plugin or "").strip() or None
+        self.enable_prefix_caching = bool(enable_prefix_caching)
         self.cuda_visible_devices = cuda_visible_devices
         self.language_model_only = language_model_only
 
@@ -181,6 +186,7 @@ class VLLMInference:
                     and bool(info.get('enable_tools', False)) == bool(self.enable_tools)
                     and (info.get('tool_call_parser') or None) == self.tool_call_parser
                     and (info.get('tool_parser_plugin') or None) == self.tool_parser_plugin
+                    and bool(info.get('enable_prefix_caching', False)) == self.enable_prefix_caching
                 ):
                     self._port = int(port)
                     self._server_started = True
@@ -227,6 +233,7 @@ class VLLMInference:
                 "--pipeline-parallel-size", str(self.pipeline_parallel_size),
                 "--disable-log-stats",
                 "--trust-remote-code",
+                "--enable-prompt-tokens-details",
                 "--host", "0.0.0.0",  # Bind to all interfaces
             ]
             if self.enable_expert_parallel:
@@ -238,6 +245,9 @@ class VLLMInference:
 
             if self.language_model_only:
                 cmd += ["--language-model-only"]
+
+            if self.enable_prefix_caching:
+                cmd += ["--enable-prefix-caching"]
         
             # Tool calling on vLLM's OpenAI server requires extra flags in newer vLLM.
             # We keep this behind a toggle because older vLLM versions will error on
@@ -279,6 +289,7 @@ class VLLMInference:
                     'enable_tools': self.enable_tools,
                     'tool_call_parser': self.tool_call_parser,
                     'tool_parser_plugin': self.tool_parser_plugin,
+                    'enable_prefix_caching': self.enable_prefix_caching,
                 }
         
             # Immediately check if process died
@@ -328,6 +339,7 @@ class VLLMInference:
                             'enable_tools': self.enable_tools,
                             'tool_call_parser': self.tool_call_parser,
                             'tool_parser_plugin': self.tool_parser_plugin,
+                            'enable_prefix_caching': self.enable_prefix_caching,
                         }
                     time.sleep(0.5)
                     if proc.poll() is not None:

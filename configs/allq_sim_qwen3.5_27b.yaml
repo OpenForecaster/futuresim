@@ -1,18 +1,18 @@
-# AllQ full simulation using local Qwen3.5-35B-A3B via vLLM with the Qwen-native AllQ scaffold.
+# AllQ full simulation using local Qwen3.5-27B via vLLM.
 #
 # Usage:
-#   python mpi_scripts/run_sim/submit_sim.py --config configs/allq_sim_qwen3.5_35b_a3b_qwenallq.yaml --runs 1
+#   python mpi_scripts/run_sim/submit_sim.py --config configs/allq_sim_qwen3.5_27b.yaml --runs 1
 #
 # Notes:
-# - Uses the `qwenallq` scaffold.
+# - Uses the plain `allQ` scaffold.
 # - Requests 3 H100-class GPUs: GPU2 for matcher + embedder, GPU0-1 for the agent model.
-# - Runs the MoE model as TP=2 with expert parallel enabled across the 2 model GPUs.
+# - Runs the dense 27B model with tensor parallelism only (TP=2, no expert parallel).
 
 # --- Run Script (CUDA 12.9 needed for Qwen3.5 FlashInfer GDN kernels) ---
 run_script: "run_sim.sh"
 
 # --- Simulation Meta ---
-sim_name: "allq_sim_qwen3.5-35b-a3b_qwenallq"
+sim_name: "allq_sim_qwen3.5-27b"
 start_date: "2025-05-01"
 end_date: "2025-08-23"
 resolution_start: "2025-05-01"
@@ -28,7 +28,7 @@ resources:
   memory_gb: 256
   disk_gb: 50
   bid: 55
-  requirements: "TARGET.CUDACapability >= 9.0 && TARGET.CUDAGlobalMemoryMb > 70000 && TARGET.CUDAGlobalMemoryMb < 120000 && TARGET.Machine =!= \"i103.internal.cluster.is.localnet\""
+  requirements: "TARGET.CUDACapability >= 9.0 && TARGET.CUDAGlobalMemoryMb > 70000 && TARGET.Machine =!= \"i103.internal.cluster.is.localnet\""
 
 # --- Data Paths ---
 dataset: "openforesight"
@@ -56,10 +56,7 @@ vllm_gpu_mem: 0.85
 vllm_tensor_parallel_size: 2
 vllm_max_num_seqs: 64
 vllm_startup_timeout: 900
-vllm_enable_expert_parallel: true
-vllm_all2all_backend: "deepep_high_throughput"
-vllm_enable_tools: true
-vllm_tool_call_parser: "qwen3_coder"
+vllm_enable_tools: false
 language_model_only: true
 
 # --- Local 3-GPU Pinning ---
@@ -74,7 +71,7 @@ parallel: true
 # --- Agents Configuration ---
 defaults:
   provider: "vllm"
-  scaffold: "qwenallq"
+  scaffold: "allQ"
   max_actions: 50
   warmup_max_actions: 10
   temperature: 0.7
@@ -82,5 +79,5 @@ defaults:
   max_retries: 3
 
 agents:
-  - model: "/fast/sgoel/models/Qwen3.5-35B-A3B-text"
+  - model: "/fast/sgoel/models/Qwen3.5-27B-text"
     provider: "vllm"

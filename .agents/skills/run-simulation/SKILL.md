@@ -14,7 +14,7 @@ Use this skill for `scripts/test_basic_agent.py`, `mpi_scripts/run_sim/submit_si
 3. Read [references/commands.md](references/commands.md) for the standard commands and env-backed locations.
 4. Read [references/restarts.md](references/restarts.md) when the task touches warmup reuse, truncation, or state restoration.
 5. Use the `agent-scaffolds` skill when the task involves choosing or changing scaffold behavior.
-6. Validate with the smallest run that exercises the changed path: local smoke test, `--dry-run`, or one cluster run.
+6. Validate with the smallest run that exercises the changed path: local smoke test, `--dry-run`, or one cluster run. Inspect `daily_metrics.csv` and `test_daily_metrics.csv` when split-specific metrics matter.
 
 ## Repo Conventions
 
@@ -23,6 +23,7 @@ Use this skill for `scripts/test_basic_agent.py`, `mpi_scripts/run_sim/submit_si
 - `scripts/test_basic_agent.py` writes run outputs under `FSIM_OUTPUT_BASE`.
 - `mpi_scripts/run_sim/submit_sim.py` writes cluster logs under `FSIM_SIM_LOG_BASE`.
 - Resume mode skips Day 0 warmup because predictions are restored from `actions.jsonl`.
+- `daily_metrics.csv` is session-based: one row per wakeup date. `test_daily_metrics.csv` mirrors it for test-only metrics.
 
 ## Ask The User When
 

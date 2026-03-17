@@ -19,6 +19,10 @@
 - `warmup_max_total_tokens`
 - `warmup_parallelism`
 - `max_actions`
+- `max_total_tokens`
+- `submit_reserve_tokens`
+- `force_submit_threshold_tokens`
+- `max_tokens`
 - `enable_memory`
 
 Model choice alone does not change scaffold behavior. That separation is intentional.

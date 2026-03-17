@@ -16,6 +16,7 @@ class Question:
     ground_truth_answer: str = ""
     options: Optional[List[str]] = None
     prompt: str = ""
+    source_split: str = ""
 
 
 class QuestionPool:
@@ -36,12 +37,23 @@ class QuestionPool:
                  dataset_path: str = None,
                  dataset_cache: str = None,
                  split: str = "train",
+                 prepend_train_resolution_start: date = None,
+                 prepend_train_resolution_end: date = None,
+                 subsample_per_month: Optional[int] = None,
                  resolution_start: date = None, 
                  resolution_end: date = None,
                  min_forecasters: int = 0,
                  resolved_only: bool = False):
         
-        self.fetcher = get_fetcher(dataset, dataset_path, dataset_cache, split)
+        self.fetcher = get_fetcher(
+            dataset,
+            dataset_path,
+            dataset_cache,
+            split,
+            prepend_train_resolution_start=prepend_train_resolution_start,
+            prepend_train_resolution_end=prepend_train_resolution_end,
+            subsample_per_month=subsample_per_month,
+        )
         self.resolution_start = resolution_start
         self.resolution_end = resolution_end
         self.min_forecasters = min_forecasters
@@ -77,7 +89,8 @@ class QuestionPool:
                 resolution_date=q_data.resolution_date,
                 ground_truth_answer=q_data.ground_truth_answer,
                 options=q_data.options,
-                prompt=getattr(q_data, "prompt", "") or ""
+                prompt=getattr(q_data, "prompt", "") or "",
+                source_split=getattr(q_data, "source_split", "") or "",
             )
             
             self._all_questions[q.qid] = q

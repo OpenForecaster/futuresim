@@ -55,7 +55,6 @@ class FeedbackHandler:
         1. Results for questions resolved since last check
         2. Cumulative performance metrics
         """
-        del current_date
         del inference_provider
         
         # 1. Identify newly resolved questions
@@ -131,8 +130,15 @@ class FeedbackHandler:
         avg_brier = (self.total_brier_sum / self.total_resolved_count) if self.total_resolved_count > 0 else 0.0
         accuracy = (self.total_accuracy_count / self.total_resolved_count * 100) if self.total_resolved_count > 0 else 0.0
         
+        last_active_date = getattr(forecast_interface, "last_active_date", None)
+        if last_active_date:
+            resolved_header = f"## RESULTS SINCE YOUR LAST WAKEUP ({last_active_date} -> {current_date})"
+        else:
+            resolved_header = "## RESULTS SINCE YOUR LAST WAKEUP"
+
         return {
             'resolved_today': resolved_today,
+            'resolved_header': resolved_header,
             'metrics': {
                 'total_predictions': total_predictions,
                 'num_resolved': self.total_resolved_count,
@@ -149,7 +155,7 @@ class FeedbackHandler:
         # Section 1: Today's Resolved Questions
         resolved = feedback_data.get('resolved_today', [])
         if resolved:
-            lines = ["## YESTERDAY'S RESULTS", ""]
+            lines = [feedback_data.get('resolved_header', "## LAST SESSION'S RESULTS"), ""]
             for item in resolved:
                 lines.append(f"- \"{item['title']}\"")
                 distribution = self._format_distribution(item.get('my_pred_distribution') or {})

@@ -196,11 +196,13 @@ def prepare_restart_directory(source_dir: str, restart_day: str, output_dir: str
                 if copied:
                     print(f"  Copied timing stats for agent: {agent_name} ({copied} lines)")
     
-    # 2.5 Copy daily metrics history (before restart_day) if present.
+    # 2.5 Copy metrics history (before restart_day) if present.
     # Note: some runs have no CSV header; we filter by the first comma-delimited field.
-    src_metrics = os.path.join(source_dir, "daily_metrics.csv")
-    if os.path.exists(src_metrics):
-        dst_metrics = os.path.join(output_dir, "daily_metrics.csv")
+    for metrics_name in ("daily_metrics.csv", "test_daily_metrics.csv"):
+        src_metrics = os.path.join(source_dir, metrics_name)
+        if not os.path.exists(src_metrics):
+            continue
+        dst_metrics = os.path.join(output_dir, metrics_name)
         copied = 0
         with open(src_metrics, "r") as src, open(dst_metrics, "w") as dst:
             for line in src:
@@ -220,7 +222,7 @@ def prepare_restart_directory(source_dir: str, restart_day: str, output_dir: str
                     dst.write(line + "\n")
                     copied += 1
         if copied:
-            print(f"  Copied {copied} daily metrics rows (before {restart_day})")
+            print(f"  Copied {copied} rows from {metrics_name} (before {restart_day})")
 
     # 3. Copy matcher cache if exists
     src_cache = os.path.join(source_dir, "matcher_cache.json")
@@ -273,6 +275,7 @@ def create_inference_provider(provider: str, model: str, args):
             enable_tools=getattr(args, "vllm_enable_tools", False),
             tool_call_parser=tool_call_parser,
             tool_parser_plugin=getattr(args, "vllm_tool_parser_plugin", None),
+            enable_prefix_caching=getattr(args, "vllm_enable_prefix_caching", True),
             cuda_visible_devices=getattr(args, "agent_cuda_visible_devices", None),
             language_model_only=getattr(args, "language_model_only", False),
         )
@@ -394,7 +397,7 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
         submit_reserve_tokens = _optional_int(
             agent_def.get(
                 'submit_reserve_tokens',
-                defaults.get('submit_reserve_tokens', getattr(args, 'submit_reserve_tokens', 4096))
+                defaults.get('submit_reserve_tokens', getattr(args, 'submit_reserve_tokens', 8192))
             )
         )
         warmup_submit_reserve_tokens = _optional_int(
@@ -408,7 +411,7 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
                 'force_submit_threshold_tokens',
                 defaults.get(
                     'force_submit_threshold_tokens',
-                    getattr(args, 'force_submit_threshold_tokens', 8192),
+                    getattr(args, 'force_submit_threshold_tokens', 16384),
                 )
             )
         )
@@ -489,6 +492,7 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
                 **({'reasoning': reasoning} if reasoning is not None else {}),
             },
             search_cutoff_days=search_cutoff_days,
+            timegap_days=getattr(args, 'timegap_days', 1),
             single_agent_mode=(len(agents_list) == 1),  # Adjust prompt for single-agent runs
             gptoss_prompt_mode=gptoss_prompt_mode,
             gptoss_reasoning_effort=gptoss_reasoning_effort,
@@ -618,6 +622,14 @@ def main():
                        help="Base directory for simulation outputs")
     parser.add_argument("--split", choices=["train", "test", "validation"], default="train",
                        help="Dataset split to use (default: train)")
+    parser.add_argument("--prepend_train_resolution_start", default=None,
+                       help="Optional OpenForesight train prelude start date (YYYY-MM-DD).")
+    parser.add_argument("--prepend_train_resolution_end", default=None,
+                       help="Optional OpenForesight train prelude end date (YYYY-MM-DD).")
+    parser.add_argument("--subsample_per_month", type=int, default=1000,
+                       help="Per-month question cap for the optional prepended train window.")
+    parser.add_argument("--timegap_days", type=int, default=1,
+                       help="Wake the model every N days instead of daily (default 1).")
     
     # Multi-agent config
     parser.add_argument("--agents_config", default=None,
@@ -660,15 +672,15 @@ def main():
     parser.add_argument("--warmup_max_actions", type=int, default=None,
                        help="Optional action budget per question during warmup phase (AllQAgent only)")
     parser.add_argument("--max_total_tokens", type=int, default=None,
-                       help="Optional total token budget per day/question loop (counts input + output tokens per LLM call)")
+                       help="Optional context-window budget per day/question loop (tracks current prompt occupancy, not cumulative spend)")
     parser.add_argument("--warmup_max_total_tokens", type=int, default=None,
-                       help="Optional total token budget per warmup question loop")
-    parser.add_argument("--submit_reserve_tokens", type=int, default=4096,
-                       help="Reserved tokens to keep available for a final submit (default 4096)")
+                       help="Optional context-window budget per warmup question loop")
+    parser.add_argument("--submit_reserve_tokens", type=int, default=8192,
+                       help="Reserved context-window headroom to keep available for a final submit (default 8192)")
     parser.add_argument("--warmup_submit_reserve_tokens", type=int, default=None,
                        help="Optional warmup-specific submit reserve tokens")
-    parser.add_argument("--force_submit_threshold_tokens", type=int, default=8192,
-                       help="Force-submit once remaining token budget is at or below this threshold (default 8192)")
+    parser.add_argument("--force_submit_threshold_tokens", type=int, default=16384,
+                       help="Force-submit once remaining context budget is at or below this threshold (default 16384)")
     parser.add_argument("--warmup_force_submit_threshold_tokens", type=int, default=None,
                        help="Optional warmup-specific force-submit threshold tokens")
     parser.add_argument("--warmup_parallelism", type=int, default=20,
@@ -678,7 +690,7 @@ def main():
     parser.add_argument("--temperature", type=float, default=0.7,
                        help="Sampling temperature")
     parser.add_argument("--max_tokens", type=int, default=2048,
-                       help="Max tokens to generate")
+                       help="Max output tokens to generate per LLM call")
     parser.add_argument("--gptoss_prompt_mode", choices=["instructions", "first_user"], default="instructions",
                        help="GPT-OSS Responses prompt placement mode")
     parser.add_argument("--gptoss_reasoning_effort", choices=["low", "medium", "high"], default="medium",
@@ -715,6 +727,8 @@ def main():
                        help="vLLM request timeout in seconds for chat/embeddings calls (default 120)")
     parser.add_argument("--vllm_enable_tools", action="store_true", default=False,
                        help="Start vLLM servers with tool-calling enabled (required for native Qwen tool calls)")
+    parser.add_argument("--vllm_enable_prefix_caching", action=argparse.BooleanOptionalAction, default=True,
+                       help="Enable vLLM automatic prefix caching for chat/matcher servers (default: on)")
     parser.add_argument("--vllm_tool_call_parser", default=None,
                        help="vLLM tool parser name (e.g. qwen3_coder, openai). Auto-detected when omitted.")
     parser.add_argument("--vllm_tool_parser_plugin", default=None,
@@ -809,7 +823,15 @@ def main():
             return v.isoformat()
         return v
 
-    for key in ("start_date", "end_date", "resolution_start", "resolution_end", "restart_from_day"):
+    for key in (
+        "start_date",
+        "end_date",
+        "resolution_start",
+        "resolution_end",
+        "restart_from_day",
+        "prepend_train_resolution_start",
+        "prepend_train_resolution_end",
+    ):
         if hasattr(args, key):
             setattr(args, key, _normalize_date_like(getattr(args, key)))
 
@@ -1011,6 +1033,7 @@ def main():
                                           max_num_seqs=getattr(args, "vllm_max_num_seqs", 8),
                                           startup_timeout=getattr(args, "vllm_startup_timeout", 300.0),
                                           rope_scaling=matcher_rope_scaling,
+                                          enable_prefix_caching=getattr(args, "vllm_enable_prefix_caching", True),
                                           cuda_visible_devices=getattr(args, "aux_cuda_visible_devices", None))
         # Force server startup by making a warmup call - fail job if this fails
         print(f"  Warming up matcher ({args.matcher}, GPU: {args.matcher_gpu_mem:.0%})...")
@@ -1052,6 +1075,7 @@ def main():
                     max_num_seqs=getattr(args, "vllm_max_num_seqs", 8),
                     startup_timeout=getattr(args, "vllm_startup_timeout", 300.0),
                     rope_scaling=embedding_rope_scaling,
+                    enable_prefix_caching=False,
                     cuda_visible_devices=getattr(args, "aux_cuda_visible_devices", None),
                 )
                 # Force server startup and verify /v1/embeddings works.
@@ -1126,6 +1150,7 @@ def main():
                 enable_tools=getattr(args, "vllm_enable_tools", False),
                 tool_call_parser=_resolve_vllm_tool_call_parser(args.model_path, args),
                 tool_parser_plugin=getattr(args, "vllm_tool_parser_plugin", None),
+                enable_prefix_caching=getattr(args, "vllm_enable_prefix_caching", True),
                 cuda_visible_devices=getattr(args, "agent_cuda_visible_devices", None),
                 language_model_only=getattr(args, "language_model_only", False),
             )
@@ -1173,6 +1198,7 @@ def main():
                 'max_tokens': args.max_tokens,
             },
             search_cutoff_days=args.search_cutoff_days,
+            timegap_days=args.timegap_days,
             single_agent_mode=True,  # Legacy CLI mode is always single-agent
             gptoss_prompt_mode=args.gptoss_prompt_mode,
             gptoss_reasoning_effort=args.gptoss_reasoning_effort,
@@ -1280,6 +1306,10 @@ def main():
         resolution_end=resolution_end,
         parallel=args.parallel,
         split=args.split,
+        prepend_train_resolution_start=args.prepend_train_resolution_start,
+        prepend_train_resolution_end=args.prepend_train_resolution_end,
+        subsample_per_month=args.subsample_per_month,
+        timegap_days=args.timegap_days,
         resume_dir=args.resume if args.resume else None,
         cheat_feedback=getattr(args, 'cheat_feedback', False),
     )
@@ -1333,7 +1363,11 @@ def main():
                 resolved_questions=env.resolved_questions,
                 resolved_agent_predictions=env.resolved_agent_predictions,
                 histories_lock=env._histories_lock,
-                market_csv_path=None  # No market CSV yet
+                market_csv_path=None,  # No market CSV yet
+                timegap_days=env.timegap_days,
+                last_active_date=env._get_last_active_date(),
+                next_active_date=env._get_next_active_date(),
+                simulation_end_date=env.end_date,
             )
             warmup_interface.source_name = getattr(env, 'source_name', 'openforesight')
             warmup_interface.source_context = getattr(env, 'source_context', '')

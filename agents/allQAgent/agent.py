@@ -308,6 +308,7 @@ Output exactly one <memo_add> block. No other text needed."""
         - All actions are tagged with target_qid for searchable logs
         """
         budget = self._create_budget_tracker(warmup=True)
+        budget.bootstrap_context(messages)
         final_submit_prompt_injected = False
         final_submit_retry_used = False
         empty_retries = 0
@@ -316,11 +317,13 @@ Output exactly one <memo_add> block. No other text needed."""
         while not budget.is_exhausted():
             force_submit_turn = budget.should_force_submit()
             if force_submit_turn and not final_submit_prompt_injected:
-                messages.append(
+                self._append_with_budget(
+                    messages,
+                    budget,
                     {
                         "role": "user",
                         "content": self._build_warmup_final_submit_instruction(target_qid, budget),
-                    }
+                    },
                 )
                 final_submit_prompt_injected = True
 
@@ -359,7 +362,7 @@ Output exactly one <memo_add> block. No other text needed."""
                     if force_submit_turn and not final_submit_retry_used:
                         final_submit_retry_used = True
                         continue
-                    messages.append({"role": "assistant", "content": response})
+                    self._append_with_budget(messages, budget, {"role": "assistant", "content": response})
                     budget.consume_action()
                     self._log_action(
                         forecast_interface,
@@ -377,10 +380,14 @@ Output exactly one <memo_add> block. No other text needed."""
                         "<probability>...</probability>\n\n"
                         f"Parser error: {err}"
                     )
-                    messages.append({"role": "user", "content": budget.format_feedback(feedback)})
+                    self._append_with_budget(
+                        messages,
+                        budget,
+                        {"role": "user", "content": budget.format_feedback(feedback)},
+                    )
                     continue
 
-                messages.append({"role": "assistant", "content": response})
+                self._append_with_budget(messages, budget, {"role": "assistant", "content": response})
                 parsed = ParsedAction(
                     action_type="submit",
                     code=None,
@@ -417,7 +424,7 @@ Output exactly one <memo_add> block. No other text needed."""
                 final_submit_retry_used = True
                 continue
 
-            messages.append({"role": "assistant", "content": response})
+            self._append_with_budget(messages, budget, {"role": "assistant", "content": response})
             
             if parsed.action_type == "next":
                 # In warmup, 'next' isn't really appropriate as we want them to submit.
@@ -433,7 +440,11 @@ Output exactly one <memo_add> block. No other text needed."""
                 self._log_action(forecast_interface, messages, response, "warmup_query_disabled",
                                budget, qid=target_qid, reasoning=reasoning)
                 feedback = "Error: Database queries are not available in this per-question focused mode. Please use search or submit your forecast."
-                messages.append({"role": "user", "content": budget.format_feedback(feedback)})
+                self._append_with_budget(
+                    messages,
+                    budget,
+                    {"role": "user", "content": budget.format_feedback(feedback)},
+                )
             
             elif parsed.action_type == "search":
                 self._handle_search(
@@ -466,7 +477,11 @@ Output exactly one <memo_add> block. No other text needed."""
                     self._log_action(forecast_interface, messages, response, "warmup_submit_wrong_qid",
                                    budget, qid=target_qid, reasoning=reasoning)
                     feedback = f"Error: You must submit a forecast for question {target_qid}. You submitted for different IDs or none."
-                    messages.append({"role": "user", "content": budget.format_feedback(feedback)})
+                    self._append_with_budget(
+                        messages,
+                        budget,
+                        {"role": "user", "content": budget.format_feedback(feedback)},
+                    )
                 
             else:
                 self._handle_invalid(

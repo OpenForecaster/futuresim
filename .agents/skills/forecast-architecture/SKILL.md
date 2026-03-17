@@ -13,13 +13,14 @@ Use this skill for edits in `agents/`, `environment/`, prompt construction, and 
 2. Read [references/scoring.md](references/scoring.md) before changing scoring, metrics, or benchmark-facing prompt text.
 3. Read [references/memory-and-warmup.md](references/memory-and-warmup.md) before touching `allQ`, `allqd`, memory persistence, or restart behavior.
 4. Keep the core invariants stable unless the user explicitly wants a benchmark-methodology change.
-5. Validate with a short simulation and inspect `actions.jsonl`, `daily_metrics.csv`, and agent logs.
+5. Validate with a short simulation and inspect `actions.jsonl`, `daily_metrics.csv`, `test_daily_metrics.csv` when relevant, and agent logs.
 
 ## Core Invariants
 
 - Predictions append to per-question history; they do not overwrite earlier forecasts.
-- Agents on the same day should see the same frozen aggregate state for fairness.
+- Agents in the same wakeup session should see the same frozen aggregate state for fairness.
 - Persistent memory is the intended cross-day durable context.
+- `timegap_days` turns the daily loop into wakeup sessions; prompt text, memory carryover, and active-question scoring should respect that session cadence.
 - `allQ` and `allqd` use per-question loops without the DataFrame query path.
 - Scaffold-specific prompt formats can differ, but simulation semantics should stay comparable unless the user wants a methodological shift.
 

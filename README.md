@@ -111,5 +111,15 @@ python mpi_scripts/skyrl_search/submit_skyrl_search_train.py \
 Simulation results are saved to `FSIM_OUTPUT_BASE/<sim_name>/<timestamp>/`:
 - `config.json` — Run configuration
 - `actions.jsonl` — All predictions and resolutions
-- `daily_metrics.csv` — Per-day scores
+- `daily_metrics.csv` — One cumulative metrics row per wakeup session
+- `test_daily_metrics.csv` — Same metrics, filtered to questions whose `source_split` is `test`
 - `agents/<agent_id>/` — Per-agent logs and memory
+
+## OpenForesight Notes
+
+- `timegap_days` changes the simulator from daily wakeups to one session every `N` days. Prompts mention the last and next wakeup dates during normal sessions, and metrics for active questions are evaluated through the end of that wakeup interval.
+- OpenForesight configs can prepend a window from the `train` split ahead of the main `split` with:
+  - `prepend_train_resolution_start`
+  - `prepend_train_resolution_end`
+  - `subsample_per_month`
+- Each OpenForesight question carries a `source_split` tag at load time so split-specific metrics can be logged without a separate loader path.

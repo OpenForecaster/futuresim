@@ -52,7 +52,7 @@ class SearchHandler:
             effective_max_date = min(max_date, allowed_max_date)
             if max_date > allowed_max_date:
                 info_lines.append(
-                    f"Note: maximum allowed search date is {allowed_max_date.isoformat()} in this simulation. "
+                    f"Note: maximum allowed search date is {allowed_max_date.isoformat()}. "
                     f"Your requested to-date {max_date.isoformat()} was capped."
                 )
         

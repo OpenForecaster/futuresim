@@ -40,8 +40,11 @@ class SimLogger:
         self._metrics_lock = Lock()
         self.metrics_path = os.path.join(output_dir, "daily_metrics.csv")
         self.metrics_file = open(self.metrics_path, mode)
+        self.test_metrics_path = os.path.join(output_dir, "test_daily_metrics.csv")
+        self.test_metrics_file = open(self.test_metrics_path, mode)
         if not append:
             self.metrics_file.write(DAILY_METRICS_HEADER)
+            self.test_metrics_file.write(DAILY_METRICS_HEADER)
         
         self._matcher_lock = Lock()
         self.matcher_file = open(os.path.join(output_dir, "matcher.jsonl"), mode)
@@ -101,12 +104,20 @@ class SimLogger:
             self.actions_file.write(json.dumps(record) + "\n")
             self.actions_file.flush()
 
+    def _write_metrics_rows(self, file_obj, sim_date: date, metrics_list: List[Dict[str, Any]]) -> None:
+        for m in metrics_list:
+            row = f"{sim_date},{m['agent_id']},{m['avg_brier']:.4f},{m['peer_score']:.4f},{m['tw_peer_score']:.4f},{m['accuracy']:.2f},{m['exp_acc']:.4f},{m['total_predictions']}\n"
+            file_obj.write(row)
+
     def log_daily_metrics(self, sim_date: date, metrics_list: List[Dict[str, Any]]):
         with self._metrics_lock:
-            for m in metrics_list:
-                row = f"{sim_date},{m['agent_id']},{m['avg_brier']:.4f},{m['peer_score']:.4f},{m['tw_peer_score']:.4f},{m['accuracy']:.2f},{m['exp_acc']:.4f},{m['total_predictions']}\n"
-                self.metrics_file.write(row)
+            self._write_metrics_rows(self.metrics_file, sim_date, metrics_list)
             self.metrics_file.flush()
+
+    def log_test_daily_metrics(self, sim_date: date, metrics_list: List[Dict[str, Any]]):
+        with self._metrics_lock:
+            self._write_metrics_rows(self.test_metrics_file, sim_date, metrics_list)
+            self.test_metrics_file.flush()
         
     def log_model_output(self, sim_date: date, agent_id: str, prompt: str, 
                          response: str, metadata: Optional[Dict[str, Any]] = None):
@@ -165,6 +176,7 @@ class SimLogger:
     def close(self):
         self.actions_file.close()
         self.metrics_file.close()
+        self.test_metrics_file.close()
         self.matcher_file.close()
         with self._agent_files_lock:
             for f_out, f_raw in self._agent_files.values():
@@ -268,6 +280,10 @@ class SimulationEnvironment:
                  resolution_end: date = None,
                  parallel: bool = True,
                  split: str = "train",
+                 prepend_train_resolution_start: Optional[date] = None,
+                 prepend_train_resolution_end: Optional[date] = None,
+                 subsample_per_month: Optional[int] = None,
+                 timegap_days: int = 1,
                  resume_dir: str = None,
                  min_forecasters: int = 0,
                  resolved_only: bool = False,
@@ -282,11 +298,16 @@ class SimulationEnvironment:
         if start_date is None:
              raise ValueError("start_date required")
 
+        self.start_date = start_date
         self.current_date = start_date
         self.end_date = end_date
         self.output_dir = output_dir
         self.parallel = parallel
         self.split = split
+        self.prepend_train_resolution_start = prepend_train_resolution_start
+        self.prepend_train_resolution_end = prepend_train_resolution_end
+        self.subsample_per_month = subsample_per_month
+        self.timegap_days = max(1, int(timegap_days or 1))
         self.cheat_feedback = cheat_feedback
         
         # Logging and market state
@@ -308,6 +329,9 @@ class SimulationEnvironment:
             dataset_path=dataset_path,
             dataset_cache=dataset_cache,
             split=split,
+            prepend_train_resolution_start=self.prepend_train_resolution_start,
+            prepend_train_resolution_end=self.prepend_train_resolution_end,
+            subsample_per_month=self.subsample_per_month,
             resolution_start=resolution_start,
             resolution_end=resolution_end,
             min_forecasters=min_forecasters,
@@ -374,10 +398,14 @@ class SimulationEnvironment:
         print(f"Simulation: {self.current_date} to {self.end_date} (Resume: {bool(self.resume_dir)})")
         
         while self.current_date <= self.end_date:
-            print(f"\n--- Day {self.current_date} ---")
+            if self.timegap_days > 1:
+                horizon = self._get_metrics_evaluation_date(self.current_date)
+                print(f"\n--- Wakeup {self.current_date} (covers through {horizon}) ---")
+            else:
+                print(f"\n--- Day {self.current_date} ---")
             self.step()
             self._print_daily_scores()
-            self.current_date += timedelta(days=1)
+            self.current_date += timedelta(days=self.timegap_days)
         
         self.logger.close()
         self._print_final_summary()
@@ -387,6 +415,26 @@ class SimulationEnvironment:
         if self.agent_scores:
             scores_str = ", ".join(f"{aid}: {sc:+.2f}" for aid, sc in sorted(self.agent_scores.items()))
             print(f"  Scores: {scores_str}")
+
+    def _get_metrics_evaluation_date(self, sim_date: Optional[date] = None) -> date:
+        """Return the end-of-interval date used for metrics at a wakeup."""
+        sim_date = sim_date or self.current_date
+        if self.end_date is None:
+            return sim_date
+        return min(sim_date + timedelta(days=self.timegap_days - 1), self.end_date)
+
+    def _get_last_active_date(self, sim_date: Optional[date] = None) -> Optional[date]:
+        sim_date = sim_date or self.current_date
+        if sim_date <= self.start_date and not self.resume_dir:
+            return None
+        return sim_date - timedelta(days=self.timegap_days)
+
+    def _get_next_active_date(self, sim_date: Optional[date] = None) -> Optional[date]:
+        sim_date = sim_date or self.current_date
+        next_active = sim_date + timedelta(days=self.timegap_days)
+        if self.end_date is not None and next_active > self.end_date:
+            return None
+        return next_active
     
     def _print_final_summary(self):
         """Print formatted summary table with all scoring metrics."""
@@ -400,7 +448,10 @@ class SimulationEnvironment:
         
         # Compute scores for ACTIVE questions (using hidden truth)
         active_questions = self.q_pool.get_active()
-        active_stats = self._compute_daily_active_scores(active_questions)
+        active_stats = self._compute_daily_active_scores(
+            active_questions,
+            evaluation_date=self.end_date,
+        )
         
         # Table header
         header = f"{'Agent':<25} {'Avg Brier':>10} {'Peer':>10} {'TW-Peer':>10} {'Acc %':>8} {'Total':>6}"
@@ -477,10 +528,15 @@ class SimulationEnvironment:
         
         # 2. Re-truncate metrics file
         metrics_path = os.path.join(self.output_dir, "daily_metrics.csv")
+        test_metrics_path = os.path.join(self.output_dir, "test_daily_metrics.csv")
         self.logger.metrics_file.close()
+        self.logger.test_metrics_file.close()
         with open(metrics_path, 'w') as f:
             f.write(DAILY_METRICS_HEADER)
+        with open(test_metrics_path, 'w') as f:
+            f.write(DAILY_METRICS_HEADER)
         self.logger.metrics_file = open(metrics_path, 'a')
+        self.logger.test_metrics_file = open(test_metrics_path, 'a')
         
         # 3. Rebuild prediction histories from actions.jsonl (don't process resolutions yet)
         predictions_by_date = {}  # date -> list of prediction records
@@ -574,7 +630,7 @@ class SimulationEnvironment:
             # Save daily metrics
             self._save_daily_metrics()
             
-            iter_date += timedelta(days=1)
+            iter_date += timedelta(days=self.timegap_days)
         
         self.logger.metrics_file.flush()
         print(f"  Rescoring complete. Processed {len(self.resolved_questions)} resolutions.")
@@ -728,13 +784,18 @@ class SimulationEnvironment:
 
         return prob_sum
 
-    def _compute_daily_active_scores(self, active_questions: List[Question]):
+    def _compute_daily_active_scores(
+        self,
+        active_questions: List[Question],
+        evaluation_date: Optional[date] = None,
+    ):
         """
-        Compute daily scores only for the currently active questions.
+        Compute interval-end scores only for the currently active questions.
         Uses FUTURE ground truth to assess current performance.
         Includes Brier score, Peer score, TW-Peer score, Accuracy, and Exp-Accuracy.
         """
         active_stats = {}
+        interval_end = evaluation_date or self.current_date
 
         from environment.scoring import resolve_question, compute_snapshot_peer_scores
             
@@ -746,12 +807,18 @@ class SimulationEnvironment:
             history = self.prediction_histories.get(q.qid)
             if not history or not history.predictions:
                 continue
+
+            effective_eval_date = min(
+                interval_end,
+                q.resolution_date - timedelta(days=1),
+            )
+            if effective_eval_date < self.current_date:
+                continue
                 
-            # Get latest predictions as of today (Snapshot)
-            # Use explicit loop since get_all_current_predictions doesn't accept date
+            # Get the snapshot that remains active through the evaluation horizon.
             snapshot = {}
             for aid in history.predictions.keys():
-                pred = history.get_prediction_as_of(aid, self.current_date)
+                pred = history.get_prediction_as_of(aid, effective_eval_date)
                 if pred:
                     snapshot[aid] = pred
             
@@ -764,14 +831,12 @@ class SimulationEnvironment:
                 )
 
             # 2. Compute Active TW-Peer Scores (Partial Resolution)
-            # Use resolve_question with evaluation_date=today
-            # Resolve locally
             res = resolve_question(
                 history,
                 q.ground_truth_answer,
                 matcher=self.matcher,
                 scorer=self.scorer,
-                evaluation_date=self.current_date,
+                evaluation_date=effective_eval_date,
                 question_title=q.title
             )
             tw_peers = res.agent_scores
@@ -947,58 +1012,109 @@ class SimulationEnvironment:
 
             except Exception as e:
                 print(f"  Warning: failed to inject env matcher timing for {agent.agent_id}: {e}")
-    
-    def _save_daily_metrics(self):
-        """Save current cumulative metrics for all agents to CSV."""
-        # 1. Compute scores for ACTIVE questions (using hidden truth)
-        active_questions = self.q_pool.get_active()
-        active_stats = self._compute_daily_active_scores(active_questions)
-        
+
+    def _compute_resolved_metrics_from_events(
+        self,
+        *,
+        source_split: Optional[str] = None,
+    ) -> Dict[str, Dict[str, float]]:
+        stats: Dict[str, Dict[str, float]] = {}
+        for event in self.resolution_events:
+            if source_split and event.get("source_split") != source_split:
+                continue
+            for agent_id, per_agent in (event.get("agents") or {}).items():
+                if not isinstance(per_agent, dict):
+                    continue
+                entry = stats.setdefault(
+                    agent_id,
+                    {
+                        "raw_brier": 0.0,
+                        "peer_sum": 0.0,
+                        "tw_peer_sum": 0.0,
+                        "correct_count": 0.0,
+                        "truth_prob_sum": 0.0,
+                        "count": 0.0,
+                    },
+                )
+                brier = per_agent.get("brier")
+                if brier is None:
+                    continue
+                entry["raw_brier"] += float(brier)
+                entry["peer_sum"] += float(per_agent.get("snapshot_peer", 0.0) or 0.0)
+                entry["tw_peer_sum"] += float(per_agent.get("tw_peer", 0.0) or 0.0)
+                entry["correct_count"] += 1.0 if per_agent.get("is_accurate") else 0.0
+                entry["truth_prob_sum"] += float(per_agent.get("truth_prob", 0.0) or 0.0)
+                entry["count"] += 1.0
+        return stats
+
+    def _build_metrics_list(
+        self,
+        *,
+        active_questions: List[Question],
+        source_split: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        filtered_active_questions = [
+            q for q in active_questions
+            if not source_split or q.source_split == source_split
+        ]
+        active_stats = self._compute_daily_active_scores(
+            filtered_active_questions,
+            evaluation_date=self._get_metrics_evaluation_date(),
+        )
+        resolved_stats = self._compute_resolved_metrics_from_events(source_split=source_split)
+
         metrics_list = []
         for agent in self.agents:
             aid = agent.agent_id
-            
-            # Resolved stats
-            resolved_brier_sum = self.agent_raw_brier.get(aid, 0.0)
-            resolved_snapshot_peer = self.agent_snapshot_peer.get(aid, 0.0)
-            resolved_tw_peer = self.agent_scores.get(aid, 0.0)
-            resolved_correct = self.agent_correct.get(aid, 0)
-            resolved_count = self.agent_questions.get(aid, 0)
-            resolved_truth_prob = self.agent_exp_acc_sum.get(aid, 0.0)
-            
-            # Active stats
-            agent_active = active_stats.get(aid, {
-                'raw_brier': 0.0, 
-                'peer_sum': 0.0, 
-                'tw_peer_sum': 0.0, 
-                'correct_count': 0,
-                'truth_prob_sum': 0.0,
-                'count': 0
+            resolved = resolved_stats.get(aid, {
+                "raw_brier": 0.0,
+                "peer_sum": 0.0,
+                "tw_peer_sum": 0.0,
+                "correct_count": 0.0,
+                "truth_prob_sum": 0.0,
+                "count": 0.0,
             })
-            
-            # Combined stats
-            total_brier_sum = resolved_brier_sum + agent_active['raw_brier']
-            total_peer_sum = resolved_snapshot_peer + agent_active['peer_sum']
-            total_tw_peer_sum = resolved_tw_peer + agent_active['tw_peer_sum']
-            total_correct = resolved_correct + agent_active['correct_count']
-            total_truth_prob = resolved_truth_prob + agent_active['truth_prob_sum']
-            total_count = resolved_count + agent_active['count']
-            
+            agent_active = active_stats.get(aid, {
+                "raw_brier": 0.0,
+                "peer_sum": 0.0,
+                "tw_peer_sum": 0.0,
+                "correct_count": 0.0,
+                "truth_prob_sum": 0.0,
+                "count": 0.0,
+            })
+
+            total_brier_sum = resolved["raw_brier"] + agent_active["raw_brier"]
+            total_peer_sum = resolved["peer_sum"] + agent_active["peer_sum"]
+            total_tw_peer_sum = resolved["tw_peer_sum"] + agent_active["tw_peer_sum"]
+            total_correct = resolved["correct_count"] + agent_active["correct_count"]
+            total_truth_prob = resolved["truth_prob_sum"] + agent_active["truth_prob_sum"]
+            total_count = resolved["count"] + agent_active["count"]
+
             avg_brier = total_brier_sum / total_count if total_count > 0 else 0.0
             accuracy = (total_correct / total_count * 100) if total_count > 0 else 0.0
             exp_acc = total_truth_prob / total_count if total_count > 0 else 0.0
-            
+
             metrics_list.append({
-                'agent_id': aid,
-                'avg_brier': avg_brier,
-                'peer_score': total_peer_sum,
-                'tw_peer_score': total_tw_peer_sum,
-                'accuracy': accuracy,
-                'exp_acc': exp_acc,
-                'total_predictions': total_count
+                "agent_id": aid,
+                "avg_brier": avg_brier,
+                "peer_score": total_peer_sum,
+                "tw_peer_score": total_tw_peer_sum,
+                "accuracy": accuracy,
+                "exp_acc": exp_acc,
+                "total_predictions": int(total_count),
             })
-            
+        return metrics_list
+
+    def _save_daily_metrics(self):
+        """Save current cumulative metrics for this wakeup session to CSV."""
+        active_questions = self.q_pool.get_active()
+        metrics_list = self._build_metrics_list(active_questions=active_questions)
+        test_metrics_list = self._build_metrics_list(
+            active_questions=active_questions,
+            source_split="test",
+        )
         self.logger.log_daily_metrics(self.current_date, metrics_list)
+        self.logger.log_test_daily_metrics(self.current_date, test_metrics_list)
 
     def _get_safe_active_questions(self, active_questions: List[Question]) -> List[Question]:
         """Return a copy of active questions with ground truth hidden."""
@@ -1027,6 +1143,10 @@ class SimulationEnvironment:
             histories_lock=self._histories_lock,
             market_csv_path=self.market_csv_path,
             cheat_feedback_ctx=cheat_ctx,
+            timegap_days=self.timegap_days,
+            last_active_date=self._get_last_active_date(),
+            next_active_date=self._get_next_active_date(),
+            simulation_end_date=self.end_date,
         )
         forecast_interface.source_name = getattr(self, 'source_name', 'openforesight')
         forecast_interface.source_context = getattr(self, 'source_context', '')
@@ -1062,6 +1182,10 @@ class SimulationEnvironment:
                 histories_lock=self._histories_lock,
                 market_csv_path=self.market_csv_path,
                 cheat_feedback_ctx=cheat_ctx,
+                timegap_days=self.timegap_days,
+                last_active_date=self._get_last_active_date(),
+                next_active_date=self._get_next_active_date(),
+                simulation_end_date=self.end_date,
             )
             forecast_interface.source_name = getattr(self, 'source_name', 'openforesight')
             forecast_interface.source_context = getattr(self, 'source_context', '')
@@ -1134,8 +1258,15 @@ class SimulationEnvironment:
             tw_peer = float(result.agent_scores.get(agent_id, 0.0))
             best_outcome, best_prob = self._get_top_outcome(pred)
             is_accurate = False
+            truth_prob = 0.0
             if pred is not None:
                 is_accurate = self._is_top_choice_correct(
+                    pred,
+                    q.ground_truth_answer,
+                    question_id=q.qid,
+                    question_title=q.title
+                )
+                truth_prob = self._get_truth_probability_mass(
                     pred,
                     q.ground_truth_answer,
                     question_id=q.qid,
@@ -1144,9 +1275,11 @@ class SimulationEnvironment:
 
             per_agent_event[agent_id] = {
                 "brier": raw_brier_scores.get(agent_id),
+                "snapshot_peer": snapshot_peer_scores.get(agent_id),
                 "tw_peer": tw_peer,
                 "best_outcome": best_outcome,
                 "best_prob": best_prob,
+                "truth_prob": truth_prob,
                 "is_accurate": bool(is_accurate),
             }
 
@@ -1157,12 +1290,7 @@ class SimulationEnvironment:
                 continue
 
             self.agent_questions[agent_id] = self.agent_questions.get(agent_id, 0) + 1
-            self.agent_exp_acc_sum[agent_id] = self.agent_exp_acc_sum.get(agent_id, 0.0) + self._get_truth_probability_mass(
-                pred,
-                q.ground_truth_answer,
-                question_id=q.qid,
-                question_title=q.title
-            )
+            self.agent_exp_acc_sum[agent_id] = self.agent_exp_acc_sum.get(agent_id, 0.0) + truth_prob
             if is_accurate:
                 self.agent_correct[agent_id] = self.agent_correct.get(agent_id, 0) + 1
             else:
@@ -1178,6 +1306,7 @@ class SimulationEnvironment:
             "sim_date": str(self.current_date),
             "qid": q.qid,
             "title": q.title,
+            "source_split": q.source_split,
             "ground_truth": q.ground_truth_answer,
             "agents": per_agent_event,
         })
@@ -1209,7 +1338,7 @@ class SimulationEnvironment:
         - agent_scores (resolved)
         - resolved_questions list
         - q_pool (mark questions as processed)
-        - current_date (set to last_seen_date + 1 day)
+        - current_date (set to last_seen_date + timegap_days)
         """
         actions_path = os.path.join(resume_dir, "actions.jsonl")
         print(f"Restoring state from {actions_path}...")
@@ -1296,14 +1425,16 @@ class SimulationEnvironment:
                             pred = final_snapshot.get(aid)
                             best_outcome, best_prob = self._get_top_outcome(pred)
                             is_accurate = False
+                            truth_prob = 0.0
                             if pred and ground_truth:
                                 self.agent_questions[aid] = self.agent_questions.get(aid, 0) + 1
-                                self.agent_exp_acc_sum[aid] = self.agent_exp_acc_sum.get(aid, 0.0) + self._get_truth_probability_mass(
+                                truth_prob = self._get_truth_probability_mass(
                                     pred,
                                     ground_truth,
                                     question_id=qid,
                                     question_title=question_title
                                 )
+                                self.agent_exp_acc_sum[aid] = self.agent_exp_acc_sum.get(aid, 0.0) + truth_prob
                                 is_accurate = self._is_top_choice_correct(
                                     pred,
                                     ground_truth,
@@ -1325,9 +1456,11 @@ class SimulationEnvironment:
 
                             per_agent_event[aid] = {
                                 "brier": raw_brier.get(aid),
+                                "snapshot_peer": snapshot_peer.get(aid),
                                 "tw_peer": score,
                                 "best_outcome": best_outcome,
                                 "best_prob": best_prob,
+                                "truth_prob": truth_prob,
                                 "is_accurate": bool(is_accurate),
                             }
                             
@@ -1354,6 +1487,7 @@ class SimulationEnvironment:
                                     "sim_date": sim_date_str,
                                     "qid": qid,
                                     "title": q.title,
+                                    "source_split": q.source_split,
                                     "ground_truth": ground_truth,
                                     "agents": per_agent_event,
                                 })
@@ -1362,9 +1496,9 @@ class SimulationEnvironment:
                     print(f"  Warning: Skipped corrupted line in actions.jsonl")
                     continue
                     
-        # Advance to NEXT day after last record
+        # Advance to next scheduled wakeup after the last processed date.
         if records_processed > 0:
-            self.current_date = last_date + timedelta(days=1)
+            self.current_date = last_date + timedelta(days=self.timegap_days)
             print(f"  Processed {records_processed} records.")
             print(f"  Fast-forwarded to {self.current_date}.")
             
@@ -1466,11 +1600,19 @@ class SimForecastInterface:
                  resolved_agent_predictions: Dict[str, Dict[str, Dict[str, Any]]] = None,
                  histories_lock: Lock = None,
                  market_csv_path: str = None,
-                 cheat_feedback_ctx: Optional[Tuple] = None):
+                 cheat_feedback_ctx: Optional[Tuple] = None,
+                 timegap_days: int = 1,
+                 last_active_date: Optional[date] = None,
+                 next_active_date: Optional[date] = None,
+                 simulation_end_date: Optional[date] = None):
         self.questions = {q.qid: q for q in questions}
         self.aggregates = aggregates
         self.histories = histories
         self.sim_date = sim_date
+        self.timegap_days = max(1, int(timegap_days or 1))
+        self.last_active_date = last_active_date
+        self.next_active_date = next_active_date
+        self.simulation_end_date = simulation_end_date
         self.logger = logger
         self.current_agent_id: Optional[str] = None
         self.resolved_questions = resolved_questions or []
@@ -1487,7 +1629,7 @@ class SimForecastInterface:
         self._day_complete = False  # Reset for new agent
     
     def next_day(self) -> None:
-        """Agent signals they are done with their actions for today."""
+        """Agent signals they are done with their current wakeup session."""
         self._day_complete = True
     
     def is_day_complete(self) -> bool:

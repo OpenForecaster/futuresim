@@ -83,6 +83,9 @@ def load_all_runs(parent_dir, expected_runs=None, child_glob="*"):
     discovered = _discover_run_csvs(parent_dir, child_glob=child_glob)
     for run_name, csv_path in discovered:
         df = pd.read_csv(csv_path)
+        if df.empty:
+            print(f"  Warning: skipping empty daily_metrics.csv for {run_name}: {csv_path}")
+            continue
         df['date'] = pd.to_datetime(df['date'])
         df['run'] = run_name
         dfs.append(df)

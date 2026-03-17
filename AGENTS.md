@@ -5,8 +5,10 @@ This repo is shared across multiple users and clusters. Optimize for collaborati
 - Do not reward hack by making dummy files or something. When in doubt, please just ask the user, unless the user explicitly told you to keep going until something is fixed, in which case please take rational decisions and raise anything suspicious you might have done to the user later.
 - When a design choice has real tradeoffs, ask the user for a preference with concise evidence from the repo instead of hedging or silently picking a path.
 - Explain changes clearly and concisely so collaborators can learn the codebase quickly.
+
 - Prefer minimal, clean, easy-to-understand implementations. We will add complexity only as we need it. 
 - Avoid unnecessary helper layers, `try/except`, or `if/else` bloat when a simpler structure works.
+- When classes inherit from higher up classes, sometimes it might be best to make changes to the highest level of class (when it makes sense) and just propagate it to lower ones. In other words, I always want the most modular change possible instead of code bloat.
 - Do not add unnecessary function indirection, preferring to write the logic where its used directly unless its really being reused somewhere else.
 
 - Create a new skill only when it captures an important recurring pattern or repo-specific workflow that future coding agents really need to know. If the guidance is minor, one-off, or obvious from the code, do not make a skill for it.

@@ -4,7 +4,10 @@ BasicAgent: Main agent class for LLM-based forecasting.
 Uses chain-of-thought with <reasoning> and <action type="..."> tags.
 """
 
+import json
+import os
 import re
+from functools import lru_cache
 from datetime import date, timedelta
 from typing import List, Dict, Any, Optional, Tuple
 
@@ -20,6 +23,18 @@ from agents.utils.memory import StructuredMemory, ActiveMemory
 from .query import QueryHandler
 from .search import SearchHandler
 from .feedback import FeedbackHandler
+
+
+@lru_cache(maxsize=16)
+def _load_budget_tokenizer(model_name: str):
+    if not model_name or not os.path.exists(model_name):
+        return None
+    try:
+        from transformers import AutoTokenizer
+
+        return AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    except Exception:
+        return None
 
 
 class BasicAgent(BaseAgent):
@@ -170,7 +185,7 @@ class BasicAgent(BaseAgent):
                 submit_reserve_tokens=settings.submit_reserve_tokens,
                 force_submit_threshold_tokens=settings.force_submit_threshold_tokens,
             )
-        return BudgetTracker(settings)
+        return BudgetTracker(settings, token_estimator=self._estimate_budget_tokens)
 
     def _build_budget_overview(self, *, warmup: bool = False, per_question: bool = False) -> str:
         """Human-readable budget instructions for prompts."""
@@ -184,17 +199,17 @@ class BasicAgent(BaseAgent):
                     f"You have {settings.max_actions} actions per day. Each query, search, or submission uses 1 action."
                 )
         if settings.max_total_tokens is not None:
-            scope = "this question loop" if per_question else "this day"
+            scope = "this question" if per_question else "this session"
             lines.append(
-                f"You have a total token budget of {settings.max_total_tokens} tokens for {scope}. "
-                "Every model call consumes its full input + output tokens from this budget."
+                f"You have a context budget of {settings.max_total_tokens} tokens for {scope}. "
+                "This tracks the current prompt length, not cumulative tokens spent."
             )
             lines.append(
-                f"Keep at least {settings.submit_reserve_tokens} tokens in reserve for a final submit. "
-                f"Force-submit once the remaining token budget is at or below {settings.force_submit_threshold_tokens}."
+                f"Keep at least {settings.submit_reserve_tokens} tokens free for a final submit. "
+                f"Force-submit once the remaining context budget is at or below {settings.force_submit_threshold_tokens}."
             )
         if settings.max_actions is not None and settings.max_total_tokens is not None:
-            lines.append("If both budgets are configured, both are enforced and the loop ends when either one is exhausted.")
+            lines.append("If both budgets are configured, both are enforced and the session ends when either one is exhausted.")
         return "\n".join(lines)
 
     def _build_start_budget_status(
@@ -228,6 +243,80 @@ class BasicAgent(BaseAgent):
             f"Search returns up to {self.config.max_search_results} retrieved article chunks, "
             f"each roughly {chunk_tokens} tokens long."
         )
+
+    def _estimate_budget_tokens(self, payload: Any) -> int:
+        if payload is None:
+            return 0
+        text = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False)
+        if not text:
+            return 0
+
+        tokenizer = _load_budget_tokenizer(str(self.model_name or ""))
+        if tokenizer is not None:
+            try:
+                return len(tokenizer.encode(text, add_special_tokens=False))
+            except TypeError:
+                return len(tokenizer.encode(text))
+            except Exception:
+                pass
+
+        return max(1, (len(text) + 3) // 4)
+
+    @staticmethod
+    def _append_with_budget(messages: List[Dict[str, Any]], budget: BudgetTracker, message: Dict[str, Any]) -> None:
+        messages.append(message)
+        budget.record_appended_item(message)
+
+    def _get_timegap_days(self) -> int:
+        return max(1, int(getattr(self.config, "timegap_days", 1) or 1))
+
+    def _get_last_active_date(self, current_date: date) -> Optional[date]:
+        fi = getattr(self, "_forecast_interface", None)
+        last_active = getattr(fi, "last_active_date", None) if fi is not None else None
+        if last_active:
+            return last_active
+        return None
+
+    def _get_next_active_date(self, current_date: date) -> Optional[date]:
+        fi = getattr(self, "_forecast_interface", None)
+        if fi is not None and hasattr(fi, "next_active_date"):
+            next_active = getattr(fi, "next_active_date")
+            return next_active
+        return current_date + timedelta(days=self._get_timegap_days())
+
+    def _build_cadence_section(self, current_date: date) -> str:
+        last_active = self._get_last_active_date(current_date)
+        next_active = self._get_next_active_date(current_date)
+        next_text = (
+            f"Next scheduled update: {next_active}."
+            if next_active
+            else "No later updates are scheduled."
+        )
+        last_text = (
+            f"Last update: {last_active}. "
+            if last_active
+            else "This is your first update. "
+        )
+        return (
+            "## UPDATE CADENCE\n"
+            f"You make updates every {self._get_timegap_days()} days. "
+            f"{last_text}Current date: {current_date}. {next_text}\n\n"
+        )
+
+    def _build_memory_carryover_note(self, current_date: date) -> str:
+        next_active = self._get_next_active_date(current_date)
+        next_text = (
+            f"Next scheduled update: {next_active}."
+            if next_active
+            else "No later updates are scheduled."
+        )
+        return (
+            "Your memory entries are the ONLY context retained between sessions. "
+            f"You make updates every {self._get_timegap_days()} days. {next_text} "
+            "In each session you get: search over news articles and the DataFrame "
+            "(active question predictions, resolved question ground truths, your final "
+            "predictions on resolved questions)."
+        )
     
     # =========================================================================
     # Action Loop
@@ -240,6 +329,7 @@ class BasicAgent(BaseAgent):
         Returns list of all submitted forecasts.
         """
         budget = self._create_budget_tracker()
+        budget.bootstrap_context(messages)
         all_forecasts = []
         empty_retries = 0
         max_empty_retries = 2
@@ -283,7 +373,7 @@ class BasicAgent(BaseAgent):
             self._timer.record_cost(usage.get("cost", 0), "llm")
             budget.record_usage(usage)
 
-            messages.append({"role": "assistant", "content": response})
+            self._append_with_budget(messages, budget, {"role": "assistant", "content": response})
 
             # Track QIDs mentioned in reasoning/code (for active memory expansion)
             if hasattr(self, '_day_qids'):
@@ -343,7 +433,7 @@ class BasicAgent(BaseAgent):
             self._log_action(forecast_interface, messages, response, "query_error", budget, qid=qid, error=parsed.error, reasoning=reasoning)
             feedback = f"ERROR: {parsed.error}"
         
-        messages.append({"role": "user", "content": budget.format_feedback(feedback)})
+        self._append_with_budget(messages, budget, {"role": "user", "content": budget.format_feedback(feedback)})
     
     def _handle_search(self, messages, forecast_interface, response, parsed, budget: BudgetTracker, qid: str = None, reasoning=None) -> None:
         """Handle search action. Returns full chunk content directly."""
@@ -386,7 +476,7 @@ class BasicAgent(BaseAgent):
             self._log_action(forecast_interface, messages, response, "search_error", budget, qid=qid, error=parsed.error, reasoning=reasoning)
             feedback = "SEARCH ERROR: No query provided."
         
-        messages.append({"role": "user", "content": budget.format_feedback(feedback)})
+        self._append_with_budget(messages, budget, {"role": "user", "content": budget.format_feedback(feedback)})
     
     def _handle_submit(self, messages, forecast_interface, response, parsed, budget: BudgetTracker, qid: str = None, reasoning=None) -> List:
         """Handle submit action. Returns list of submitted forecasts."""
@@ -440,7 +530,7 @@ class BasicAgent(BaseAgent):
             self._log_action(forecast_interface, messages, response, "submit_error", budget, qid=log_qid, error=parsed.error, reasoning=reasoning)
             feedback = f"SUBMIT ERROR: {parsed.error}"
         
-        messages.append({"role": "user", "content": budget.format_feedback(feedback)})
+        self._append_with_budget(messages, budget, {"role": "user", "content": budget.format_feedback(feedback)})
         return submitted
     
     def _handle_invalid(self, messages, forecast_interface, response, parsed, budget: BudgetTracker, qid: str = None, reasoning=None) -> None:
@@ -450,7 +540,7 @@ class BasicAgent(BaseAgent):
         
         error_msg = parsed.error or 'Use <action type="...">...</action> format.'
         feedback = f"No valid action found. {error_msg}"
-        messages.append({"role": "user", "content": budget.format_feedback(feedback)})
+        self._append_with_budget(messages, budget, {"role": "user", "content": budget.format_feedback(feedback)})
     
     # =========================================================================
     # Helpers
@@ -624,6 +714,7 @@ Example (if options are ["Candidate A", "Candidate B", "Candidate C"]):
         df_info = self._query_handler.get_info()
         budget_start_status = self._build_start_budget_status()
         budget_start_block = f"Budget at start:\n{budget_start_status}\n\n" if budget_start_status else ""
+        cadence_section = self._build_cadence_section(current_date)
         
         memory_section = ""
         if self._memory is not None:
@@ -672,7 +763,7 @@ Use these stored insights to inform today's forecasts. Entry IDs in brackets (e.
 Use the reasoning and insights above to inform today's forecasts. The DataFrame includes your latest predictions for active questions and your final prediction snapshot on resolved questions.
 
 """
-            memory_flow_note = "Note: After ending your day, you will be prompted to update your memory."
+            memory_flow_note = "Note: After ending this session, you will be prompted to update your memory."
         else:
             memory_flow_note = ""
         
@@ -720,7 +811,7 @@ You have access to a news article database. {self._search_results_description()}
 
 {self._get_source_rules()}
 
-{memory_section}{self._get_scoring_section()}
+{cadence_section}{memory_section}{self._get_scoring_section()}
 {search_advice}
 ## AVAILABLE DATA
 DataFrame `df` with {df_info['n_rows']} questions ({df_info['n_active']} active/unresolved, {df_info['n_resolved']} resolved).
@@ -772,13 +863,13 @@ Use `print()` to ensure you see output. We are not executing in a jupyter notebo
 </forecast>
 </action>
 
-### {end_day_num}. End Day (proceed to next day)
+### {end_day_num}. End Session
 <action type="next"/>
 
 ## INTERACTION FLOW
 {self._build_budget_overview()}
 You can interleave queries, searches, and submissions as needed.
-When ready to move on, use <action type="next"/> to end your day.
+When ready to move on, use <action type="next"/> to end this session.
 {memory_flow_note}
 
 ## SUBMISSION RULES
@@ -843,10 +934,10 @@ When ready to move on, use <action type="next"/> to end your day.
 
     def _build_structured_memory_prompt(self, current_date: date) -> str:
         """Build the structured memory update prompt (add/delete entries)."""
-        return f"""End of day {current_date}. You can now update your memory.
+        return f"""End of session {current_date}. You can now update your memory.
 
 ## MEMORY UPDATE
-Your memory entries are the ONLY context retained between days. Everything else resets. Tomorrow you get: search over news articles and the DataFrame (active question predictions, resolved question ground truths, your final predictions on resolved questions).
+{self._build_memory_carryover_note(current_date)}
 
 You currently have {self._memory.entry_count} memory entries ({len(self._memory)} chars). Max 30 entries.
 
@@ -880,10 +971,10 @@ If no updates needed, just output <reasoning>...</reasoning> without any memory 
 
     def _build_plain_memory_prompt(self, current_date: date) -> str:
         """Build the legacy plain-text memory update prompt (full replacement)."""
-        return f"""End of day {current_date}. You can now update your memory.
+        return f"""End of session {current_date}. You can now update your memory.
 
 ## MEMORY UPDATE
-Your memory is the ONLY thing that carries over to tomorrow. Everything else resets. Tomorrow you get: search over news articles and access to the DataFrame (active question predictions, resolved question ground truths, and your final predictions on resolved questions).
+{self._build_memory_carryover_note(current_date)}
 
 Store things NOT recoverable from those tools:
 1. Reasoning behind predictions and how you did on resolved questions that might help with unresolved questions — once a question resolves, your prediction remains visible in the dataframe, but your reasoning is never stored in the dataframe. Example: "Q149: PSG 0.70 because Sky Bet implied 55% and Inter eliminated in semis."
@@ -937,10 +1028,10 @@ Current memory length: {len(self._memory)} characters"""
 </memory>
 
 """
-        return f"""End of day {current_date}. You can now update your memory.
+        return f"""End of session {current_date}. You can now update your memory.
 
-Your memory has two layers, both retained between days. Everything else resets.
-Tomorrow you get: search over news articles and the DataFrame (active question predictions, resolved question ground truths, your final predictions on resolved questions).
+Your memory has two layers, both retained between sessions. Everything else resets.
+{self._build_memory_carryover_note(current_date)}
 
 ## 1. QUESTION-SPECIFIC NOTES (memo_df: {self._memory.memo_count} entries)
 

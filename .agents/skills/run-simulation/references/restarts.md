@@ -15,12 +15,15 @@ Use `--restart_from <old_dir> --restart_from_day YYYY-MM-DD` to create a new run
 Current helper behavior:
 
 - copies `actions.jsonl` entries before the restart day
-- copies per-day memory snapshots before the restart day
+- copies per-session memory snapshots before the restart day
 - copies timing stats before the restart day
 - copies `daily_metrics.csv` rows before the restart day
+- copies `test_daily_metrics.csv` rows before the restart day
 - copies `matcher_cache.json` when present
 
 This is the normal way to preserve an expensive AllQ Day 0 warmup and rerun later days.
+
+Keep `timegap_days` aligned with the original run when resuming or restarting. Resume state advances by that cadence, so changing it mid-run changes which wakeup date comes next.
 
 ## Shared Config Rule
 

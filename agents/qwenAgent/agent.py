@@ -40,10 +40,18 @@ class QwenBasicAgent(BasicAgent):
         self._setup_day(forecast_interface, current_date)
 
         messages = [{"role": "user", "content": self._build_qwen_instructions(current_date)}]
-        all_forecasts = self._run_qwen_action_loop(messages=messages, forecast_interface=forecast_interface)
+        all_forecasts, context_limit_hit = self._run_qwen_action_loop(
+            messages=messages,
+            forecast_interface=forecast_interface,
+        )
 
-        if self._memory is not None:
+        if self._memory is not None and not context_limit_hit:
             self._prompt_memory_update(messages, forecast_interface, current_date)
+        elif self._memory is not None:
+            print(
+                f"[{self.agent_id}] Skipping memory update because the session hit the model context limit.",
+                flush=True,
+            )
 
         self._timer.end_day()
         if self.config.memory_dir:
@@ -66,14 +74,15 @@ class QwenBasicAgent(BasicAgent):
         return (
             f"{prefix}\n\n"
             "## RESPONSE FORMAT\n"
-            "Use function tools as defined in the tool schema. Call exactly one tool per turn.\n\n"
+            "Use function tools as defined in the tool schema, following the signatures, "
+            "constraints, and examples there. Call exactly one tool per turn.\n\n"
             "## INTERACTION FLOW\n"
             f"{self._build_budget_overview()}\n"
-            "When ready to move on, call `next_day()`.\n\n"
+            "When ready to move on, call `next_day()` to end this session.\n\n"
             "## SUBMISSION RULES\n"
-            "- You may call `submit_forecasts` multiple times in a single day until the active loop budget runs out.\n"
+            "- You may call `submit_forecasts` multiple times in a single session until the active loop budget runs out.\n"
             "- Each `submit_forecasts` call must include exactly one forecast for exactly one qid.\n"
-            "- You may update earlier same-day forecasts by submitting again for the same qid.\n"
+            "- You may update earlier same-session forecasts by submitting again for the same qid.\n"
             f"{start_block}"
         )
 
@@ -96,12 +105,13 @@ class QwenBasicAgent(BasicAgent):
         enable_search: Optional[bool] = None,
         warmup_budget: bool = False,
         max_actions: Optional[int] = None,
-    ) -> List[Dict[str, Any]]:
+    ) -> Tuple[List[Dict[str, Any]], bool]:
         budget = self._create_budget_tracker(
             warmup=warmup_budget,
             max_actions_override=max_actions,
         )
         all_forecasts: List[Dict[str, Any]] = []
+        context_limit_hit = False
 
         if enable_search is None:
             enable_search = bool(self._search_handler.is_available)
@@ -112,6 +122,7 @@ class QwenBasicAgent(BasicAgent):
             max_search_results=self.config.max_search_results,
             search_chunk_tokens=self._search_handler.chunk_tokens,
         )
+        budget.bootstrap_context({"messages": messages, "tools": tools})
 
         final_submit_prompt_injected = False
         final_submit_retry_used = False
@@ -119,11 +130,13 @@ class QwenBasicAgent(BasicAgent):
         while not budget.is_exhausted():
             force_final_submit_turn = target_qid is not None and budget.should_force_submit()
             if force_final_submit_turn and not final_submit_prompt_injected:
-                messages.append(
+                self._append_with_budget(
+                    messages,
+                    budget,
                     {
                         "role": "user",
                         "content": self._build_final_submit_tool_instruction(target_qid, budget),
-                    }
+                    },
                 )
                 final_submit_prompt_injected = True
 
@@ -144,6 +157,30 @@ class QwenBasicAgent(BasicAgent):
             except Exception as e:
                 if self._is_fatal_inference_failure(e):
                     raise RuntimeError(f"Fatal inference failure in action loop: {e}") from e
+                if self._is_context_limit_error(e):
+                    context_limit_hit = True
+                    self._log_qwen_action(
+                        forecast_interface=forecast_interface,
+                        messages=messages,
+                        rendered_response=f"CONTEXT LIMIT: {e}",
+                        phase="llm_context_limit",
+                        budget=budget,
+                        qid=target_qid,
+                        error=str(e),
+                        prompt_override=model_input_payload,
+                    )
+                    if target_qid is None:
+                        print(
+                            f"[{self.agent_id}] Context limit reached; ending this wakeup early.",
+                            flush=True,
+                        )
+                    else:
+                        print(
+                            f"[{self.agent_id}] Context limit reached for qid {target_qid}; "
+                            "skipping the rest of this question.",
+                            flush=True,
+                        )
+                    break
 
                 if force_final_submit_turn and not final_submit_retry_used:
                     final_submit_retry_used = True
@@ -164,11 +201,13 @@ class QwenBasicAgent(BasicAgent):
                     error=str(e),
                     prompt_override=model_input_payload,
                 )
-                messages.append(
+                self._append_with_budget(
+                    messages,
+                    budget,
                     {
                         "role": "user",
                         "content": budget.format_feedback(err_msg),
-                    }
+                    },
                 )
                 continue
 
@@ -196,7 +235,9 @@ class QwenBasicAgent(BasicAgent):
                     continue
                 break
 
-            self._append_assistant_message(messages=messages, assistant_message=assistant_message)
+            appended = self._append_assistant_message(messages=messages, assistant_message=assistant_message)
+            if appended is not None:
+                budget.record_appended_item(appended)
 
             rendered = self._render_turn_for_logging(assistant_text, tool_calls)
             self._log_qwen_action(
@@ -215,7 +256,11 @@ class QwenBasicAgent(BasicAgent):
             if parsed is None:
                 budget.consume_action()
                 feedback = "No tool call detected. You MUST call exactly one tool each turn."
-                messages.append({"role": "user", "content": budget.format_feedback(feedback)})
+                self._append_with_budget(
+                    messages,
+                    budget,
+                    {"role": "user", "content": budget.format_feedback(feedback)},
+                )
                 continue
 
             if parsed.action_type == "next":
@@ -255,14 +300,16 @@ class QwenBasicAgent(BasicAgent):
 
             budget.consume_action()
             err = parsed.error or "Unknown action/tool."
-            messages.append(
+            self._append_with_budget(
+                messages,
+                budget,
                 {
                     "role": "user",
                     "content": budget.format_feedback(f"Invalid action: {err}"),
-                }
+                },
             )
 
-        return all_forecasts
+        return all_forecasts, context_limit_hit
 
     def _call_chat_json(
         self,
@@ -293,6 +340,20 @@ class QwenBasicAgent(BasicAgent):
         )
         return any(marker in msg for marker in fatal_markers)
 
+    @staticmethod
+    def _is_context_limit_error(error: Exception) -> bool:
+        msg = str(error).lower()
+        if "400 bad request" not in msg:
+            return False
+        context_markers = (
+            "maximum input length",
+            "maximum context length",
+            "context length is only",
+            "param=input_tokens",
+            "parameter=input_tokens",
+        )
+        return any(marker in msg for marker in context_markers)
+
     def _call_chat_json_with_retries(
         self,
         *,
@@ -311,6 +372,8 @@ class QwenBasicAgent(BasicAgent):
                 return self._call_chat_json(messages=messages, tools=tools, sampling_params=sampling_params)
             except Exception as e:
                 last_error = e
+                if self._is_context_limit_error(e):
+                    raise
                 if self._is_fatal_inference_failure(e):
                     raise
                 if attempt >= max_retries:
@@ -352,16 +415,20 @@ class QwenBasicAgent(BasicAgent):
         return json.dumps(payload, ensure_ascii=False)
 
     @staticmethod
-    def _append_assistant_message(*, messages: List[Dict[str, Any]], assistant_message: Dict[str, Any]) -> None:
+    def _append_assistant_message(
+        *,
+        messages: List[Dict[str, Any]],
+        assistant_message: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
         if not isinstance(assistant_message, dict):
-            return
+            return None
         tool_calls = assistant_message.get("tool_calls")
         content = assistant_message.get("content")
         has_tool_calls = isinstance(tool_calls, list) and len(tool_calls) > 0
         has_text = isinstance(content, str) and bool(content.strip())
 
         if not has_tool_calls and not has_text:
-            return
+            return None
 
         out: Dict[str, Any] = {"role": "assistant"}
         if "content" in assistant_message:
@@ -369,6 +436,7 @@ class QwenBasicAgent(BasicAgent):
         if has_tool_calls:
             out["tool_calls"] = tool_calls
         messages.append(out)
+        return out
 
     @staticmethod
     def _append_tool_output_message(
@@ -377,21 +445,22 @@ class QwenBasicAgent(BasicAgent):
         tool_call: Optional[Dict[str, Any]],
         tool_name: str,
         output: str,
-    ) -> None:
+    ) -> Dict[str, Any]:
         call_id = tool_call.get("call_id") if isinstance(tool_call, dict) else None
         if isinstance(call_id, str) and call_id:
-            messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": call_id,
-                    "name": tool_name,
-                    "content": output,
-                }
-            )
-            return
+            message = {
+                "role": "tool",
+                "tool_call_id": call_id,
+                "name": tool_name,
+                "content": output,
+            }
+            messages.append(message)
+            return message
 
         # Fallback for parser/provider variants that do not expose call id.
-        messages.append({"role": "user", "content": f"{tool_name} output:\n{output}"})
+        message = {"role": "user", "content": f"{tool_name} output:\n{output}"}
+        messages.append(message)
+        return message
 
     def _qwen_handle_query(
         self,
@@ -412,12 +481,13 @@ class QwenBasicAgent(BasicAgent):
         else:
             feedback = f"QUERY ERROR: {parsed.error or 'Missing code'}"
 
-        self._append_tool_output_message(
+        appended = self._append_tool_output_message(
             messages,
             tool_call=tool_call,
             tool_name="query_df",
             output=budget.format_feedback(feedback),
         )
+        budget.record_appended_item(appended)
 
     def _qwen_handle_search(
         self,
@@ -430,22 +500,24 @@ class QwenBasicAgent(BasicAgent):
         budget.consume_action()
         if not self._search_handler.is_available:
             feedback = "SEARCH ERROR: Search is not available."
-            self._append_tool_output_message(
+            appended = self._append_tool_output_message(
                 messages,
                 tool_call=tool_call,
                 tool_name="search_news",
                 output=budget.format_feedback(feedback),
             )
+            budget.record_appended_item(appended)
             return
 
         if not parsed.query:
             feedback = "SEARCH ERROR: Missing query."
-            self._append_tool_output_message(
+            appended = self._append_tool_output_message(
                 messages,
                 tool_call=tool_call,
                 tool_name="search_news",
                 output=budget.format_feedback(feedback),
             )
+            budget.record_appended_item(appended)
             return
 
         min_date = None
@@ -476,12 +548,13 @@ class QwenBasicAgent(BasicAgent):
             feedback = f"SEARCH ERROR: {error}"
         else:
             feedback = f"SEARCH RESULTS:\n{result}"
-        self._append_tool_output_message(
+        appended = self._append_tool_output_message(
             messages,
             tool_call=tool_call,
             tool_name="search_news",
             output=budget.format_feedback(feedback),
         )
+        budget.record_appended_item(appended)
 
     def _qwen_handle_submit(
         self,
@@ -534,12 +607,13 @@ class QwenBasicAgent(BasicAgent):
         else:
             feedback = f"SUBMIT ERROR: {parsed.error or 'No valid forecasts'}"
 
-        self._append_tool_output_message(
+        appended = self._append_tool_output_message(
             messages,
             tool_call=tool_call,
             tool_name="submit_forecasts",
             output=budget.format_feedback(feedback),
         )
+        budget.record_appended_item(appended)
         return submitted
 
     @staticmethod
@@ -616,9 +690,22 @@ class QwenAllQAgent(AllQAgent, QwenBasicAgent):
         )
         return self._rewrite_allq_warmup_prompt_for_qwen(base_prompt)
 
-    def _run_warmup_loop(self, messages: List[Dict], forecast_interface, target_qid: str) -> None:
+    def _process_single_question(self, q, current_date, forecast_interface):
+        system_prompt = self._build_warmup_system_prompt(current_date, q, forecast_interface=forecast_interface)
+        messages = [{"role": "user", "content": system_prompt}]
+
+        context_limit_hit = self._run_warmup_loop(messages, forecast_interface, q.qid)
+        if context_limit_hit:
+            return
+
+        if hasattr(self, "_warmup_memo_entries"):
+            memo_entry = self._request_warmup_memo(messages, q.qid, q.title)
+            if memo_entry:
+                self._warmup_memo_entries.append(memo_entry)
+
+    def _run_warmup_loop(self, messages: List[Dict], forecast_interface, target_qid: str) -> bool:
         # Delegate warmup action handling to the shared Qwen tool-calling loop.
-        self._run_qwen_action_loop(
+        _, context_limit_hit = self._run_qwen_action_loop(
             messages=messages,
             forecast_interface=forecast_interface,
             target_qid=target_qid,
@@ -626,6 +713,7 @@ class QwenAllQAgent(AllQAgent, QwenBasicAgent):
             warmup_budget=True,
             max_actions=self.config.warmup_max_actions,
         )
+        return context_limit_hit
 
     def _rewrite_allq_warmup_prompt_for_qwen(self, base_prompt: str) -> str:
         prefix = base_prompt
@@ -636,6 +724,7 @@ class QwenAllQAgent(AllQAgent, QwenBasicAgent):
         return (
             f"{prefix}\n\n"
             "## RESPONSE FORMAT\n"
-            "Use function tools as defined in the tool schema. Call exactly one tool per turn.\n"
+            "Use function tools as defined in the tool schema, following the signatures, "
+            "constraints, and examples there. Call exactly one tool per turn.\n"
             f"{start_block}\n"
         )

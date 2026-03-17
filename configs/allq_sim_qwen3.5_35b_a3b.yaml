@@ -47,8 +47,8 @@ embedding_gpu_mem: 0.7
 matching: "openrouter"
 matcher: "deepseek/deepseek-v3.2"
 matcher_gpu_mem: 0.0
-max_model_len: 65536
-agent_max_model_len: 65536
+max_model_len: 262144
+agent_max_model_len: 262144
 embedding_max_model_len: 32768
 
 # --- vLLM Agent Runtime ---
@@ -77,7 +77,7 @@ defaults:
   max_actions: 50
   warmup_max_actions: 10
   temperature: 0.7
-  max_tokens: 8192
+  max_tokens: 4096
   max_retries: 3
 
 agents:

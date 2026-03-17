@@ -1,25 +1,42 @@
-# AllQ full simulation using local Qwen3.5-35B-A3B via vLLM with the Qwen-native AllQ scaffold.
+# AllQ full simulation using local Qwen3.5-35B-A3B via vLLM, with context-window budgets.
+#
+# This variant changes the question distribution:
+# - 2025-01 to 2025-04 from OpenForesight train
+# - followed by the full OpenForesight test split
+# - train months are deterministically capped at 1000 questions/month
+#
+# Raw train counts for the prepended 2025 months:
+# - 2025-01: 3322
+# - 2025-02: 2290
+# - 2025-03: 1564
+# - 2025-04: 175
+# Test counts in this simulation window:
+# - 2025-05: 94
+# - 2025-06: 85
+# - 2025-07: 76
+# - 2025-08: 47
 #
 # Usage:
-#   python mpi_scripts/run_sim/submit_sim.py --config configs/allq_sim_qwen3.5_35b_a3b_qwenallq.yaml --runs 1
-#
-# Notes:
-# - Uses the `qwenallq` scaffold.
-# - Requests 3 H100-class GPUs: GPU2 for matcher + embedder, GPU0-1 for the agent model.
-# - Runs the MoE model as TP=2 with expert parallel enabled across the 2 model GPUs.
+#   python mpi_scripts/run_sim/submit_sim.py \
+#     --config configs/allq_sim_qwen3.5_35b_a3b_tokenbudget_train_jan_apr_2025_plus_test_t5.yaml \
+#     --runs 1
 
 # --- Run Script (CUDA 12.9 needed for Qwen3.5 FlashInfer GDN kernels) ---
 run_script: "run_sim.sh"
 
 # --- Simulation Meta ---
-sim_name: "allq_sim_qwen3.5-35b-a3b_qwenallq"
-start_date: "2025-05-01"
+sim_name: "allq_sim_qwen3.5-35b-a3b_tokenbudget_train-jan-apr-2025_plus_test_t5"
+start_date: "2025-01-01"
 end_date: "2025-08-23"
-resolution_start: "2025-05-01"
+resolution_start: "2025-01-01"
 resolution_end: "2025-08-23"
 lookback_days: 7
 search_cutoff_days: 0
 split: "test"
+timegap_days: 5
+prepend_train_resolution_start: "2025-01-01"
+prepend_train_resolution_end: "2025-04-30"
+subsample_per_month: 1000
 
 # --- HTCondor Resources ---
 resources:
@@ -75,8 +92,10 @@ parallel: true
 defaults:
   provider: "vllm"
   scaffold: "qwenallq"
-  max_actions: 50
-  warmup_max_actions: 10
+  max_total_tokens: 262144
+  warmup_max_total_tokens: 262144
+  submit_reserve_tokens: 8192
+  force_submit_threshold_tokens: 16384
   temperature: 0.7
   max_tokens: 4096
   max_retries: 3

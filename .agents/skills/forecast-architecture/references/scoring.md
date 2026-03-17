@@ -29,3 +29,6 @@ Binary peer score uses `100 x (avg others' Brier - your Brier)`, so positive val
 - Final score sums across the questions an agent predicts on, so coverage matters.
 - The prompt builders emphasize calibration, not just top-1 accuracy.
 - When the environment reviews whether a new forecast improved on the old one, a first prediction is compared against the abstainer baseline `0.0`.
+- `daily_metrics.csv` is written once per wakeup session, not once per calendar day.
+- When `timegap_days > 1`, active-question metrics use the forecast snapshot that remains in force through the end of that wakeup interval.
+- `test_daily_metrics.csv` mirrors the main metrics file but includes only questions tagged with `source_split == "test"`.
