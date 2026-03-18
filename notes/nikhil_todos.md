@@ -1,0 +1,1 @@
+- test on policy distillation with the synthetic qa in sky rl. both 1 rollout run, and also the 8/16 rollouts. 

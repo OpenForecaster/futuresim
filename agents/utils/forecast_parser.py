@@ -382,6 +382,100 @@ def _parse_memory_add_body(body: str) -> Optional[dict]:
     }
 
 
+def extract_memo_ops(response: str) -> Tuple[List[dict], List[dict], List[str]]:
+    """
+    Extract memo_df operations from <memo_add>, <memo_update>, <memo_delete> tags.
+
+    Returns:
+        (adds, updates, deletes) where:
+        - adds: list of dicts with keys {qid, question, memory, confidence, category}
+        - updates: list of dicts with keys {qid, memory, confidence, category}
+        - deletes: list of qid strings
+    """
+    adds = []
+    for match in re.finditer(r'<memo_add>(.*?)</memo_add>', response, re.DOTALL | re.IGNORECASE):
+        entry = _parse_memo_body(match.group(1).strip(), require_question=True)
+        if entry:
+            adds.append(entry)
+
+    updates = []
+    # <memo_update qid="...">...</memo_update>
+    for match in re.finditer(r'<memo_update\s+qid\s*=\s*"([^"]*)">(.*?)</memo_update>', response, re.DOTALL | re.IGNORECASE):
+        qid = match.group(1).strip()
+        entry = _parse_memo_body(match.group(2).strip(), require_question=False)
+        if entry and qid:
+            entry["qid"] = qid
+            updates.append(entry)
+
+    deletes = []
+    # <memo_delete qid="..."/> or <memo_delete>QID</memo_delete>
+    for match in re.finditer(r'<memo_delete\s+qid\s*=\s*"([^"]*)"\s*/?\s*>', response, re.IGNORECASE):
+        qid = match.group(1).strip()
+        if qid:
+            deletes.append(qid)
+    for match in re.finditer(r'<memo_delete>(.*?)</memo_delete>', response, re.DOTALL | re.IGNORECASE):
+        qid = match.group(1).strip()
+        if qid:
+            deletes.append(qid)
+
+    return adds, updates, deletes
+
+
+def _parse_memo_body(body: str, require_question: bool = True) -> Optional[dict]:
+    """
+    Parse key: value format inside <memo_add> or <memo_update> tags.
+
+    Expected fields: qid, question, memory, confidence, category.
+    The memory field captures everything after "memory:" until the next
+    known field (confidence, category) or end of body.
+    """
+    if not body:
+        return None
+
+    result = {}
+
+    # Extract memory: captures everything after "memory:" up to the next
+    # known trailing field (confidence or category) or end of body.
+    memory_match = re.search(
+        r'(?:^|\n)\s*memory\s*:\s*(.*?)(?=\n\s*(?:confidence|category)\s*:|$)',
+        body, re.DOTALL | re.IGNORECASE,
+    )
+    if memory_match:
+        result["memory"] = memory_match.group(1).strip()
+
+    # Extract single-line fields from the ENTIRE body (they can appear
+    # before or after the memory block).
+    for key in ["qid", "question", "confidence", "category"]:
+        pattern = rf'^\s*{key}\s*:\s*(.+)$'
+        match = re.search(pattern, body, re.MULTILINE | re.IGNORECASE)
+        if match:
+            result[key] = match.group(1).strip()
+
+    # memory is required
+    if "memory" not in result:
+        return None
+
+    # qid is required for adds
+    if require_question and "qid" not in result:
+        return None
+
+    # Parse confidence as float
+    conf = None
+    if "confidence" in result:
+        try:
+            conf = float(result["confidence"])
+        except (ValueError, TypeError):
+            conf = None
+
+    return {
+        "qid": result.get("qid", ""),
+        "question": result.get("question", ""),
+        "memory": result.get("memory", ""),
+        "confidence": conf,
+        "category": result.get("category", ""),
+    }
+
+
 # Legacy exports for backward compatibility (deprecated)
 def extract_action_code(response: str) -> Optional[str]:
     """

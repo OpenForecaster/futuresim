@@ -18,6 +18,7 @@ class CachedQuestion:
     ground_truth_answer: str = ""
     options: Optional[List[str]] = None
     source: str = ""  # metaculus, kalshi, etc.
+    source_split: str = ""
     metadata: Optional[Dict] = None
     # Optional raw prompt from the upstream dataset (e.g. OpenForesight HF field "prompt").
     # Kept separate from background/resolution_criteria so agents can choose to use it verbatim.
@@ -37,9 +38,19 @@ class CachedQuestion:
 class DataFetcher(ABC):
     """Base class for platform-specific data fetchers."""
     
-    def __init__(self, dataset_path: str = None, split: str = "train"):
+    def __init__(
+        self,
+        dataset_path: str = None,
+        split: str = "train",
+        prepend_train_resolution_start: Optional[date] = None,
+        prepend_train_resolution_end: Optional[date] = None,
+        subsample_per_month: Optional[int] = None,
+    ):
         self.dataset_path = dataset_path
         self.split = split
+        self.prepend_train_resolution_start = prepend_train_resolution_start
+        self.prepend_train_resolution_end = prepend_train_resolution_end
+        self.subsample_per_month = subsample_per_month
         
     @property
     @abstractmethod

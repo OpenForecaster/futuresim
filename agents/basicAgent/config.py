@@ -6,8 +6,14 @@ from typing import Optional, Dict, Any
 
 @dataclass
 class AgentConfig:
-    max_actions: int = 10
-    warmup_max_actions: int = 10
+    max_actions: Optional[int] = None
+    warmup_max_actions: Optional[int] = None
+    max_total_tokens: Optional[int] = None
+    warmup_max_total_tokens: Optional[int] = None
+    submit_reserve_tokens: int = 8192
+    warmup_submit_reserve_tokens: Optional[int] = None
+    force_submit_threshold_tokens: int = 16384
+    warmup_force_submit_threshold_tokens: Optional[int] = None
     warmup_parallelism: int = 20  # Default higher parallelism for warmup
     max_submit_retries: int = 3
     max_outcomes_per_question: int = 5
@@ -16,7 +22,7 @@ class AgentConfig:
     singleans: bool = False
     memory_dir: Optional[str] = None
     enable_memory: bool = True
-    memory_format: str = "structured"  # "structured" (YAML entries) or "plain" (legacy text)
+    memory_format: str = "structured"  # "structured" (YAML entries), "plain" (legacy text), or "active" (memo_df + reduced structured)
     sampling_params: Optional[Dict[str, Any]] = None
     
     # Search
@@ -25,9 +31,14 @@ class AgentConfig:
     snippet_max_chars: int = 2000
     article_max_chars: int = 4000
     search_cutoff_days: int = 0
+    timegap_days: int = 1
     
     # Single agent mode - adjusts prompt to focus on accuracy only (no peer/market language)
     single_agent_mode: bool = False
+
+    # Cheat feedback: provide privileged directional-correctness feedback before memory update
+    cheat_feedback: bool = False
+    cheat_feedback_detail: str = "full"  # "full" (show Brier scores) or "direction" (only improved/worsened)
 
     # GPT-OSS Harmony prompt placement:
     # - "instructions" (default): task text goes to Responses API `instructions`.
@@ -53,3 +64,30 @@ class AgentConfig:
     def __post_init__(self):
         if self.sampling_params is None:
             self.sampling_params = {'temperature': 0.7, 'max_tokens': 2048}
+        for name, value in (
+            ("max_actions", self.max_actions),
+            ("warmup_max_actions", self.warmup_max_actions),
+            ("max_total_tokens", self.max_total_tokens),
+            ("warmup_max_total_tokens", self.warmup_max_total_tokens),
+            ("submit_reserve_tokens", self.submit_reserve_tokens),
+            ("warmup_submit_reserve_tokens", self.warmup_submit_reserve_tokens),
+            ("force_submit_threshold_tokens", self.force_submit_threshold_tokens),
+            ("warmup_force_submit_threshold_tokens", self.warmup_force_submit_threshold_tokens),
+        ):
+            if value is not None and value <= 0:
+                raise ValueError(f"{name} must be > 0 when provided")
+
+        if self.force_submit_threshold_tokens < self.submit_reserve_tokens:
+            raise ValueError("force_submit_threshold_tokens must be >= submit_reserve_tokens")
+
+        warmup_submit_reserve = self.warmup_submit_reserve_tokens or self.submit_reserve_tokens
+        warmup_force_submit = (
+            self.warmup_force_submit_threshold_tokens or self.force_submit_threshold_tokens
+        )
+        if warmup_force_submit < warmup_submit_reserve:
+            raise ValueError(
+                "warmup_force_submit_threshold_tokens must be >= warmup_submit_reserve_tokens"
+            )
+
+        if self.timegap_days <= 0:
+            raise ValueError("timegap_days must be >= 1")

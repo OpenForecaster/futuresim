@@ -35,9 +35,9 @@ END_DATE="2026-01-31"
 if [ -f "${REPO_DIR}/.venv/bin/activate" ]; then
   # shellcheck disable=SC1091
   source "${REPO_DIR}/.venv/bin/activate"
-elif [ -f "${REPO_DIR}/fsim/bin/activate" ]; then
-  # shellcheck disable=SC1091
-  source "${REPO_DIR}/fsim/bin/activate"
+else
+  echo "ERROR: Missing virtualenv at ${REPO_DIR}/.venv/bin/activate"
+  exit 2
 fi
 cd "${REPO_DIR}"
 

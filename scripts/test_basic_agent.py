@@ -33,33 +33,30 @@ import argparse
 import os
 import sys
 import json
-from datetime import datetime
+from datetime import datetime, date
 
 # Add project root to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-# Load .env file if exists
-env_path = os.path.join(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')), '.env')
-if os.path.exists(env_path):
-    print(f"Loading environment from {env_path}")
-    with open(env_path, 'r') as f:
-        for line in f:
-            line = line.strip()
-            if line and not line.startswith('#') and '=' in line:
-                key, value = line.split('=', 1)
-                os.environ[key.strip()] = value.strip().strip('"').strip("'")
+from pathing import REPO_ROOT, expand_env_tree, load_repo_env, raise_for_unresolved_env_vars
+
+load_repo_env(REPO_ROOT)
 
 from environment.env import SimulationEnvironment, SimForecastInterface
 from agents.basicAgent import BasicAgent, AgentConfig
 from agents.allQAgent import AllQAgent, AllQDailyAgent
 from agents.ogAgent import OgAgent
 from agents.gptossAgent import GPTOSSBasicAgent, GPTOSSAllQAgent
+from agents.qwenAgent import QwenBasicAgent, QwenAllQAgent
 
 
 # Default paths
-DATASET_PATH = "/is/cluster/fast/sgoel/forecasting/qs/OpenForesight/data/"
-MODEL_PATH = "/is/cluster/fast/rolmedo/models/qwen3-4b-it-2507"
-CURRENT_SIM_DIR = "/is/cluster/fast/sgoel/forecasting/current_sim"
+DATASET_PATH = os.getenv("FSIM_DATASET_PATH", "/is/cluster/fast/sgoel/forecasting/qs/OpenForesight/data/")
+DATASET_CACHE = os.getenv("FSIM_DATASET_CACHE", "/is/cluster/fast/sgoel/forecasting/qs/cache")
+MODEL_PATH = os.getenv("FSIM_DEFAULT_MODEL_PATH", "/is/cluster/fast/rolmedo/models/qwen3-4b-it-2507")
+CURRENT_SIM_DIR = os.getenv("FSIM_OUTPUT_BASE", "/is/cluster/fast/sgoel/forecasting/current_sim")
+MATCHER_PATH = os.getenv("FSIM_MATCHER_MODEL", "/fast/rolmedo/models/qwen3-4b-it-2507")
+EMBEDDING_MODEL_PATH = os.getenv("FSIM_EMBEDDING_MODEL", "/is/cluster/fast/sgoel/models/Qwen3-Embedding-8B")
 
 
 class ThreadSafeLLM:
@@ -88,6 +85,12 @@ def save_config(output_dir: str, args: argparse.Namespace, extra: dict = None):
     print(f"Config saved to {config_path}")
 
 
+def _optional_int(value):
+    if value is None:
+        return None
+    return int(value)
+
+
 def prepare_restart_directory(source_dir: str, restart_day: str, output_dir: str) -> None:
     """
     Prepare a new output directory for restarting a simulation from a specific day.
@@ -102,7 +105,12 @@ def prepare_restart_directory(source_dir: str, restart_day: str, output_dir: str
     from datetime import date
     import shutil
     
-    restart_date = datetime.strptime(restart_day, "%Y-%m-%d").date()
+    if isinstance(restart_day, datetime):
+        restart_date = restart_day.date()
+    elif isinstance(restart_day, date):
+        restart_date = restart_day
+    else:
+        restart_date = datetime.strptime(str(restart_day), "%Y-%m-%d").date()
     
     # 1. Copy actions.jsonl entries before restart_day
     src_actions = os.path.join(source_dir, "actions.jsonl")
@@ -140,9 +148,23 @@ def prepare_restart_directory(source_dir: str, restart_day: str, output_dir: str
                 os.makedirs(dst_memory_dir, exist_ok=True)
                 
                 for mem_file in os.listdir(src_memory_dir):
-                    if mem_file.endswith(".txt"):
+                    # Support all memory formats:
+                    #   plain:      YYYY-MM-DD.txt
+                    #   structured: YYYY-MM-DD.yaml
+                    #   active:     YYYY-MM-DD.yaml + memo_YYYY-MM-DD.csv
+                    if mem_file.endswith(".txt") or mem_file.endswith(".yaml"):
                         try:
-                            file_date = date.fromisoformat(mem_file[:-4])  # Remove .txt
+                            file_date = date.fromisoformat(mem_file.rsplit(".", 1)[0])
+                            if file_date < restart_date:
+                                shutil.copy(
+                                    os.path.join(src_memory_dir, mem_file),
+                                    os.path.join(dst_memory_dir, mem_file)
+                                )
+                        except ValueError:
+                            continue
+                    elif mem_file.startswith("memo_") and mem_file.endswith(".csv"):
+                        try:
+                            file_date = date.fromisoformat(mem_file[len("memo_"):-len(".csv")])
                             if file_date < restart_date:
                                 shutil.copy(
                                     os.path.join(src_memory_dir, mem_file),
@@ -174,11 +196,13 @@ def prepare_restart_directory(source_dir: str, restart_day: str, output_dir: str
                 if copied:
                     print(f"  Copied timing stats for agent: {agent_name} ({copied} lines)")
     
-    # 2.5 Copy daily metrics history (before restart_day) if present.
+    # 2.5 Copy metrics history (before restart_day) if present.
     # Note: some runs have no CSV header; we filter by the first comma-delimited field.
-    src_metrics = os.path.join(source_dir, "daily_metrics.csv")
-    if os.path.exists(src_metrics):
-        dst_metrics = os.path.join(output_dir, "daily_metrics.csv")
+    for metrics_name in ("daily_metrics.csv", "test_daily_metrics.csv"):
+        src_metrics = os.path.join(source_dir, metrics_name)
+        if not os.path.exists(src_metrics):
+            continue
+        dst_metrics = os.path.join(output_dir, metrics_name)
         copied = 0
         with open(src_metrics, "r") as src, open(dst_metrics, "w") as dst:
             for line in src:
@@ -198,7 +222,7 @@ def prepare_restart_directory(source_dir: str, restart_day: str, output_dir: str
                     dst.write(line + "\n")
                     copied += 1
         if copied:
-            print(f"  Copied {copied} daily metrics rows (before {restart_day})")
+            print(f"  Copied {copied} rows from {metrics_name} (before {restart_day})")
 
     # 3. Copy matcher cache if exists
     src_cache = os.path.join(source_dir, "matcher_cache.json")
@@ -221,7 +245,9 @@ def load_agents_config(config_path: str) -> dict:
         raise ImportError("PyYAML required for config files. Install with: pip install pyyaml")
     
     with open(config_path, 'r') as f:
-        return yaml.safe_load(f)
+        config = expand_env_tree(yaml.safe_load(f))
+    raise_for_unresolved_env_vars(config, f"agents config {config_path}")
+    return config
 
 
 def create_inference_provider(provider: str, model: str, args):
@@ -232,17 +258,26 @@ def create_inference_provider(provider: str, model: str, args):
         agent_max_model_len = getattr(args, "agent_max_model_len", None)
         if agent_max_model_len is None:
             agent_max_model_len = args.max_model_len
+        tool_call_parser = _resolve_vllm_tool_call_parser(model, args)
         return VLLMInference(
             model,
             max_model_len=agent_max_model_len,
             gpu_memory_utilization=getattr(args, "vllm_gpu_mem", 0.3),
+            timeout=getattr(args, "vllm_request_timeout", 120.0),
+            max_num_seqs=getattr(args, "vllm_max_num_seqs", 8),
             tensor_parallel_size=getattr(args, "vllm_tensor_parallel_size", 1),
+            data_parallel_size=getattr(args, "vllm_data_parallel_size", 1),
+            pipeline_parallel_size=getattr(args, "vllm_pipeline_parallel_size", 1),
+            enable_expert_parallel=getattr(args, "vllm_enable_expert_parallel", False),
+            all2all_backend=getattr(args, "vllm_all2all_backend", None),
             startup_timeout=getattr(args, "vllm_startup_timeout", 300.0),
             rope_scaling=rope_scaling,
             enable_tools=getattr(args, "vllm_enable_tools", False),
+            tool_call_parser=tool_call_parser,
+            tool_parser_plugin=getattr(args, "vllm_tool_parser_plugin", None),
+            enable_prefix_caching=getattr(args, "vllm_enable_prefix_caching", True),
             cuda_visible_devices=getattr(args, "agent_cuda_visible_devices", None),
             language_model_only=getattr(args, "language_model_only", False),
-            max_num_seqs=getattr(args, "vllm_max_num_seqs", None),
         )
     elif provider == "openrouter":
         from inference.openrouter import OpenRouterInference
@@ -264,6 +299,27 @@ def get_model_short_name(model: str) -> str:
     # Remove version tags
     name = name.split(':')[0]
     return name
+
+
+def _is_qwen_model(model: str) -> bool:
+    model_l = str(model or "").lower()
+    return ("qwen" in model_l) and ("gpt-oss" not in model_l)
+
+
+def _resolve_vllm_tool_call_parser(model: str, args) -> str | None:
+    parser = getattr(args, "vllm_tool_call_parser", None)
+    if isinstance(parser, str):
+        parser = parser.strip()
+    if parser:
+        return parser
+
+    if not bool(getattr(args, "vllm_enable_tools", False)):
+        return None
+
+    if _is_qwen_model(model):
+        return "qwen3_coder"
+
+    return "openai"
 
 
 def create_agents_from_config(config: dict, args, output_dir: str, search_tool=None) -> list:
@@ -328,8 +384,49 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
         inference_provider = create_inference_provider(provider, model, args)
         
         # Build agent config with merged settings
-        max_actions = agent_def.get('max_actions', defaults.get('max_actions', args.max_actions))
-        warmup_max_actions = agent_def.get('warmup_max_actions', defaults.get('warmup_max_actions', getattr(args, 'warmup_max_actions', 10)))
+        max_actions = _optional_int(agent_def.get('max_actions', defaults.get('max_actions', args.max_actions)))
+        warmup_max_actions = _optional_int(
+            agent_def.get('warmup_max_actions', defaults.get('warmup_max_actions', getattr(args, 'warmup_max_actions', None)))
+        )
+        max_total_tokens = _optional_int(
+            agent_def.get('max_total_tokens', defaults.get('max_total_tokens', getattr(args, 'max_total_tokens', None)))
+        )
+        warmup_max_total_tokens = _optional_int(
+            agent_def.get(
+                'warmup_max_total_tokens',
+                defaults.get('warmup_max_total_tokens', getattr(args, 'warmup_max_total_tokens', None))
+            )
+        )
+        submit_reserve_tokens = _optional_int(
+            agent_def.get(
+                'submit_reserve_tokens',
+                defaults.get('submit_reserve_tokens', getattr(args, 'submit_reserve_tokens', 8192))
+            )
+        )
+        warmup_submit_reserve_tokens = _optional_int(
+            agent_def.get(
+                'warmup_submit_reserve_tokens',
+                defaults.get('warmup_submit_reserve_tokens', getattr(args, 'warmup_submit_reserve_tokens', None))
+            )
+        )
+        force_submit_threshold_tokens = _optional_int(
+            agent_def.get(
+                'force_submit_threshold_tokens',
+                defaults.get(
+                    'force_submit_threshold_tokens',
+                    getattr(args, 'force_submit_threshold_tokens', 16384),
+                )
+            )
+        )
+        warmup_force_submit_threshold_tokens = _optional_int(
+            agent_def.get(
+                'warmup_force_submit_threshold_tokens',
+                defaults.get(
+                    'warmup_force_submit_threshold_tokens',
+                    getattr(args, 'warmup_force_submit_threshold_tokens', None),
+                )
+            )
+        )
         warmup_parallelism = agent_def.get('warmup_parallelism', defaults.get('warmup_parallelism', getattr(args, 'warmup_parallelism', 20)))
         max_retries = agent_def.get('max_retries', defaults.get('max_retries', args.max_retries))
         temperature = agent_def.get('temperature', defaults.get('temperature', args.temperature))
@@ -337,7 +434,10 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
         reasoning = agent_def.get('reasoning', defaults.get('reasoning', None))
         search_cutoff_days = agent_def.get('search_cutoff_days', defaults.get('search_cutoff_days', getattr(args, 'search_cutoff_days', 0)))
         enable_memory = agent_def.get('enable_memory', defaults.get('enable_memory', True))
+        memory_format = agent_def.get('memory_format', defaults.get('memory_format', 'structured'))
         singleans = agent_def.get('singleans', defaults.get('singleans', False))
+        cheat_feedback = agent_def.get('cheat_feedback', defaults.get('cheat_feedback', getattr(args, 'cheat_feedback', False)))
+        cheat_feedback_detail = agent_def.get('cheat_feedback_detail', defaults.get('cheat_feedback_detail', getattr(args, 'cheat_feedback_detail', 'full')))
         gptoss_prompt_mode = agent_def.get(
             'gptoss_prompt_mode',
             defaults.get('gptoss_prompt_mode', getattr(args, 'gptoss_prompt_mode', 'instructions'))
@@ -377,10 +477,17 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
         agent_config = AgentConfig(
             max_actions=max_actions,
             warmup_max_actions=warmup_max_actions,
+            max_total_tokens=max_total_tokens,
+            warmup_max_total_tokens=warmup_max_total_tokens,
+            submit_reserve_tokens=submit_reserve_tokens,
+            warmup_submit_reserve_tokens=warmup_submit_reserve_tokens,
+            force_submit_threshold_tokens=force_submit_threshold_tokens,
+            warmup_force_submit_threshold_tokens=warmup_force_submit_threshold_tokens,
             warmup_parallelism=warmup_parallelism,
             max_submit_retries=max_retries,
             memory_dir=agent_dir,  # Per-agent memory directory
             enable_memory=enable_memory,
+            memory_format=memory_format,
             singleans=singleans,
             sampling_params={
                 'temperature': temperature,
@@ -388,6 +495,7 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
                 **({'reasoning': reasoning} if reasoning is not None else {}),
             },
             search_cutoff_days=search_cutoff_days,
+            timegap_days=getattr(args, 'timegap_days', 1),
             single_agent_mode=(len(agents_list) == 1),  # Adjust prompt for single-agent runs
             gptoss_prompt_mode=gptoss_prompt_mode,
             gptoss_reasoning_effort=gptoss_reasoning_effort,
@@ -395,17 +503,13 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
             gptoss_responses_max_retries=gptoss_responses_max_retries,
             gptoss_retry_backoff_base_s=gptoss_retry_backoff_base_s,
             gptoss_retry_backoff_max_s=gptoss_retry_backoff_max_s,
-        )
-        
-        # GPT-OSS Harmony tool calling: only when using vLLM + enable_tools + gpt-oss weights.
-        use_gptoss_harmony = (
-            provider == "vllm"
-            and bool(getattr(args, "vllm_enable_tools", False))
-            and ("gpt-oss" in str(model).lower())
+            cheat_feedback=cheat_feedback,
+            cheat_feedback_detail=cheat_feedback_detail,
         )
 
+        # GPT-OSS Harmony tool calling: only when using vLLM + enable_tools + gpt-oss weights.
         if scaffold == 'basic':
-            agent_cls = GPTOSSBasicAgent if use_gptoss_harmony else BasicAgent
+            agent_cls = BasicAgent
             agent = agent_cls(
                 agent_id=agent_id,
                 inference_provider=inference_provider,
@@ -414,7 +518,7 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
                 search_tool=search_tool
             )
         elif scaffold in ('allQ', 'allq'):
-            agent_cls = GPTOSSAllQAgent if use_gptoss_harmony else AllQAgent
+            agent_cls = AllQAgent
             agent = agent_cls(
                 agent_id=agent_id,
                 inference_provider=inference_provider,
@@ -422,6 +526,40 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
                 model_name=model,
                 search_tool=search_tool,
                 start_date=args.sim_start_date  # Passed from create_agents call
+            )
+        elif scaffold == 'qwenbasic':
+            agent = QwenBasicAgent(
+                agent_id=agent_id,
+                inference_provider=inference_provider,
+                config=agent_config,
+                model_name=model,
+                search_tool=search_tool
+            )
+        elif scaffold == 'qwenallq':
+            agent = QwenAllQAgent(
+                agent_id=agent_id,
+                inference_provider=inference_provider,
+                config=agent_config,
+                model_name=model,
+                search_tool=search_tool,
+                start_date=args.sim_start_date
+            )
+        elif scaffold == 'gptossbasic':
+            agent = GPTOSSBasicAgent(
+                agent_id=agent_id,
+                inference_provider=inference_provider,
+                config=agent_config,
+                model_name=model,
+                search_tool=search_tool
+            )
+        elif scaffold == 'gptossallq':
+            agent = GPTOSSAllQAgent(
+                agent_id=agent_id,
+                inference_provider=inference_provider,
+                config=agent_config,
+                model_name=model,
+                search_tool=search_tool,
+                start_date=args.sim_start_date
             )
         elif scaffold == 'allqd':
             agent = AllQDailyAgent(
@@ -443,7 +581,8 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
             )
         else:
             raise ValueError(
-                f"Unknown scaffold: {scaffold}. Only 'basic', 'allQ', 'allqd', and 'og' are supported."
+                f"Unknown scaffold: {scaffold}. Only 'basic', 'allQ', 'allqd', 'og', "
+                "'qwenbasic', 'qwenallq', 'gptossbasic', and 'gptossallq' are supported."
             )
         
         agents.append(agent)
@@ -480,12 +619,20 @@ def main():
     parser.add_argument("--dataset_path", default=DATASET_PATH,
                        help="Path to local dataset (for openforesight)")
     parser.add_argument("--dataset_cache", 
-                       default="/is/cluster/fast/sgoel/forecasting/qs/cache",
+                       default=DATASET_CACHE,
                        help="Cache directory for fetched datasets")
     parser.add_argument("--output_base", default=CURRENT_SIM_DIR,
                        help="Base directory for simulation outputs")
     parser.add_argument("--split", choices=["train", "test", "validation"], default="train",
                        help="Dataset split to use (default: train)")
+    parser.add_argument("--prepend_train_resolution_start", default=None,
+                       help="Optional OpenForesight train prelude start date (YYYY-MM-DD).")
+    parser.add_argument("--prepend_train_resolution_end", default=None,
+                       help="Optional OpenForesight train prelude end date (YYYY-MM-DD).")
+    parser.add_argument("--subsample_per_month", type=int, default=1000,
+                       help="Per-month question cap for the optional prepended train window.")
+    parser.add_argument("--timegap_days", type=int, default=1,
+                       help="Wake the model every N days instead of daily (default 1).")
     
     # Multi-agent config
     parser.add_argument("--agents_config", default=None,
@@ -496,10 +643,14 @@ def main():
                        help="Run agents in parallel (default: True)")
     parser.add_argument("--no_parallel", action="store_true",
                        help="Disable parallel agent execution")
+    parser.add_argument("--cheat_feedback", action="store_true", default=False,
+                       help="Provide agents with privileged directional-correctness feedback before memory update")
+    parser.add_argument("--cheat_feedback_detail", choices=["full", "direction"], default="full",
+                       help="Cheat feedback detail level: 'full' (Brier scores) or 'direction' (labels only)")
     
     # Single-agent settings (used when no config file)
-    parser.add_argument("--scaffold", choices=["basic", "allQ", "allq", "allqd", "og"], default="basic",
-                       help="Agent scaffold to use (default: basic)")
+    parser.add_argument("--scaffold", choices=["basic", "allQ", "allq", "allqd", "og", "qwenbasic", "qwenallq", "gptossbasic", "gptossallq"], default="basic",
+                       help="Agent scaffold to use (default: basic). Qwen/GPT-OSS variants must be selected explicitly.")
     parser.add_argument("--provider", choices=["vllm", "openrouter"], default="openrouter",
                        help="Inference provider: 'vllm' (local) or 'openrouter' (API)")
     parser.add_argument("--model_path", default=MODEL_PATH,
@@ -519,10 +670,22 @@ def main():
                        help="Run without LLM (for testing setup)")
     
     # Agent settings
-    parser.add_argument("--max_actions", type=int, default=10,
-                       help="Max actions per day (queries + submissions)")
-    parser.add_argument("--warmup_max_actions", type=int, default=10,
-                       help="Max actions per question during warmup phase (AllQAgent only)")
+    parser.add_argument("--max_actions", type=int, default=None,
+                       help="Optional action budget per day (queries + submissions)")
+    parser.add_argument("--warmup_max_actions", type=int, default=None,
+                       help="Optional action budget per question during warmup phase (AllQAgent only)")
+    parser.add_argument("--max_total_tokens", type=int, default=None,
+                       help="Optional context-window budget per day/question loop (tracks current prompt occupancy, not cumulative spend)")
+    parser.add_argument("--warmup_max_total_tokens", type=int, default=None,
+                       help="Optional context-window budget per warmup question loop")
+    parser.add_argument("--submit_reserve_tokens", type=int, default=8192,
+                       help="Reserved context-window headroom to keep available for a final submit (default 8192)")
+    parser.add_argument("--warmup_submit_reserve_tokens", type=int, default=None,
+                       help="Optional warmup-specific submit reserve tokens")
+    parser.add_argument("--force_submit_threshold_tokens", type=int, default=16384,
+                       help="Force-submit once remaining context budget is at or below this threshold (default 16384)")
+    parser.add_argument("--warmup_force_submit_threshold_tokens", type=int, default=None,
+                       help="Optional warmup-specific force-submit threshold tokens")
     parser.add_argument("--warmup_parallelism", type=int, default=20,
                        help="Number of concurrent threads for warmup phase (default 20)")
     parser.add_argument("--max_retries", type=int, default=3,
@@ -530,7 +693,7 @@ def main():
     parser.add_argument("--temperature", type=float, default=0.7,
                        help="Sampling temperature")
     parser.add_argument("--max_tokens", type=int, default=2048,
-                       help="Max tokens to generate")
+                       help="Max output tokens to generate per LLM call")
     parser.add_argument("--gptoss_prompt_mode", choices=["instructions", "first_user"], default="instructions",
                        help="GPT-OSS Responses prompt placement mode")
     parser.add_argument("--gptoss_reasoning_effort", choices=["low", "medium", "high"], default="medium",
@@ -549,16 +712,32 @@ def main():
     # vLLM runtime settings (when provider == vllm in config)
     parser.add_argument("--vllm_gpu_mem", type=float, default=0.3,
                        help="GPU memory fraction for vLLM agent models (0.0-1.0, default 0.3)")
+    parser.add_argument("--vllm_max_num_seqs", type=int, default=8,
+                       help="vLLM max concurrent sequences (default 8)")
     parser.add_argument("--vllm_tensor_parallel_size", type=int, default=1,
                        help="Tensor parallel size for vLLM agent models (default 1)")
+    parser.add_argument("--vllm_data_parallel_size", type=int, default=1,
+                       help="Data parallel size for vLLM agent models (default 1)")
+    parser.add_argument("--vllm_pipeline_parallel_size", type=int, default=1,
+                       help="Pipeline parallel size for vLLM agent models (default 1)")
+    parser.add_argument("--vllm_enable_expert_parallel", action="store_true", default=False,
+                       help="Enable vLLM expert parallel mode for MoE models")
+    parser.add_argument("--vllm_all2all_backend", default=None,
+                       help="Optional vLLM all-to-all backend (e.g. allgather_reducescatter, deepep_high_throughput)")
     parser.add_argument("--vllm_startup_timeout", type=float, default=300.0,
                        help="vLLM server startup timeout in seconds (default 300)")
+    parser.add_argument("--vllm_request_timeout", type=float, default=120.0,
+                       help="vLLM request timeout in seconds for chat/embeddings calls (default 120)")
     parser.add_argument("--vllm_enable_tools", action="store_true", default=False,
-                       help="Start vLLM servers with tool-calling enabled (Responses API recommended for gpt-oss tools)")
+                       help="Start vLLM servers with tool-calling enabled (required for native Qwen tool calls)")
+    parser.add_argument("--vllm_enable_prefix_caching", action=argparse.BooleanOptionalAction, default=True,
+                       help="Enable vLLM automatic prefix caching for chat/matcher servers (default: on)")
+    parser.add_argument("--vllm_tool_call_parser", default=None,
+                       help="vLLM tool parser name (e.g. qwen3_coder, openai). Auto-detected when omitted.")
+    parser.add_argument("--vllm_tool_parser_plugin", default=None,
+                       help="Optional --tool-parser-plugin value for custom parsers")
     parser.add_argument("--language_model_only", action="store_true", default=False,
                        help="Pass --language-model-only to vLLM (skip vision encoder for multimodal checkpoints)")
-    parser.add_argument("--vllm_max_num_seqs", type=int, default=None,
-                       help="Limit max concurrent sequences in vLLM (reduces Mamba/conv state cache)")
 
     # GPU pinning for local multi-GPU runs.
     # If you set aux_cuda_visible_devices=1 and agent_cuda_visible_devices=0, then:
@@ -572,13 +751,13 @@ def main():
     # Answer matching settings
     parser.add_argument("--matching", choices=["exact", "openrouter", "vllm"], default="vllm",
                        help="Answer matching mode: 'exact', 'openrouter', or 'vllm'")
-    parser.add_argument("--matcher", default="/fast/rolmedo/models/qwen3-4b-it-2507",
+    parser.add_argument("--matcher", default=MATCHER_PATH,
                        help="Matcher model: OpenRouter model ID or VLLM model path")
     
     # Search settings
     parser.add_argument("--search_db", default="",
                        help="Path to LanceDB directory for article search (optional)")
-    parser.add_argument("--embedding_model", default="/is/cluster/fast/sgoel/models/Qwen3-Embedding-8B",
+    parser.add_argument("--embedding_model", default=EMBEDDING_MODEL_PATH,
                        help="Path to embedding model for semantic search")
     parser.add_argument("--embedding_gpu_mem", type=float, default=0.4,
                        help="GPU memory fraction for embedding model (0.0-1.0, default 0.4)")
@@ -607,7 +786,8 @@ def main():
         print(f"Loading configuration from {args.config}")
         with open(args.config, 'r') as f:
             import yaml
-            config = yaml.safe_load(f)
+            config = expand_env_tree(yaml.safe_load(f))
+        raise_for_unresolved_env_vars(config, f"run config {args.config}")
             
         # Set defaults from config
         parser.set_defaults(**config)
@@ -626,7 +806,8 @@ def main():
         print(f"Loading configuration from {config_path}")
         
         with open(config_path, 'r') as f:
-            config = json.load(f)
+            config = expand_env_tree(json.load(f))
+        raise_for_unresolved_env_vars(config, f"resume config {config_path}")
             
         # Set defaults from config
         parser.set_defaults(**config)
@@ -635,6 +816,27 @@ def main():
         args = parser.parse_args(args=remaining_argv + sys.argv[1:])
     else:
         args = parser.parse_args()
+
+    # YAML parsing can materialize date-like values as datetime/date objects when
+    # overrides are passed via submit_sim.py --set. Normalize back to ISO strings.
+    def _normalize_date_like(v):
+        if isinstance(v, datetime):
+            return v.date().isoformat()
+        if isinstance(v, date):
+            return v.isoformat()
+        return v
+
+    for key in (
+        "start_date",
+        "end_date",
+        "resolution_start",
+        "resolution_end",
+        "restart_from_day",
+        "prepend_train_resolution_start",
+        "prepend_train_resolution_end",
+    ):
+        if hasattr(args, key):
+            setattr(args, key, _normalize_date_like(getattr(args, key)))
 
     def _config_uses_vllm(cfg: dict | None, parsed_args: argparse.Namespace) -> bool:
         # Legacy single-agent mode.
@@ -830,8 +1032,11 @@ def main():
             matcher_max_model_len = args.max_model_len
         matcher_provider = VLLMInference(args.matcher, max_model_len=matcher_max_model_len, 
                                           gpu_memory_utilization=args.matcher_gpu_mem,
+                                          timeout=getattr(args, "vllm_request_timeout", 120.0),
+                                          max_num_seqs=getattr(args, "vllm_max_num_seqs", 8),
                                           startup_timeout=getattr(args, "vllm_startup_timeout", 300.0),
                                           rope_scaling=matcher_rope_scaling,
+                                          enable_prefix_caching=getattr(args, "vllm_enable_prefix_caching", True),
                                           cuda_visible_devices=getattr(args, "aux_cuda_visible_devices", None))
         # Force server startup by making a warmup call - fail job if this fails
         print(f"  Warming up matcher ({args.matcher}, GPU: {args.matcher_gpu_mem:.0%})...")
@@ -869,8 +1074,11 @@ def main():
                     args.embedding_model,
                     max_model_len=embedding_max_model_len,
                     gpu_memory_utilization=args.embedding_gpu_mem,
+                    timeout=getattr(args, "vllm_request_timeout", 120.0),
+                    max_num_seqs=getattr(args, "vllm_max_num_seqs", 8),
                     startup_timeout=getattr(args, "vllm_startup_timeout", 300.0),
                     rope_scaling=embedding_rope_scaling,
+                    enable_prefix_caching=False,
                     cuda_visible_devices=getattr(args, "aux_cuda_visible_devices", None),
                 )
                 # Force server startup and verify /v1/embeddings works.
@@ -932,11 +1140,22 @@ def main():
             inference_provider = VLLMInference(
                 args.model_path,
                 max_model_len=agent_max_model_len,
+                gpu_memory_utilization=getattr(args, "vllm_gpu_mem", 0.3),
+                timeout=getattr(args, "vllm_request_timeout", 120.0),
+                max_num_seqs=getattr(args, "vllm_max_num_seqs", 8),
                 tensor_parallel_size=getattr(args, "vllm_tensor_parallel_size", 1),
+                data_parallel_size=getattr(args, "vllm_data_parallel_size", 1),
+                pipeline_parallel_size=getattr(args, "vllm_pipeline_parallel_size", 1),
+                enable_expert_parallel=getattr(args, "vllm_enable_expert_parallel", False),
+                all2all_backend=getattr(args, "vllm_all2all_backend", None),
                 startup_timeout=getattr(args, "vllm_startup_timeout", 300.0),
                 rope_scaling=getattr(args, "rope_scaling", None),
+                enable_tools=getattr(args, "vllm_enable_tools", False),
+                tool_call_parser=_resolve_vllm_tool_call_parser(args.model_path, args),
+                tool_parser_plugin=getattr(args, "vllm_tool_parser_plugin", None),
+                enable_prefix_caching=getattr(args, "vllm_enable_prefix_caching", True),
+                cuda_visible_devices=getattr(args, "agent_cuda_visible_devices", None),
                 language_model_only=getattr(args, "language_model_only", False),
-                max_num_seqs=getattr(args, "vllm_max_num_seqs", None),
             )
             model_name = os.path.basename(args.model_path)
             
@@ -967,6 +1186,12 @@ def main():
         agent_config = AgentConfig(
             max_actions=args.max_actions,
             warmup_max_actions=args.warmup_max_actions,
+            max_total_tokens=args.max_total_tokens,
+            warmup_max_total_tokens=args.warmup_max_total_tokens,
+            submit_reserve_tokens=args.submit_reserve_tokens,
+            warmup_submit_reserve_tokens=args.warmup_submit_reserve_tokens,
+            force_submit_threshold_tokens=args.force_submit_threshold_tokens,
+            warmup_force_submit_threshold_tokens=args.warmup_force_submit_threshold_tokens,
             warmup_parallelism=args.warmup_parallelism,
             max_submit_retries=args.max_retries,
             memory_dir=agent_dir,
@@ -976,6 +1201,7 @@ def main():
                 'max_tokens': args.max_tokens,
             },
             search_cutoff_days=args.search_cutoff_days,
+            timegap_days=args.timegap_days,
             single_agent_mode=True,  # Legacy CLI mode is always single-agent
             gptoss_prompt_mode=args.gptoss_prompt_mode,
             gptoss_reasoning_effort=args.gptoss_reasoning_effort,
@@ -983,10 +1209,12 @@ def main():
             gptoss_responses_max_retries=args.gptoss_responses_max_retries,
             gptoss_retry_backoff_base_s=args.gptoss_retry_backoff_base_s,
             gptoss_retry_backoff_max_s=args.gptoss_retry_backoff_max_s,
+            cheat_feedback=getattr(args, 'cheat_feedback', False),
+            cheat_feedback_detail=getattr(args, 'cheat_feedback_detail', 'full'),
         )
-        
         if args.scaffold == 'basic':
-            agent = BasicAgent(
+            agent_cls = BasicAgent
+            agent = agent_cls(
                 agent_id=agent_id,
                 inference_provider=inference_provider,
                 config=agent_config,
@@ -994,7 +1222,42 @@ def main():
                 search_tool=search_tool
             )
         elif args.scaffold in ['allQ', 'allq']:
-            agent = AllQAgent(
+            agent_cls = AllQAgent
+            agent = agent_cls(
+                agent_id=agent_id,
+                inference_provider=inference_provider,
+                config=agent_config,
+                model_name=model_name,
+                search_tool=search_tool,
+                start_date=sim_start
+            )
+        elif args.scaffold == 'qwenbasic':
+            agent = QwenBasicAgent(
+                agent_id=agent_id,
+                inference_provider=inference_provider,
+                config=agent_config,
+                model_name=model_name,
+                search_tool=search_tool
+            )
+        elif args.scaffold == 'qwenallq':
+            agent = QwenAllQAgent(
+                agent_id=agent_id,
+                inference_provider=inference_provider,
+                config=agent_config,
+                model_name=model_name,
+                search_tool=search_tool,
+                start_date=sim_start
+            )
+        elif args.scaffold == 'gptossbasic':
+            agent = GPTOSSBasicAgent(
+                agent_id=agent_id,
+                inference_provider=inference_provider,
+                config=agent_config,
+                model_name=model_name,
+                search_tool=search_tool
+            )
+        elif args.scaffold == 'gptossallq':
+            agent = GPTOSSAllQAgent(
                 agent_id=agent_id,
                 inference_provider=inference_provider,
                 config=agent_config,
@@ -1020,6 +1283,11 @@ def main():
                 search_tool=search_tool,
                 start_date=sim_start
             )
+        else:
+            raise ValueError(
+                f"Unknown scaffold: {args.scaffold}. Only 'basic', 'allQ', 'allqd', 'og', "
+                "'qwenbasic', 'qwenallq', 'gptossbasic', and 'gptossallq' are supported."
+            )
         agents.append(agent)
         print(f"  Created agent: {agent_id}")
     else:
@@ -1041,7 +1309,12 @@ def main():
         resolution_end=resolution_end,
         parallel=args.parallel,
         split=args.split,
-        resume_dir=args.resume if args.resume else None
+        prepend_train_resolution_start=args.prepend_train_resolution_start,
+        prepend_train_resolution_end=args.prepend_train_resolution_end,
+        subsample_per_month=args.subsample_per_month,
+        timegap_days=args.timegap_days,
+        resume_dir=args.resume if args.resume else None,
+        cheat_feedback=getattr(args, 'cheat_feedback', False),
     )
     
     # Add all agents
@@ -1093,7 +1366,11 @@ def main():
                 resolved_questions=env.resolved_questions,
                 resolved_agent_predictions=env.resolved_agent_predictions,
                 histories_lock=env._histories_lock,
-                market_csv_path=None  # No market CSV yet
+                market_csv_path=None,  # No market CSV yet
+                timegap_days=env.timegap_days,
+                last_active_date=env._get_last_active_date(),
+                next_active_date=env._get_next_active_date(),
+                simulation_end_date=env.end_date,
             )
             warmup_interface.source_name = getattr(env, 'source_name', 'openforesight')
             warmup_interface.source_context = getattr(env, 'source_context', '')

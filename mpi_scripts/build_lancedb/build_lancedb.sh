@@ -11,15 +11,26 @@ set -euo pipefail
 export PATH="/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 source ~/.bashrc 2>/dev/null || true
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
+export FSIM_REPO_DIR="${FSIM_REPO_DIR:-${REPO_DIR}}"
+
+if [ -f "${REPO_DIR}/.env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "${REPO_DIR}/.env"
+  set +a
+fi
+
 # Filelock fix for /is/cluster/fast
 export SOFT_FILELOCK=1
 export PYTHONUNBUFFERED=1
+NEWS_BASE="${FSIM_NEWS_BASE:-/is/cluster/fast/sgoel/forecasting/news}"
 
 # Paths
-REPO_DIR="/home/sgoel/forecast-sim"
-ARTICLES_DIR="/is/cluster/fast/sgoel/forecasting/news/deduped_articles/data"
-EMBEDDINGS_DIR="/is/cluster/fast/sgoel/forecasting/news/deduped_articles/embeddings"
-OUTPUT_DIR="/is/cluster/fast/sgoel/forecasting/news/deduped_articles/lance"
+ARTICLES_DIR="${FSIM_NEWS_ARTICLES_DIR:-${NEWS_BASE}/deduped_articles/data}"
+EMBEDDINGS_DIR="${FSIM_NEWS_EMBEDDINGS_DIR:-${NEWS_BASE}/deduped_articles/embeddings}"
+OUTPUT_DIR="${FSIM_NEWS_LANCEDB_DIR:-${NEWS_BASE}/deduped_articles/lance}"
 
 # Model
 MODEL="Qwen3-Embedding-8B"
@@ -29,7 +40,7 @@ START_DATE="2023-01-01"
 END_DATE="2026-01-31"
 
 # Activate environment
-source ~/forecast-sim/fsim/bin/activate
+source "${REPO_DIR}/.venv/bin/activate"
 cd "$REPO_DIR"
 
 SCALAR_INDEX_TIMEOUT_MINUTES="${SCALAR_INDEX_TIMEOUT_MINUTES:-30}"

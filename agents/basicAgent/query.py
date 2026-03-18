@@ -13,10 +13,10 @@ class QueryHandler:
     def setup(self, csv_path: str, forecast_interface, agent_id: str, current_date: date, single_agent_mode: bool = False) -> None:
         self._df_interface = DfInterface(csv_path, forecast_interface, agent_id, current_date, single_agent_mode)
     
-    def execute(self, code: str) -> Tuple[str, Optional[str]]:
+    def execute(self, code: str, extra_context: dict = None) -> Tuple[str, Optional[str]]:
         if not self._df_interface:
             return "", "QueryHandler not initialized"
-        return self._df_interface.execute_query(code)
+        return self._df_interface.execute_query(code, extra_context=extra_context)
     
     def get_info(self) -> Dict[str, Any]:
         if not self._df_interface:

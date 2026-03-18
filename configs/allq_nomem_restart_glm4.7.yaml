@@ -5,7 +5,7 @@
 # Usage: python mpi_scripts/run_sim/submit_sim.py --config configs/allq_nomem_restart.yaml --runs 1
 
 # --- Restart ---
-restart_from: "/fast/sgoel/forecasting/current_sim/allq_warmup_only_r00/glm-4.7-flash-testset"
+# Set locally with --set restart_from=/path/to/run
 restart_from_day: "2025-04-25"
 
 # --- Simulation Meta ---
@@ -18,15 +18,15 @@ split: "test"
 
 # --- Data Paths ---
 dataset: "openforesight"
-dataset_path: "/fast/nchandak/datasets/OpenForesight"
+dataset_path: "${FSIM_DATASET_PATH}"
 min_forecasters: 10
 resolved_only: true
-output_base: "/is/cluster/fast/sgoel/forecasting/current_sim"
+output_base: "${FSIM_OUTPUT_BASE}"
 warmup_parallelism: 64
 
 # --- Search Settings ---
-search_db: "/is/cluster/fast/sgoel/forecasting/news/deduped_articles/lance/Qwen3-Embedding-8B"
-embedding_model: "/is/cluster/fast/sgoel/models/Qwen3-Embedding-8B"
+search_db: "${FSIM_SEARCH_DB}"
+embedding_model: "${FSIM_EMBEDDING_MODEL}"
 embedding_gpu_mem: 0.7
 
 # --- Answer Matching ---

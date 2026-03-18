@@ -8,7 +8,7 @@ set -e
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 NEWS_PLEASE_DIR="$REPO_ROOT/data/news/news-please"
 PATCH_FILE="$REPO_ROOT/data/news/news-please.patch"
-VENV_ACTIVATE="$REPO_ROOT/fsim/bin/activate"
+VENV_ACTIVATE="$REPO_ROOT/.venv/bin/activate"
 
 echo "=== Setting up News Pipeline Dependencies ==="
 
@@ -19,16 +19,26 @@ if [ ! -f "$VENV_ACTIVATE" ]; then
 fi
 source "$VENV_ACTIVATE"
 
+# Prefer pip if available in the active env; fall back to uv pip for uv-managed envs.
+if python3 -m pip --version >/dev/null 2>&1; then
+    PIP_INSTALL=(python3 -m pip install --quiet)
+elif command -v uv >/dev/null 2>&1; then
+    PIP_INSTALL=(uv pip install --quiet)
+else
+    echo "ERROR: Neither pip nor uv is available for dependency installation."
+    exit 2
+fi
+
 # 1. Ensure language/tokenizer runtime dependency used by newspaper4k exists.
 # Missing this causes noisy extraction failures for Bengali pages.
 echo "Ensuring Python dependency indic-nlp-library is installed..."
 if python3 -c "import indicnlp" >/dev/null 2>&1; then
     echo "  [SUCCESS] indic-nlp-library already available."
 else
-    if python3 -m pip install --quiet indic-nlp-library; then
+    if "${PIP_INSTALL[@]}" indic-nlp-library; then
         echo "  [SUCCESS] Installed indic-nlp-library."
     else
-        echo "ERROR: Failed to install indic-nlp-library in fsim."
+        echo "ERROR: Failed to install indic-nlp-library in project venv."
         exit 2
     fi
 fi
@@ -39,24 +49,24 @@ echo "Ensuring Tantivy FTS dependencies (tantivy + pylance) are installed..."
 if python3 -c "import tantivy, lance" >/dev/null 2>&1; then
     echo "  [SUCCESS] tantivy and pylance already available."
 else
-    if python3 -m pip install --quiet tantivy pylance; then
+    if "${PIP_INSTALL[@]}" tantivy pylance; then
         echo "  [SUCCESS] Installed tantivy and pylance."
     else
-        echo "ERROR: Failed to install tantivy/pylance in fsim."
-        echo "       Run manually: source ~/forecast-sim/fsim/bin/activate && pip install tantivy pylance"
+        echo "ERROR: Failed to install tantivy/pylance in project venv."
+        echo "       Run manually: source ${REPO_ROOT}/.venv/bin/activate && uv pip install tantivy pylance"
         exit 2
     fi
 fi
 
 # 0. Ensure NLTK data is available (avoid downloads inside HTCondor jobs)
 echo "Ensuring NLTK tokenizer data (punkt_tab/punkt) is available..."
-export NLTK_DATA="${NLTK_DATA:-$REPO_ROOT/fsim/nltk_data}"
+export NLTK_DATA="${NLTK_DATA:-$REPO_ROOT/.venv/nltk_data}"
 mkdir -p "$NLTK_DATA"
 if python3 "$REPO_ROOT/data/news/scripts/ensure_nltk_data.py"; then
     echo "  [SUCCESS] NLTK data ready."
 else
     echo "ERROR: Could not ensure NLTK data. CCNews crawl will fail with missing punkt_tab."
-    echo "       Try: source ~/forecast-sim/fsim/bin/activate && python3 $REPO_ROOT/data/news/scripts/ensure_nltk_data.py"
+    echo "       Try: source ${REPO_ROOT}/.venv/bin/activate && python3 ${REPO_ROOT}/data/news/scripts/ensure_nltk_data.py"
     exit 2
 fi
 

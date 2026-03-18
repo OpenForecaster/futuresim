@@ -10,9 +10,12 @@
 set -e
 set -u
 
-# Setup environment
-cd /home/nchandak/forecast-sim
-source .venv/bin/activate
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+export FSIM_REPO_DIR="${FSIM_REPO_DIR:-${REPO_DIR}}"
+
+cd "${REPO_DIR}"
+source "${REPO_DIR}/.venv/bin/activate"
 module load cuda/12.1
 
 export VLLM_USE_V1=1

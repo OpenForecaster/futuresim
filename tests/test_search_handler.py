@@ -56,6 +56,7 @@ def test_search_clamps_max_date_to_current_day():
     assert error is None
     assert "maximum allowed search date is 2025-04-24" in result
     assert "requested to-date 2025-05-10 was capped" in result
+    assert "simulation" not in result.lower()
     assert "Found 1 relevant article chunk(s):" in result
     assert tool.calls[0]["max_date"] == date(2025, 4, 24)
 

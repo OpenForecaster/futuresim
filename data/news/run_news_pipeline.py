@@ -48,8 +48,12 @@ sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))  # data/news
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), 'scripts')))  # data/news/scripts
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))  # forecast-sim root
 
+from pathing import REPO_ROOT, load_repo_env
+
+load_repo_env(REPO_ROOT)
+
 # Paths - configure these for your setup
-NEWS_BASE = "/is/cluster/fast/sgoel/forecasting/news"
+NEWS_BASE = os.path.expanduser(os.path.expandvars(os.getenv("FSIM_NEWS_BASE", "/is/cluster/fast/sgoel/forecasting/news")))
 
 # Input: Where news-please extracts articles
 RAW_ARTICLES_DIR = f"{NEWS_BASE}/filtered_cc_articles_2025_2026"
@@ -388,7 +392,7 @@ def run_embed_step():
     # Use subprocess to run the embed submit script
     cmd = [
         sys.executable, 
-        '/home/sgoel/forecast-sim/mpi_scripts/embed/submit_job.py',
+        str(REPO_ROOT / 'mpi_scripts' / 'embed' / 'submit_job.py'),
         '--gpus', '1',
         '--memory', '64',
         '--bid', '25',
@@ -420,7 +424,7 @@ def run_lancedb_step():
     # Use condor_submit_bid to submit the lancedb job
     cmd = [
         'condor_submit_bid', '15',
-        '/home/sgoel/forecast-sim/mpi_scripts/build_lancedb/build_lancedb.sub'
+        str(REPO_ROOT / 'mpi_scripts' / 'build_lancedb' / 'build_lancedb.sub')
     ]
     
     result = subprocess.run(cmd, capture_output=True, text=True)
@@ -448,7 +452,7 @@ def run_lancedb_index_step():
 
     cmd = [
         "condor_submit_bid", "25",
-        "/home/sgoel/forecast-sim/mpi_scripts/build_lancedb/build_index.sub",
+        str(REPO_ROOT / "mpi_scripts" / "build_lancedb" / "build_index.sub"),
     ]
 
     env = os.environ.copy()
@@ -457,8 +461,10 @@ def run_lancedb_index_step():
     env["BUILD_FTS"] = "1"
     env["FTS_WITH_POSITION"] = "1"
     env["FTS_USE_TANTIVY"] = "1"
-    env["TANTIVY_INDEX_ROOT"] = os.path.join(
-        os.path.expanduser("~"), "forecasting", "lancedb_tantivy_indices"
+    env["TANTIVY_INDEX_ROOT"] = os.path.expanduser(
+        os.path.expandvars(
+            os.getenv("FSIM_TANTIVY_INDEX_ROOT", "~/forecasting/lancedb_tantivy_indices")
+        )
     )
     env["BUILD_VECTOR_INDEX"] = "0"
     env["NUM_PARTITIONS"] = "4096"

@@ -41,8 +41,9 @@ from agents.search_tools.chunking import chunk_article
 
 
 # Default paths
-DEFAULT_ARTICLES_DIR = "/is/cluster/fast/sgoel/forecasting/news/deduped_articles/data"
-DEFAULT_OUTPUT_DIR = "/is/cluster/fast/sgoel/forecasting/news/deduped_articles/embeddings"
+DEFAULT_NEWS_BASE = os.getenv("FSIM_NEWS_BASE", "/is/cluster/fast/sgoel/forecasting/news")
+DEFAULT_ARTICLES_DIR = os.getenv("FSIM_NEWS_ARTICLES_DIR", f"{DEFAULT_NEWS_BASE}/deduped_articles/data")
+DEFAULT_OUTPUT_DIR = os.getenv("FSIM_NEWS_EMBEDDINGS_DIR", f"{DEFAULT_NEWS_BASE}/deduped_articles/embeddings")
 DEFAULT_MODEL = "sentence-transformers/all-MiniLM-L6-v2"  # Fast default, user can specify Qwen
 
 

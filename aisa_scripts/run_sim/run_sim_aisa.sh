@@ -9,7 +9,8 @@ set -euo pipefail
 
 # Use SLURM_SUBMIT_DIR if available (batch jobs), else resolve from script path
 REPO_DIR="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-SHARED_DATA_ROOT="/mnt/nfs/datasets_ac"
+export FSIM_REPO_DIR="${FSIM_REPO_DIR:-${REPO_DIR}}"
+SHARED_DATA_ROOT="${FSIM_HF_HOME:-/mnt/nfs/datasets_ac/cache/huggingface}"
 
 # Optional conda setup (if available on this node).
 if [ -f "${HOME}/miniforge3/etc/profile.d/conda.sh" ]; then
@@ -22,9 +23,9 @@ fi
 if [ -f "${REPO_DIR}/.venv/bin/activate" ]; then
   # shellcheck disable=SC1091
   source "${REPO_DIR}/.venv/bin/activate"
-elif [ -f "${REPO_DIR}/fsim/bin/activate" ]; then
-  # shellcheck disable=SC1091
-  source "${REPO_DIR}/fsim/bin/activate"
+else
+  echo "ERROR: Missing virtualenv at ${REPO_DIR}/.venv/bin/activate"
+  exit 2
 fi
 
 cd "${REPO_DIR}"
@@ -37,8 +38,8 @@ fi
 export VLLM_USE_V1="${VLLM_USE_V1:-0}"
 
 # Keep Hugging Face caches on shared storage.
-export HF_DATASETS_CACHE="${SHARED_DATA_ROOT}/cache/huggingface/datasets"
-export HF_HUB_CACHE="${SHARED_DATA_ROOT}/cache/huggingface/hub"
+export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-${FSIM_DATASET_CACHE:-${SHARED_DATA_ROOT}/datasets}}"
+export HF_HUB_CACHE="${HF_HUB_CACHE:-${SHARED_DATA_ROOT}/hub}"
 mkdir -p "${HF_DATASETS_CACHE}" "${HF_HUB_CACHE}"
 
 # Load API keys from repo .env if present.

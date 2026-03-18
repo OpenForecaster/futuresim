@@ -31,7 +31,10 @@ import htcondor2 as htcondor
 DEFAULT_JOB_BID = 50
 DEFAULT_MEMORY_PER_GPU = 64  # GB
 DEFAULT_CPUS_PER_GPU = 8
-DEFAULT_LOG_PATH = "/fast/nchandak/logs/forecasting-sim/syntheticqa"
+DEFAULT_LOG_PATH = os.getenv(
+    "FSIM_SYNTHETICQA_LOG_DIR",
+    str(Path(__file__).resolve().parents[1] / "logs" / "syntheticqa"),
+)
 
 # GPU type configurations
 GPU_CONFIGS = {

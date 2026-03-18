@@ -11,6 +11,7 @@ Usage:
 """
 
 import argparse
+import os
 from pathlib import Path
 
 import htcondor2 as htcondor
@@ -88,7 +89,10 @@ def main():
     
     script_dir = Path(__file__).parent
     executable = str(script_dir / "run_embed.sh")
-    log_dir = "/is/cluster/fast/sgoel/logs/forecasting-sim/embed"
+    log_dir = os.getenv(
+        "FSIM_EMBED_LOG_DIR",
+        str(Path(__file__).resolve().parents[2] / "logs" / "embed"),
+    )
     
     cluster_id = submit_gpu_job(
         executable=executable,

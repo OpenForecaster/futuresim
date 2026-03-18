@@ -6,7 +6,7 @@ set -euo pipefail
 export PATH="/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 source ~/.bashrc 2>/dev/null || true
 
-VENV_ACTIVATE="${HF_UPLOAD_VENV_ACTIVATE:-$HOME/forecast-sim/fsim/bin/activate}"
+VENV_ACTIVATE="${HF_UPLOAD_VENV_ACTIVATE:-$HOME/forecast-sim/.venv/bin/activate}"
 if [[ -f "$VENV_ACTIVATE" ]]; then
   # shellcheck disable=SC1090
   source "$VENV_ACTIVATE"

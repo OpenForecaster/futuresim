@@ -22,7 +22,8 @@ def main():
                        help="Question type to fetch")
     parser.add_argument("--start_date", required=True, help="YYYY-MM-DD")
     parser.add_argument("--end_date", required=True, help="YYYY-MM-DD")
-    parser.add_argument("--cache_dir", default="/is/cluster/fast/sgoel/forecasting/qs/cache",
+    parser.add_argument("--cache_dir",
+                       default=os.getenv("FSIM_DATASET_CACHE", "/is/cluster/fast/sgoel/forecasting/qs/cache"),
                        help="Directory to save parquet cache")
     parser.add_argument("--min_forecasters", type=int, default=10,
                        help="Minimum number of forecasters required (default: 10)")

@@ -13,8 +13,19 @@ def build_action_tools(
     enable_query: bool,
     enable_search: bool,
     max_outcomes_per_question: int,
+    max_search_results: int = 5,
+    search_chunk_tokens: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     tools: List[Dict[str, Any]] = []
+    if search_chunk_tokens is None:
+        search_results_description = (
+            f"Search returns up to {max_search_results} retrieved article chunks."
+        )
+    else:
+        search_results_description = (
+            f"Search returns up to {max_search_results} retrieved article chunks, "
+            f"each roughly {search_chunk_tokens} tokens long."
+        )
 
     if enable_query:
         tools.append(
@@ -22,8 +33,11 @@ def build_action_tools(
                 "type": "function",
                 "name": "query_df",
                 "description": (
-                    "Run Python code to inspect the questions DataFrame. Use print(...) to show results. "
-                    "Example: print(df[df['is_resolved'] == False][['qid','title']].head(10))"
+                    "Run Python code to inspect the questions DataFrame before forecasting. "
+                    "Use print(...) to show results because plain .head() previews can be unreliable "
+                    "outside notebooks. The sandbox predefines df, pd, today, date, datetime, "
+                    "timedelta, and standard builtins; import statements are unavailable. "
+                    "Example: print(df[df['is_resolved'] == False][['qid','title','answer_type']].head())"
                 ),
                 "strict": True,
                 "parameters": {
@@ -32,7 +46,11 @@ def build_action_tools(
                     "properties": {
                         "code": {
                             "type": "string",
-                            "description": "Python code to execute in the provided sandbox. Must use print(...) for outputs.",
+                            "description": (
+                                "Python code to execute in the provided sandbox. "
+                                "You may write multi-step code, but you must use print(...) "
+                                "for outputs."
+                            ),
                         }
                     },
                     "required": ["code"],
@@ -46,7 +64,11 @@ def build_action_tools(
                 "type": "function",
                 "name": "search_news",
                 "description": (
-                    "Search the news article database for evidence. "
+                    "Search the news article database for evidence before submitting forecasts. "
+                    "Use at most one search per turn. "
+                    f"{search_results_description} "
+                    "You may optionally pass YYYY-MM-DD date filters; to_date cannot be after "
+                    "today's date. "
                     "Example: search for 'Fed rate cut 2026 inflation'."
                 ),
                 "strict": True,
@@ -56,15 +78,23 @@ def build_action_tools(
                     "properties": {
                         "query": {
                             "type": "string",
-                            "description": "Search query string.",
+                            "description": (
+                                "News search query string. Focus on concrete entities, events, "
+                                "and evidence relevant to the target forecast."
+                            ),
                         },
                         "from_date": {
                             "type": ["string", "null"],
-                            "description": "Optional minimum date (YYYY-MM-DD).",
+                            "description": (
+                                "Optional minimum date filter (YYYY-MM-DD)."
+                            ),
                         },
                         "to_date": {
                             "type": ["string", "null"],
-                            "description": "Optional maximum date (YYYY-MM-DD).",
+                            "description": (
+                                "Optional maximum date filter (YYYY-MM-DD). If provided, it "
+                                "cannot be after today's date."
+                            ),
                         },
                     },
                     "required": ["query"],
@@ -77,7 +107,12 @@ def build_action_tools(
             "type": "function",
             "name": "submit_forecasts",
             "description": (
-                "Submit exactly one forecast for exactly one question id. "
+                "Submit exactly one forecast for exactly one active question id. "
+                "Each call must contain a single-item forecasts list for one qid only, and you "
+                "may submit again later in the same session to update that qid. Use real predicted "
+                "answers only; never placeholders like Unknown, TBD, Other, or N/A. Probabilities "
+                "must sum to <= 1.0. If the prompt specifies a target question ID, you may submit "
+                "only for that question. "
                 "Example payload: "
                 '{"forecasts":[{"qid":"Q123","outcomes":{"Candidate A":0.55,"Candidate B":0.35}}]}'
             ),
@@ -88,17 +123,30 @@ def build_action_tools(
                 "properties": {
                     "forecasts": {
                         "type": "array",
-                        "description": "Single-item list containing exactly one forecast.",
+                        "description": (
+                            "Single-item list containing exactly one forecast for one qid."
+                        ),
                         "minItems": 1,
                         "maxItems": 1,
                         "items": {
                             "type": "object",
                             "additionalProperties": False,
                             "properties": {
-                                "qid": {"type": "string"},
+                                "qid": {
+                                    "type": "string",
+                                    "description": (
+                                        "Question id for an active question. When the prompt "
+                                        "specifies a target question ID, this must match it exactly."
+                                    ),
+                                },
                                 "outcomes": {
                                     "type": "object",
-                                    "description": f"Map outcome_name -> probability. Max {max_outcomes_per_question} outcomes per question.",
+                                    "description": (
+                                        "Map outcome_name -> probability. Use concrete predicted "
+                                        "answers only, not placeholders. "
+                                        f"Max {max_outcomes_per_question} outcomes per question, "
+                                        "with probabilities summing to <= 1.0."
+                                    ),
                                     "additionalProperties": {"type": "number"},
                                 },
                             },
@@ -115,7 +163,10 @@ def build_action_tools(
         {
             "type": "function",
             "name": "next_day",
-            "description": "End the day (no more actions). Example payload: {}",
+            "description": (
+                "End this session with no more actions. Call this only when you are done "
+                "querying, searching, and submitting forecasts. Example payload: {}"
+            ),
             "strict": True,
             "parameters": {
                 "type": "object",
@@ -135,8 +186,8 @@ def build_memory_tools() -> List[Dict[str, Any]]:
             "type": "function",
             "name": "update_memory",
             "description": (
-                "Replaces the agent memory with the provided text. This is the ONLY context you retain between days. "
-                "Tomorrow you have search and the DataFrame, including your final predictions for resolved questions. "
+                "Replaces the agent memory with the provided text. This is the ONLY context you retain between sessions. "
+                "In your next session you have search and the DataFrame, including your final predictions for resolved questions. "
                 "Store: (1) reasoning behind predictions and how you did on resolved questions, "
                 "(2) performance/calibration patterns across resolutions, "
                 "(3) non-obvious insights that search alone would not surface, "

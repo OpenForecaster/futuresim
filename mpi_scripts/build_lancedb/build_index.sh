@@ -24,16 +24,28 @@ set -euo pipefail
 export PATH="/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 source ~/.bashrc 2>/dev/null || true
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
+export FSIM_REPO_DIR="${FSIM_REPO_DIR:-${REPO_DIR}}"
+
+if [ -f "${REPO_DIR}/.env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "${REPO_DIR}/.env"
+  set +a
+fi
+
 if [[ "${LOAD_CUDA_MODULE:-0}" == "1" ]]; then
   module load cuda/12.1
 fi
 
 export SOFT_FILELOCK=1
 export PYTHONUNBUFFERED=1
+NEWS_BASE="${FSIM_NEWS_BASE:-/is/cluster/fast/sgoel/forecasting/news}"
 
 # Activate environment
-source ~/forecast-sim/fsim/bin/activate
-cd /home/sgoel/forecast-sim
+source "${REPO_DIR}/.venv/bin/activate"
+cd "${REPO_DIR}"
 
 BUILD_FTS="${BUILD_FTS:-1}"
 FTS_WITH_POSITION="${FTS_WITH_POSITION:-1}"
@@ -43,7 +55,7 @@ BUILD_VECTOR_INDEX="${BUILD_VECTOR_INDEX:-1}"
 NUM_PARTITIONS="${NUM_PARTITIONS:-4096}"
 NUM_SUB_VECTORS="${NUM_SUB_VECTORS:-64}"
 VECTOR_METRIC="${VECTOR_METRIC:-cosine}"
-DB_PATH="${DB_PATH:-/is/cluster/fast/sgoel/forecasting/news/deduped_articles/lance/Qwen3-Embedding-8B}"
+DB_PATH="${DB_PATH:-${FSIM_SEARCH_DB:-${NEWS_BASE}/deduped_articles/lance/Qwen3-Embedding-8B}}"
 TABLE_NAME="${TABLE_NAME:-articles}"
 
 echo "Building LanceDB indices (stage 2/2)..."

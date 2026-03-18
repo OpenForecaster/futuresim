@@ -1,14 +1,14 @@
-# Warmup-only run using local Qwen3.5-27B via vLLM.
+# Warmup-only run using local Qwen3.5-27B via vLLM with the Qwen-native AllQ scaffold.
 # Runs Day 0 warmup + 2 loop days, then stops.
 # Use the output directory as restart_from for the mem/nomem restart configs.
 #
 # Usage: python mpi_scripts/run_sim/submit_sim.py --config configs/allq_warmup_only_qwen3.5_27b.yaml --runs 1
 
 # --- Run Script (CUDA 12.9 needed for Qwen3.5 FlashInfer GDN kernels) ---
-run_script: "run_sim2.sh"
+run_script: "run_sim.sh"
 
 # --- Simulation Meta ---
-sim_name: "allq_warmup_only_qwen3.5-27b"
+sim_name: "qwenallq_warmup_only_qwen3.5-27b"
 start_date: "2025-05-01"
 end_date: "2025-04-25"       # Minimal loop: warmup day (04-24) + 1 day (04-25)
 lookback_days: 7
@@ -22,22 +22,22 @@ resolution_end: "2025-08-23"
 resources:
   gpus: 3
   cpus: 24
-  memory_gb: 128
+  memory_gb: 256
   disk_gb: 50
-  bid: 100
+  bid: 55
   requirements: "TARGET.CUDACapability >= 9.0 && TARGET.CUDAGlobalMemoryMb > 70000 && TARGET.Machine =!= \"i103.internal.cluster.is.localnet\""
 
 # --- Data Paths ---
 dataset: "openforesight"
-dataset_path: "/fast/nchandak/datasets/OpenForesight"
+dataset_path: "${FSIM_DATASET_PATH}"
 min_forecasters: 10
 resolved_only: true
-output_base: "/is/cluster/fast/sgoel/forecasting/current_sim"
+output_base: "${FSIM_OUTPUT_BASE}"
 warmup_parallelism: 64
 
 # --- Search Settings ---
-search_db: "/is/cluster/fast/sgoel/forecasting/news/deduped_articles/lance/Qwen3-Embedding-8B"
-embedding_model: "/is/cluster/fast/sgoel/models/Qwen3-Embedding-8B"
+search_db: "${FSIM_SEARCH_DB}"
+embedding_model: "${FSIM_EMBEDDING_MODEL}"
 embedding_gpu_mem: 0.7
 
 # --- Answer Matching ---
@@ -51,7 +51,11 @@ embedding_max_model_len: 32768
 # --- vLLM Agent Runtime ---
 vllm_gpu_mem: 0.85
 vllm_tensor_parallel_size: 2
-vllm_enable_tools: false
+vllm_max_num_seqs: 64
+vllm_startup_timeout: 900
+vllm_request_timeout: 300
+vllm_enable_tools: true
+vllm_tool_call_parser: "qwen3_coder"
 language_model_only: true
 
 # --- Local 3-GPU Pinning ---
@@ -66,7 +70,7 @@ parallel: true
 # --- Agents Configuration ---
 defaults:
   provider: "vllm"
-  scaffold: "allQ"
+  scaffold: "qwenallq"
   max_actions: 50
   warmup_max_actions: 20
   temperature: 0.7
@@ -74,5 +78,5 @@ defaults:
   max_retries: 3
 
 agents:
-  - model: "/fast/nchandak/models/Qwen3.5-27B-text"
+  - model: "/fast/sgoel/models/Qwen3.5-27B-text"
     provider: "vllm"

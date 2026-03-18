@@ -16,19 +16,19 @@ split: "test"
 
 # Load questions across the full window, even though we only run Day 0.
 resolution_start: "2025-05-01"
-resolution_end: "2025-08-23"
+resolution_end: "2025-05-01"
 
 dataset: "openforesight"
-dataset_path: "/is/cluster/fast/sgoel/forecasting/qs/OpenForesight/data/"
-dataset_cache: "/is/cluster/fast/sgoel/forecasting/qs/cache"
+dataset_path: "${FSIM_DATASET_PATH}"
+dataset_cache: "${FSIM_DATASET_CACHE}"
 min_forecasters: 10
 resolved_only: true
-output_base: "/is/cluster/fast/sgoel/forecasting/current_sim"
+output_base: "${FSIM_OUTPUT_BASE}"
 warmup_parallelism: 64
 
 # Search Settings (kept for parity with other runs; OgAgent prompt does not expose search actions)
-search_db: "/is/cluster/fast/sgoel/forecasting/news/deduped_articles/lance/Qwen3-Embedding-8B"
-embedding_model: "/is/cluster/fast/sgoel/models/Qwen3-Embedding-8B"
+search_db: "${FSIM_SEARCH_DB}"
+embedding_model: "${FSIM_EMBEDDING_MODEL}"
 embedding_gpu_mem: 0.7
 
 # Answer Matching
@@ -54,4 +54,3 @@ defaults:
 agents:
   - model: "deepseek/deepseek-v3.2"
     provider: "openrouter"
-

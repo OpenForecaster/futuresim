@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from agents.basicAgent.agent import BasicAgent
 from agents.allQAgent.agent import AllQAgent
+from agents.utils.budget import BudgetTracker
 from agents.utils.forecast_parser import ParsedAction
 from environment.interfaces import PredictionSubmission
 
@@ -98,14 +99,16 @@ class GPTOSSBasicAgent(BasicAgent):
         instructions: str,
         current_date: date,
         *,
-        actions_remaining: int,
+        budget_status_text: str,
     ) -> Tuple[str, List[Dict[str, Any]]]:
         """
         Build initial Responses payload in either baseline mode (`instructions`) or
         A/B mode (`first_user`).
         """
         del current_date  # current date is already included in developer instructions
-        begin = f"Begin. Actions remaining {int(actions_remaining)}"
+        begin = "Begin."
+        if budget_status_text:
+            begin = f"{begin}\n{budget_status_text}"
         mode = self._get_gptoss_prompt_mode()
         if mode == "first_user":
             first_user = (instructions or "").strip()
@@ -129,7 +132,7 @@ class GPTOSSBasicAgent(BasicAgent):
         instructions_for_api, conversation = self._seed_harmony_conversation(
             instructions,
             current_date,
-            actions_remaining=int(self.config.max_actions),
+            budget_status_text=self._build_start_budget_status(),
         )
 
         all_forecasts = self._run_harmony_action_loop(
@@ -177,21 +180,20 @@ class GPTOSSBasicAgent(BasicAgent):
             "## RESPONSE FORMAT\n"
             "Use function tools as defined in the tool schema, following the signatures, constraints and following the format in examples. You can call one tool per turn.\n\n"
             "## INTERACTION FLOW\n"
-            f"You have {self.config.max_actions} actions per day. Each query/search/submit consumes 1 action.\n"
-            "When ready to move on, call `next_day()`.\n\n"
+            f"{self._build_budget_overview()}\n"
+            "When ready to move on, call `next_day()` to end this session.\n\n"
             "## SUBMISSION RULES\n"
-            "- You may call `submit_forecasts` multiple times in a single day until actions run out.\n"
+            "- You may call `submit_forecasts` multiple times in a single session until the active loop budget runs out.\n"
             "- Each `submit_forecasts` call must include exactly one forecast for exactly one qid.\n"
-            "- You may update earlier same-day forecasts by submitting again for the same qid.\n"
+            "- You may update earlier same-session forecasts by submitting again for the same qid.\n"
         )
 
-    @staticmethod
-    def _build_final_submit_tool_instruction(target_qid: str) -> str:
+    def _build_final_submit_tool_instruction(self, target_qid: str, budget: BudgetTracker) -> str:
         """
         Strict final-turn instruction for per-question loops.
         """
         return (
-            "FINAL ACTION (last chance): You have exactly 1 action remaining and MUST submit your best guess forecast now.\n"
+            f"{self._build_force_submit_preamble(budget)}\n"
             f"Target question ID: {target_qid}\n"
             "Call exactly one tool: submit_forecasts.\n"
             "Do NOT call query_df, search_news, or next_day.\n"
@@ -211,9 +213,13 @@ class GPTOSSBasicAgent(BasicAgent):
         target_qid: Optional[str] = None,
         enable_query: bool = True,
         enable_search: Optional[bool] = None,
+        warmup_budget: bool = False,
         max_actions: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
-        actions_remaining = int(max_actions if max_actions is not None else self.config.max_actions)
+        budget = self._create_budget_tracker(
+            warmup=warmup_budget,
+            max_actions_override=max_actions,
+        )
         all_forecasts: List[Dict[str, Any]] = []
 
         if enable_search is None:
@@ -222,6 +228,15 @@ class GPTOSSBasicAgent(BasicAgent):
             enable_query=enable_query,
             enable_search=enable_search,
             max_outcomes_per_question=self.config.max_outcomes_per_question,
+            max_search_results=self.config.max_search_results,
+            search_chunk_tokens=self._search_handler.chunk_tokens,
+        )
+        budget.bootstrap_context(
+            {
+                "instructions": instructions,
+                "conversation": conversation,
+                "tools": tools,
+            }
         )
         prompt_mode = self._get_gptoss_prompt_mode()
         reasoning_effort = str(getattr(self.config, "gptoss_reasoning_effort", "medium") or "medium").strip().lower()
@@ -229,18 +244,20 @@ class GPTOSSBasicAgent(BasicAgent):
         final_submit_prompt_injected = False
         final_submit_retry_used = False
 
-        while actions_remaining > 0:
+        while not budget.is_exhausted():
             # Last-action guardrail for per-question runs: force a submit attempt.
-            if target_qid is not None and actions_remaining == 1 and not final_submit_prompt_injected:
-                conversation.append(
-                    {"role": "user", "content": self._build_final_submit_tool_instruction(target_qid)}
+            force_final_submit_turn = target_qid is not None and budget.should_force_submit()
+            if force_final_submit_turn and not final_submit_prompt_injected:
+                self._append_with_budget(
+                    conversation,
+                    budget,
+                    {"role": "user", "content": self._build_final_submit_tool_instruction(target_qid, budget)},
                 )
                 final_submit_prompt_injected = True
 
             # Hard-enforce final submit in per-question loops by exposing only the
             # submit tool. Keep tool_choice="auto" because vLLM Harmony rejects
             # non-auto tool_choice values.
-            force_final_submit_turn = target_qid is not None and actions_remaining == 1
             effective_tools = tools
             if force_final_submit_turn:
                 submit_only = [t for t in tools if t.get("name") == "submit_forecasts"]
@@ -266,7 +283,7 @@ class GPTOSSBasicAgent(BasicAgent):
                         conversation=conversation,
                         rendered_response=f"LLM ERROR on forced final submit turn: {e}",
                         phase="llm_error_final_submit",
-                        actions_remaining=actions_remaining,
+                        budget=budget,
                         qid=target_qid,
                         prompt_mode=prompt_mode,
                         reasoning_effort=reasoning_effort,
@@ -281,14 +298,14 @@ class GPTOSSBasicAgent(BasicAgent):
                         continue
                     # Final turn retry already used: end this question attempt without submission.
                     break
-                actions_remaining -= 1
+                budget.consume_action()
                 err_msg = f"LLM ERROR after retries: {e}"
                 self._log_harmony_action(
                     forecast_interface=forecast_interface,
                     conversation=conversation,
                     rendered_response=err_msg,
                     phase="llm_error",
-                    actions_remaining=actions_remaining,
+                    budget=budget,
                     qid=target_qid,
                     prompt_mode=prompt_mode,
                     reasoning_effort=reasoning_effort,
@@ -296,11 +313,13 @@ class GPTOSSBasicAgent(BasicAgent):
                     error=str(e),
                     prompt_override=model_input_payload,
                 )
-                conversation.append(
+                self._append_with_budget(
+                    conversation,
+                    budget,
                     {
                         "role": "user",
-                        "content": f"{err_msg}\n\nActions remaining: {actions_remaining}",
-                    }
+                        "content": budget.format_feedback(err_msg),
+                    },
                 )
                 continue
 
@@ -344,6 +363,7 @@ class GPTOSSBasicAgent(BasicAgent):
             if "reasoning_tokens" not in usage and reasoning_tokens_turn > 0:
                 usage["reasoning_tokens"] = reasoning_tokens_turn
             self._timer.record_tokens(usage)
+            budget.record_usage(usage)
 
             valid_final_forecasts: List[Dict[str, Any]] = []
             has_valid_final_submit = False
@@ -362,7 +382,7 @@ class GPTOSSBasicAgent(BasicAgent):
                     conversation=conversation,
                     rendered_response=rendered,
                     phase="llm_final_submit_invalid",
-                    actions_remaining=actions_remaining,
+                    budget=budget,
                     qid=target_qid,
                     prompt_mode=prompt_mode,
                     reasoning_effort=reasoning_effort,
@@ -383,7 +403,7 @@ class GPTOSSBasicAgent(BasicAgent):
                 break
 
             # Persist assistant side of the turn in Harmony-like structure.
-            self._append_assistant_turns(
+            appended_items = self._append_assistant_turns(
                 conversation=conversation,
                 assistant_messages=assistant_messages,
                 assistant_text=assistant_text,
@@ -392,6 +412,8 @@ class GPTOSSBasicAgent(BasicAgent):
                 reasoning_text=reasoning_text,
                 replay_mode=str(getattr(self.config, "gptoss_replay_mode", "raw_recommended") or "raw_recommended"),
             )
+            for item in appended_items:
+                budget.record_appended_item(item)
 
             # Log a compact representation (don’t shove huge JSON into logs).
             rendered = self._render_turn_for_logging(assistant_text, tool_calls)
@@ -400,7 +422,7 @@ class GPTOSSBasicAgent(BasicAgent):
                 conversation=conversation,
                 rendered_response=rendered,
                 phase="llm",
-                actions_remaining=actions_remaining,
+                budget=budget,
                 qid=target_qid,
                 prompt_mode=prompt_mode,
                 reasoning_effort=reasoning_effort,
@@ -415,53 +437,55 @@ class GPTOSSBasicAgent(BasicAgent):
 
             if parsed is None:
                 # Model didn't call a tool. Consume an action and push back a firm reminder.
-                actions_remaining -= 1
+                budget.consume_action()
                 if status == "incomplete" and incomplete_reason == "max_output_tokens":
                     feedback = (
                         "Response was incomplete because max_output_tokens was reached before a tool call. "
-                        "Call exactly one tool with concise arguments.\n\n"
-                        f"Actions remaining: {actions_remaining}"
+                        "Call exactly one tool with concise arguments."
                     )
                 else:
                     feedback = (
-                        "No tool call detected. You MUST call exactly one tool each turn.\n\n"
-                        f"Actions remaining: {actions_remaining}"
+                        "No tool call detected. You MUST call exactly one tool each turn."
                     )
-                conversation.append({"role": "user", "content": feedback})
+                self._append_with_budget(
+                    conversation,
+                    budget,
+                    {"role": "user", "content": budget.format_feedback(feedback)},
+                )
                 continue
 
             if parsed.action_type == "next":
                 break
 
             if parsed.action_type == "query":
-                actions_remaining = self._harmony_handle_query(
+                self._harmony_handle_query(
                     conversation=conversation,
                     forecast_interface=forecast_interface,
                     parsed=parsed,
                     tool_call=tool_calls[0] if tool_calls else None,
-                    actions_remaining=actions_remaining,
+                    budget=budget,
                     qid=target_qid,
                 )
                 continue
 
             if parsed.action_type == "search":
-                actions_remaining = self._harmony_handle_search(
+                self._harmony_handle_search(
                     conversation=conversation,
                     forecast_interface=forecast_interface,
                     parsed=parsed,
                     tool_call=tool_calls[0] if tool_calls else None,
-                    actions_remaining=actions_remaining,
+                    budget=budget,
                     qid=target_qid,
                 )
                 continue
 
             if parsed.action_type == "submit":
-                actions_remaining, submitted = self._harmony_handle_submit(
+                submitted = self._harmony_handle_submit(
                     conversation=conversation,
                     forecast_interface=forecast_interface,
                     parsed=parsed,
                     tool_call=tool_calls[0] if tool_calls else None,
-                    actions_remaining=actions_remaining,
+                    budget=budget,
                     qid=target_qid,
                     target_qid=target_qid,
                 )
@@ -472,13 +496,15 @@ class GPTOSSBasicAgent(BasicAgent):
                 continue
 
             # Invalid / unknown
-            actions_remaining -= 1
+            budget.consume_action()
             err = parsed.error or "Unknown action/tool."
-            conversation.append(
+            self._append_with_budget(
+                conversation,
+                budget,
                 {
                     "role": "user",
-                    "content": f"Invalid action: {err}\n\nActions remaining: {actions_remaining}",
-                }
+                    "content": budget.format_feedback(f"Invalid action: {err}"),
+                },
             )
 
         return all_forecasts
@@ -613,7 +639,7 @@ class GPTOSSBasicAgent(BasicAgent):
         conversation: List[Dict[str, Any]],
         rendered_response: str,
         phase: str,
-        actions_remaining: int,
+        budget: Optional[BudgetTracker] = None,
         qid: Optional[str] = None,
         prompt_override: Optional[str] = None,
         **extra,
@@ -624,7 +650,9 @@ class GPTOSSBasicAgent(BasicAgent):
                 if m.get("role") == "user":
                     last_user = m.get("content") or ""
                     break
-        metadata = {"phase": phase, "actions_remaining": actions_remaining, "qid": qid, **extra}
+        metadata = {"phase": phase, "qid": qid, **extra}
+        if budget is not None:
+            metadata.update(budget.metadata())
         forecast_interface.log_model_output(last_user, rendered_response, metadata)
 
     @staticmethod
@@ -743,27 +771,26 @@ class GPTOSSBasicAgent(BasicAgent):
         tool_call: Optional[Dict[str, Any]],
         tool_name: str,
         output: str,
-    ) -> None:
+    ) -> Dict[str, Any]:
         if isinstance(tool_call, dict) and isinstance(tool_call.get("call_id"), str):
-            conversation.append(
-                {
-                    "type": "function_call_output",
-                    "call_id": tool_call["call_id"],
-                    "output": output,
-                }
-            )
-            return
+            message = {
+                "type": "function_call_output",
+                "call_id": tool_call["call_id"],
+                "output": output,
+            }
+            conversation.append(message)
+            return message
 
         # Fallback for providers that do not expose call_id.
-        conversation.append(
-            {
-                "role": "tool",
-                "name": f"functions.{tool_name}",
-                "channel": "commentary",
-                "recipient": "assistant",
-                "content": output,
-            }
-        )
+        message = {
+            "role": "tool",
+            "name": f"functions.{tool_name}",
+            "channel": "commentary",
+            "recipient": "assistant",
+            "content": output,
+        }
+        conversation.append(message)
+        return message
 
     @staticmethod
     def _append_assistant_turns(
@@ -775,10 +802,11 @@ class GPTOSSBasicAgent(BasicAgent):
         tool_calls: List[Dict[str, Any]],
         reasoning_text: str,
         replay_mode: str,
-    ) -> None:
+    ) -> List[Dict[str, Any]]:
+        appended: List[Dict[str, Any]] = []
         if tool_calls and replay_mode == "raw_recommended" and replay_items:
             conversation.extend(replay_items)
-            return
+            return list(replay_items)
 
         # If a final channel message exists, drop earlier analysis messages to
         # avoid replaying stale chain-of-thought into later turns.
@@ -799,13 +827,13 @@ class GPTOSSBasicAgent(BasicAgent):
         has_analysis_message = any((m.get("channel") == "analysis") for m in assistant_messages)
         # Keep CoT for subsequent sampling when tools are being called.
         if tool_calls and reasoning_text and not has_analysis_message:
-            conversation.append(
-                {
-                    "role": "assistant",
-                    "channel": "analysis",
-                    "content": reasoning_text,
-                }
-            )
+            message = {
+                "role": "assistant",
+                "channel": "analysis",
+                "content": reasoning_text,
+            }
+            conversation.append(message)
+            appended.append(message)
 
         # Preserve explicit assistant messages from model output when available.
         if assistant_messages:
@@ -813,24 +841,26 @@ class GPTOSSBasicAgent(BasicAgent):
                 content = m.get("content")
                 if not isinstance(content, str) or not content.strip():
                     continue
-                conversation.append(
-                    {
-                        "role": "assistant",
-                        "channel": m.get("channel"),
-                        "recipient": m.get("recipient"),
-                        "content_type": m.get("content_type"),
-                        "content": content,
-                    }
-                )
+                message = {
+                    "role": "assistant",
+                    "channel": m.get("channel"),
+                    "recipient": m.get("recipient"),
+                    "content_type": m.get("content_type"),
+                    "content": content,
+                }
+                conversation.append(message)
+                appended.append(message)
         elif assistant_text and assistant_text.strip():
             # Fallback: if we only got flattened output text, preserve it with a sensible channel.
-            conversation.append(
-                {
-                    "role": "assistant",
-                    "channel": "commentary" if tool_calls else "final",
-                    "content": assistant_text.strip(),
-                }
-            )
+            message = {
+                "role": "assistant",
+                "channel": "commentary" if tool_calls else "final",
+                "content": assistant_text.strip(),
+            }
+            conversation.append(message)
+            appended.append(message)
+
+        return appended
 
     # =========================================================================
     # Tool handlers
@@ -843,27 +873,27 @@ class GPTOSSBasicAgent(BasicAgent):
         forecast_interface,
         parsed: ParsedAction,
         tool_call: Optional[Dict[str, Any]],
-        actions_remaining: int,
+        budget: BudgetTracker,
         qid: Optional[str],
-    ) -> int:
-        actions_remaining -= 1
+    ) -> None:
+        budget.consume_action()
         if parsed.code:
             with self._timer.track("df_query"):
                 result, error = self._query_handler.execute(parsed.code)
             if error:
-                feedback = f"QUERY ERROR: {error}\n\nActions remaining: {actions_remaining}"
+                feedback = f"QUERY ERROR: {error}"
             else:
-                feedback = f"QUERY RESULT:\n{result}\n\nActions remaining: {actions_remaining}"
+                feedback = f"QUERY RESULT:\n{result}"
         else:
-            feedback = f"QUERY ERROR: {parsed.error or 'Missing code'}\n\nActions remaining: {actions_remaining}"
+            feedback = f"QUERY ERROR: {parsed.error or 'Missing code'}"
 
-        self._append_tool_output_message(
+        appended = self._append_tool_output_message(
             conversation,
             tool_call=tool_call,
             tool_name="query_df",
-            output=feedback,
+            output=budget.format_feedback(feedback),
         )
-        return actions_remaining
+        budget.record_appended_item(appended)
 
     def _harmony_handle_search(
         self,
@@ -872,29 +902,31 @@ class GPTOSSBasicAgent(BasicAgent):
         forecast_interface,
         parsed: ParsedAction,
         tool_call: Optional[Dict[str, Any]],
-        actions_remaining: int,
+        budget: BudgetTracker,
         qid: Optional[str],
-    ) -> int:
-        actions_remaining -= 1
+    ) -> None:
+        budget.consume_action()
         if not self._search_handler.is_available:
-            feedback = f"SEARCH ERROR: Search is not available.\n\nActions remaining: {actions_remaining}"
-            self._append_tool_output_message(
+            feedback = "SEARCH ERROR: Search is not available."
+            appended = self._append_tool_output_message(
                 conversation,
                 tool_call=tool_call,
                 tool_name="search_news",
-                output=feedback,
+                output=budget.format_feedback(feedback),
             )
-            return actions_remaining
+            budget.record_appended_item(appended)
+            return
 
         if not parsed.query:
-            feedback = f"SEARCH ERROR: Missing query.\n\nActions remaining: {actions_remaining}"
-            self._append_tool_output_message(
+            feedback = "SEARCH ERROR: Missing query."
+            appended = self._append_tool_output_message(
                 conversation,
                 tool_call=tool_call,
                 tool_name="search_news",
-                output=feedback,
+                output=budget.format_feedback(feedback),
             )
-            return actions_remaining
+            budget.record_appended_item(appended)
+            return
 
         min_date = None
         max_date = None
@@ -919,16 +951,16 @@ class GPTOSSBasicAgent(BasicAgent):
                 max_date=max_date,
             )
         if error:
-            feedback = f"SEARCH ERROR: {error}\n\nActions remaining: {actions_remaining}"
+            feedback = f"SEARCH ERROR: {error}"
         else:
-            feedback = f"SEARCH RESULTS:\n{result}\n\nActions remaining: {actions_remaining}"
-        self._append_tool_output_message(
+            feedback = f"SEARCH RESULTS:\n{result}"
+        appended = self._append_tool_output_message(
             conversation,
             tool_call=tool_call,
             tool_name="search_news",
-            output=feedback,
+            output=budget.format_feedback(feedback),
         )
-        return actions_remaining
+        budget.record_appended_item(appended)
 
     def _harmony_handle_submit(
         self,
@@ -937,11 +969,11 @@ class GPTOSSBasicAgent(BasicAgent):
         forecast_interface,
         parsed: ParsedAction,
         tool_call: Optional[Dict[str, Any]],
-        actions_remaining: int,
+        budget: BudgetTracker,
         qid: Optional[str],
         target_qid: Optional[str],
-    ) -> Tuple[int, List[Dict[str, Any]]]:
-        actions_remaining -= 1
+    ) -> List[Dict[str, Any]]:
+        budget.consume_action()
         submitted: List[Dict[str, Any]] = []
         submit_errors: List[str] = []
         dropped_forecasts = 0
@@ -971,8 +1003,7 @@ class GPTOSSBasicAgent(BasicAgent):
                 title = self._query_handler.get_question_title(sub['qid'])
                 title_str = f" ({title})" if title else ""
                 feedback = (
-                    f"Submitted forecast for qid={sub['qid']}{title_str}: {outcomes_str}. "
-                    f"Actions remaining: {actions_remaining}"
+                    f"Submitted forecast for qid={sub['qid']}{title_str}: {outcomes_str}."
                 )
                 if dropped_forecasts > 0:
                     feedback += (
@@ -981,17 +1012,18 @@ class GPTOSSBasicAgent(BasicAgent):
                     )
             else:
                 detail = "; ".join(submit_errors) if submit_errors else "Forecast submission failed."
-                feedback = f"SUBMIT ERROR: {detail}\n\nActions remaining: {actions_remaining}"
+                feedback = f"SUBMIT ERROR: {detail}"
         else:
-            feedback = f"SUBMIT ERROR: {parsed.error or 'No valid forecasts'}\n\nActions remaining: {actions_remaining}"
+            feedback = f"SUBMIT ERROR: {parsed.error or 'No valid forecasts'}"
 
-        self._append_tool_output_message(
+        appended = self._append_tool_output_message(
             conversation,
             tool_call=tool_call,
             tool_name="submit_forecasts",
-            output=feedback,
+            output=budget.format_feedback(feedback),
         )
-        return actions_remaining, submitted
+        budget.record_appended_item(appended)
+        return submitted
 
     # =========================================================================
     # Memory update
@@ -1008,10 +1040,10 @@ class GPTOSSBasicAgent(BasicAgent):
         if self._memory is None:
             return
 
-        memory_prompt = f"""End of day {current_date}. You can now update your memory.
+        memory_prompt = f"""End of session {current_date}. You can now update your memory.
 
 ## MEMORY UPDATE
-Your memory is the ONLY thing that carries over to tomorrow. Everything else resets. Tomorrow you get: search over news articles and access to the DataFrame (active question predictions, resolved question ground truths, and your final predictions on resolved questions).
+{self._build_memory_carryover_note(current_date)}
 
 Store things NOT recoverable from those tools:
 1. Reasoning behind predictions and how you did on resolved questions that might help with unresolved questions — once a question resolves, your prediction remains visible but your reasoning is lost from the DataFrame. Example: "Q149: PSG 0.70 because Sky Bet implied 55% and Inter eliminated in semis."
@@ -1045,7 +1077,6 @@ Current memory length: {len(self._memory)} characters"""
                 conversation=conversation,
                 rendered_response=f"MEMORY UPDATE ERROR after retries: {e}",
                 phase="memory_update_error",
-                actions_remaining=-1,
                 current_memory_len=len(self._memory),
                 error=str(e),
                 prompt_override=model_input_payload,
@@ -1101,7 +1132,6 @@ Current memory length: {len(self._memory)} characters"""
             conversation=conversation,
             rendered_response=rendered,
             phase="memory_update",
-            actions_remaining=-1,
             current_memory_len=len(self._memory),
             reasoning=reasoning_text if reasoning_text else None,
             reasoning_tokens=reasoning_tokens_turn,
@@ -1151,7 +1181,7 @@ class GPTOSSAllQAgent(AllQAgent, GPTOSSBasicAgent):
 
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        max_workers = getattr(self.config, "warmup_parallelism", 20)
+        max_workers = self.config.warmup_parallelism
         print(f"[{self.agent_id}] Parallelizing warmup with {max_workers} threads...")
 
         def _run_one(q):
@@ -1159,7 +1189,7 @@ class GPTOSSAllQAgent(AllQAgent, GPTOSSBasicAgent):
             instructions_for_api, convo = self._seed_harmony_conversation(
                 instructions,
                 current_date,
-                actions_remaining=int(getattr(self.config, "warmup_max_actions", 10)),
+                budget_status_text=self._build_start_budget_status(warmup=True),
             )
             self._run_harmony_action_loop(
                 instructions=instructions_for_api,
@@ -1167,7 +1197,8 @@ class GPTOSSAllQAgent(AllQAgent, GPTOSSBasicAgent):
                 forecast_interface=forecast_interface,
                 target_qid=q.qid,
                 enable_query=False,  # warmup has no df query handler setup
-                max_actions=getattr(self.config, "warmup_max_actions", 10),
+                warmup_budget=True,
+                max_actions=self.config.warmup_max_actions,
             )
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:

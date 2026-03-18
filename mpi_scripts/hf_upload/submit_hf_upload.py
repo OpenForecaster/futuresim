@@ -2,6 +2,7 @@
 """Submit the HF upload job to HTCondor."""
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -10,11 +11,15 @@ from pathlib import Path
 
 
 def main() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
     parser = argparse.ArgumentParser(description="Submit HF upload-large-folder as an HTCondor job")
     parser.add_argument("--repo_id", default="shash42/forecast-news")
     parser.add_argument(
         "--local_path",
-        default="/lustre/fast/fast/sgoel/forecasting/news/deduped_articles/data",
+        default=os.environ.get(
+            "FSIM_NEWS_ARTICLES_DIR",
+            os.environ.get("FSIM_NEWS_BASE", "/is/cluster/fast/sgoel/forecasting/news") + "/deduped_articles/data",
+        ),
     )
     parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--include", default="**/*.parquet")
@@ -50,7 +55,7 @@ def main() -> None:
     parser.add_argument("--bid", type=int, default=15)
     parser.add_argument(
         "--log_dir",
-        default="/is/cluster/fast/sgoel/logs/forecasting-sim/hf_upload",
+        default=os.environ.get("FSIM_HF_UPLOAD_LOG_DIR", str(repo_root / "logs" / "hf_upload")),
     )
     args = parser.parse_args()
 
@@ -61,7 +66,7 @@ def main() -> None:
     if " " in args.repo_id or " " in args.local_path:
         raise ValueError("repo_id/local_path cannot contain spaces in this submit helper.")
 
-    script_path = "/home/sgoel/forecast-sim/mpi_scripts/hf_upload/run_hf_upload.sh"
+    script_path = str(repo_root / "mpi_scripts" / "hf_upload" / "run_hf_upload.sh")
     log_dir = Path(args.log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
 
