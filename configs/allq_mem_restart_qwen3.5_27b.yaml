@@ -11,7 +11,7 @@ restart_from: "/fast/sgoel/forecasting/current_sim/allq_warmup_only_qwen3.5-27b_
 restart_from_day: "2025-04-25"
 
 # --- Simulation Meta ---
-sim_name: "allq_nomem_qwen3.5-27b_testset-50actions"
+sim_name: "allq_mem_qwen3.5-27b_testset-50actions"
 start_date: "2025-05-01"
 end_date: "2025-08-23"
 lookback_days: 7
@@ -51,7 +51,6 @@ embedding_max_model_len: 32768
 # --- vLLM Agent Runtime ---
 vllm_gpu_mem: 0.85
 vllm_tensor_parallel_size: 2
-vllm_startup_timeout: 600
 vllm_enable_tools: false
 language_model_only: true
 
@@ -68,7 +67,7 @@ parallel: true
 defaults:
   provider: "vllm"
   scaffold: "allQ"
-  enable_memory: false
+  enable_memory: true
   max_actions: 50
   warmup_max_actions: 10
   temperature: 0.7

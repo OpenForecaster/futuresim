@@ -36,3 +36,13 @@ register(
     id="searchcode",
     entry_point="skyrl_gym.envs.searchcode.env:SearchCodeEnv",
 )
+
+register(
+    id="mcq",
+    entry_point="skyrl_gym.envs.mcq.env:MCQEnv",
+)
+
+register(
+    id="forecast",
+    entry_point="skyrl_gym.envs.forecast.env:ForecastEnv",
+)

@@ -1,42 +1,42 @@
 set -x
 
-# Running on policy distillation for Math on the DAPO math dataset, with eval on AIME 2024.
-# Uses Qwen-3-4B-Base as the student model and an RL trained Qwen-3-4B as the teacher model
-# bash examples/algorithms/dapo/prepare_dapo_data.sh
-# bash examples/on_policy_distillation/run_on_policy_distill_math_qwen3_4b.sh
+# Minimal OPD: Qwen2.5-1.5B base student + Qwen2.5-3B-it teacher on GSM8K
+# Fast iteration to prove OPD works.
 
-DATA_DIR="$HOME/data/dapo"
-TRAIN_FILE="$DATA_DIR/dapo-math-17k-cleaned.parquet"
-TEST_FILE="$DATA_DIR/aime-2024-cleaned.parquet"
+DATA_DIR="/fast/nchandak/forecast-sim/data/gsm8k"
+TRAIN_FILE="$DATA_DIR/train.parquet"
+TEST_FILE="$DATA_DIR/validation.parquet"
 LOGGER=wandb
 
-# On Policy Distillation args
-# set this to the huggingface/local path of your teacher model
-TEACHER_MODEL="$HOME/ckpts/dapo_qwen3_4b_base/global_step_90/"
-STUDENT_MODEL="Qwen/Qwen3-4B-Base"
+TEACHER_MODEL="/fast/rolmedo/models/qwen2.5-3b-it"
+STUDENT_MODEL="/fast/rolmedo/models/qwen2.5-1.5b/snapshots/model"
 ADVANTAGE_ESTIMATOR="no_op"
 POLICY_LOSS="importance_sampling"
-USE_KL_IN_REWARD=true # this adds the kl penalty to the advantage
-USE_KL_LOSS=false # turns off kl loss in the loss since we are using it directly in the reward
+USE_KL_IN_REWARD=true
+USE_KL_LOSS=false
 
-# Placement args (override with e.g. NUM_GPUS=4 bash ...)
-: "${NUM_GPUS:=8}"
+NUM_GPUS=8
 NUM_GPUS_PER_NODE=$NUM_GPUS
 NUM_INFERENCE_ENGINES=$NUM_GPUS
 INFERENCE_ENGINE_TP_SIZE=1
 
-# sampling params
 TEMPERATURE=1.0
 TOP_P=1.0
 EVAL_TOP_P=0.7
+MAX_PROMPT_LENGTH=512
+MAX_RESPONSE_LENGTH=1024
+APPLY_OVERLONG_FILTERING=false
 
-# repro run parameters
-TRAIN_BATCH_SIZE=512
-MINI_BATCH_SIZE=512
-N_SAMPLES_PER_PROMPT=16
-EVAL_N_SAMPLES_PER_PROMPT=32
+TRAIN_BATCH_SIZE=128
+MINI_BATCH_SIZE=128
+N_SAMPLES_PER_PROMPT=4
+EVAL_N_SAMPLES_PER_PROMPT=16
 ENFORCE_EAGER=true
 LR=1e-5
+
+PROJECT_NAME="gsm8k_opd_minimal"
+RUN_NAME="opd_qwen2.5_1.5b_from_3b_it_bs${TRAIN_BATCH_SIZE}_lr${LR}_v1"
+CKPT_PATH="/lustre/scratch/nchandak/forecast-sim/skyrl/${PROJECT_NAME}/${RUN_NAME}"
 
 uv run --isolated --extra fsdp -m examples.train.on_policy_distillation.main_on_policy_distill \
   data.train_data="['$TRAIN_FILE']" \
@@ -52,43 +52,48 @@ uv run --isolated --extra fsdp -m examples.train.on_policy_distillation.main_on_
   generator.inference_engine.num_engines=$NUM_INFERENCE_ENGINES \
   generator.inference_engine.tensor_parallel_size=$INFERENCE_ENGINE_TP_SIZE \
   trainer.epochs=20 \
-  trainer.eval_batch_size=1024 \
+  trainer.eval_batch_size=2048 \
   trainer.eval_before_train=true \
-  trainer.eval_interval=5 \
+  trainer.eval_interval=2 \
   trainer.update_epochs_per_batch=1 \
   trainer.train_batch_size=$TRAIN_BATCH_SIZE \
   trainer.policy_mini_batch_size=$MINI_BATCH_SIZE \
-  trainer.micro_forward_batch_size_per_gpu=2 \
-  trainer.micro_train_batch_size_per_gpu=2 \
-  trainer.ckpt_interval=10 \
-  trainer.max_prompt_length=2048 \
+  trainer.micro_forward_batch_size_per_gpu=8 \
+  trainer.micro_train_batch_size_per_gpu=8 \
+  trainer.ckpt_interval=20 \
+  trainer.max_prompt_length=$MAX_PROMPT_LENGTH \
   generator.inference_engine.enforce_eager=$ENFORCE_EAGER \
-  generator.sampling_params.max_generate_length=8192 \
+  generator.apply_overlong_filtering=$APPLY_OVERLONG_FILTERING \
+  generator.sampling_params.max_generate_length=$MAX_RESPONSE_LENGTH \
   generator.sampling_params.temperature=$TEMPERATURE \
   generator.sampling_params.top_p=$TOP_P \
   generator.eval_sampling_params.temperature=$TEMPERATURE \
   generator.eval_sampling_params.top_p=$EVAL_TOP_P \
-  generator.eval_sampling_params.max_generate_length=8192 \
+  generator.eval_sampling_params.max_generate_length=2048 \
   generator.eval_n_samples_per_prompt=$EVAL_N_SAMPLES_PER_PROMPT \
   trainer.policy.optimizer_config.lr=$LR \
   trainer.policy.optimizer_config.num_warmup_steps=0 \
   trainer.policy.optimizer_config.weight_decay=0.1 \
   trainer.algorithm.use_kl_loss=$USE_KL_LOSS \
   trainer.algorithm.use_kl_in_reward=$USE_KL_IN_REWARD \
+  trainer.algorithm.use_entropy_loss=true \
+  trainer.algorithm.entropy_loss_coef=0.01 \
+  trainer.policy.fsdp_config.fsdp_size=$NUM_GPUS_PER_NODE \
   generator.inference_engine.backend=vllm \
   generator.inference_engine.run_engines_locally=true \
+  generator.inference_engine.weight_sync_backend=nccl \
   generator.inference_engine.async_engine=false \
   generator.batched=true \
-  environment.env_class=aime \
+  environment.env_class=gsm8k \
   generator.n_samples_per_prompt=$N_SAMPLES_PER_PROMPT \
   generator.inference_engine.gpu_memory_utilization=0.8 \
   trainer.logger="$LOGGER" \
-  trainer.project_name="aime_on_policy_distillation" \
-  trainer.run_name="on_policy_distillation_aime_qwen3_4b_base_from_4b" \
+  trainer.project_name="$PROJECT_NAME" \
+  trainer.run_name="$RUN_NAME" \
   trainer.resume_mode=latest \
-  trainer.export_path="$HOME/exports/aime_on_policy_distill_4b_base_from_4b" \
-  trainer.hf_save_interval=10 \
+  trainer.export_path="/lustre/scratch/nchandak/forecast-sim/skyrl/${PROJECT_NAME}/exports/$RUN_NAME" \
+  trainer.hf_save_interval=20 \
   trainer.max_ckpts_to_keep=3 \
-  trainer.ckpt_interval=10 \
-  trainer.ckpt_path="$HOME/ckpts/aime_on_policy_distill_4b_base_from_4b" \
+  trainer.ckpt_interval=20 \
+  trainer.ckpt_path="$CKPT_PATH" \
   $@

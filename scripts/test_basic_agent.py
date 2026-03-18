@@ -247,6 +247,9 @@ def create_inference_provider(provider: str, model: str, args):
     elif provider == "openrouter":
         from inference.openrouter import OpenRouterInference
         return OpenRouterInference(model)
+    elif provider == "azure":
+        from inference.azure_openai import AzureOpenAIInference
+        return AzureOpenAIInference(model=model)
     else:
         raise ValueError(f"Unknown provider: {provider}")
 

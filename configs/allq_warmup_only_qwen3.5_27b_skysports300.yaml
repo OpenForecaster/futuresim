@@ -1,22 +1,18 @@
-# AllQAgent: Qwen3.5-27B (local vLLM), no-memory restart from shared warmup.
+# Warmup-only run for skysports_300 split using local Qwen3.5-27B via vLLM.
 #
-# Usage:
-#   python mpi_scripts/run_sim/submit_sim.py --config configs/allq_nomem_restart_qwen3.5_27b.yaml --runs 1
+# Usage: python mpi_scripts/run_sim/submit_sim.py --config configs/allq_warmup_only_qwen3.5_27b_skysports300.yaml --runs 1
 
-# --- Run Script (CUDA 12.9 needed for Qwen3.5 FlashInfer GDN kernels) ---
 run_script: "run_sim2.sh"
 
-# --- Restart ---
-restart_from: "/fast/sgoel/forecasting/current_sim/allq_warmup_only_qwen3.5-27b_r00/26-03-08-19-19-56"
-restart_from_day: "2025-04-25"
-
 # --- Simulation Meta ---
-sim_name: "allq_nomem_qwen3.5-27b_testset-50actions"
-start_date: "2025-05-01"
-end_date: "2025-08-23"
+sim_name: "allq_warmup_only_qwen3.5-27b_skysports300"
+start_date: "2025-05-12"
+end_date: "2025-05-06"       # Minimal loop: warmup day + 1 day
 lookback_days: 7
 search_cutoff_days: 0
-split: "test"
+split: "skysports_300"
+
+resolution_end: "2025-12-13"
 
 # --- HTCondor Resources ---
 resources:
@@ -56,7 +52,6 @@ vllm_enable_tools: false
 language_model_only: true
 
 # --- Local 3-GPU Pinning ---
-# matcher + embedder on GPU2 (parent process), agent vLLM on GPU0-1 (subprocess override).
 aux_cuda_visible_devices: "2"
 agent_cuda_visible_devices: "0,1"
 
@@ -68,9 +63,8 @@ parallel: true
 defaults:
   provider: "vllm"
   scaffold: "allQ"
-  enable_memory: false
   max_actions: 50
-  warmup_max_actions: 10
+  warmup_max_actions: 20
   temperature: 0.7
   max_tokens: 8192
   max_retries: 3

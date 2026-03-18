@@ -180,12 +180,22 @@ class StructuredMemory:
                 continue
         return most_recent
 
+    _TYPE_PRIORITY = {"reasoning": 0, "insight": 1, "fact": 2, "calibration": 3}
+
     def get(self) -> str:
-        """Render entries into compact text for prompt injection."""
+        """Render entries into compact text for prompt injection.
+
+        Entries are grouped by type priority (reasoning > insight > fact > calibration)
+        so evidence for active predictions appears first in the context window.
+        """
         if not self._entries:
             return ""
+        sorted_entries = sorted(
+            self._entries,
+            key=lambda e: (self._TYPE_PRIORITY.get(e.type, 9), e.added),
+        )
         lines = []
-        for e in self._entries:
+        for e in sorted_entries:
             qids_part = f", {e.qids}" if e.qids else ""
             lines.append(f"[{e.id}] ({e.type}{qids_part}) {e.name}")
             lines.append(f"  {e.content} (added: {e.added})")

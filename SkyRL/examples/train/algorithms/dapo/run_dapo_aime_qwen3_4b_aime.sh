@@ -4,15 +4,21 @@ set -x
 # bash examples/algorithms/dapo/prepare_dapo_data.sh
 # bash examples/algorithms/dapo/run_dapo_aime_qwen3_4b_aime.sh
 
-MODEL_NAME="Qwen/Qwen3-4B-Base"
-DATA_DIR="$HOME/data/dapo"
+MODEL_NAME="Qwen3-4B-Base"
+MODEL_PATH="/fast/nchandak/models/${MODEL_NAME}"
+
+DATA_DIR="/fast/nchandak/forecast-sim/data/dapo"
 TRAIN_FILE="$DATA_DIR/dapo-math-17k-cleaned.parquet"
 TEST_FILE="$DATA_DIR/aime-2024-cleaned.parquet"
-NUM_NODES=2
+NUM_NODES=1
 NUM_GPUS_PER_NODE=8
-NUM_INFERENCE_ENGINES=16
+NUM_INFERENCE_ENGINES=8
 INFERENCE_ENGINE_TENSOR_PARALLEL_SIZE=1
 LOGGER="wandb"  # change to "console" to print to stdout
+
+PROJECT_NAME="dapo_rl_aime"
+RUN_NAME="dapo_qwen3_4b_base_bs256_v2"
+CKPT_PATH="/lustre/scratch/nchandak/forecast-sim/skyrl/${PROJECT_NAME}/${RUN_NAME}"
 
 CLIP_RATIO_LOW=0.2
 CLIP_RATIO_HIGH=0.28
@@ -34,7 +40,7 @@ MAX_PROMPT_LENGTH=$((1024 * 2))
 MAX_RESPONSE_LENGTH=$((1024 * 8))
 
 # repro run parameters
-TRAIN_BATCH_SIZE=512
+TRAIN_BATCH_SIZE=256
 MINI_BATCH_SIZE=32
 N_SAMPLES_PER_PROMPT=16
 EVAL_N_SAMPLES_PER_PROMPT=32
@@ -55,9 +61,10 @@ uv run --isolated --extra fsdp -m examples.train.algorithms.dapo.main_dapo \
   generator.sampling_params.top_p=$TOP_P \
   generator.eval_sampling_params.top_p=$EVAL_TOP_P \
   generator.eval_sampling_params.temperature=$TEMPERATURE \
+  generator.eval_sampling_params.max_generate_length=$MAX_RESPONSE_LENGTH \
   trainer.algorithm.use_kl_loss=$USE_KL_LOSS \
   trainer.algorithm.clip_ratio_c=$CLIP_RATIO_C \
-  trainer.policy.model.path="$MODEL_NAME" \
+  trainer.policy.model.path="$MODEL_PATH" \
   trainer.placement.colocate_all=true \
   trainer.strategy=fsdp2 \
   trainer.placement.policy_num_nodes=$NUM_NODES \
@@ -93,11 +100,11 @@ uv run --isolated --extra fsdp -m examples.train.algorithms.dapo.main_dapo \
   generator.eval_n_samples_per_prompt=$EVAL_N_SAMPLES_PER_PROMPT \
   generator.inference_engine.gpu_memory_utilization=0.8 \
   trainer.logger="$LOGGER" \
-  trainer.project_name="dapo_aime" \
-  trainer.run_name="dapo_qwen3_4b_base" \
-  trainer.export_path="$HOME/exports/dapo_qwen3_4b_base" \
+  trainer.project_name="$PROJECT_NAME" \
+  trainer.run_name="$RUN_NAME" \
+  trainer.export_path="/lustre/scratch/nchandak/forecast-sim/skyrl/${PROJECT_NAME}/exports/$RUN_NAME" \
   trainer.hf_save_interval=10 \
   trainer.resume_mode=latest \
   trainer.max_ckpts_to_keep=3 \
-  trainer.ckpt_path="$HOME/ckpts/dapo_qwen3_4b_base" \
+  trainer.ckpt_path="$CKPT_PATH" \
   $@

@@ -10,7 +10,7 @@ TEST_FILE="$DATA_DIR/validation.parquet"
 : "${LOGGER:=wandb}"
 
 # On Policy Distillation args
-TEACHER_MODEL="/fast/rolmedo/models/qwen2.5-3b-it"
+TEACHER_MODEL="/fast/nchandak/models/Qwen3-4B-Instruct-2507"
 STUDENT_MODEL="/fast/rolmedo/models/qwen2.5-1.5b-it"
 ADVANTAGE_ESTIMATOR="no_op"
 POLICY_LOSS="importance_sampling"
@@ -29,7 +29,7 @@ TOP_P=1.0
 EVAL_TOP_P=0.7
 
 # training parameters
-TRAIN_BATCH_SIZE=512
+TRAIN_BATCH_SIZE=256
 MINI_BATCH_SIZE=32
 N_SAMPLES_PER_PROMPT=4
 EVAL_N_SAMPLES_PER_PROMPT=8
@@ -56,17 +56,17 @@ uv run --isolated --extra fsdp -m examples.train.on_policy_distillation.main_on_
   trainer.update_epochs_per_batch=1 \
   trainer.train_batch_size=$TRAIN_BATCH_SIZE \
   trainer.policy_mini_batch_size=$MINI_BATCH_SIZE \
-  trainer.micro_forward_batch_size_per_gpu=16 \
-  trainer.micro_train_batch_size_per_gpu=16 \
+  trainer.micro_forward_batch_size_per_gpu=2 \
+  trainer.micro_train_batch_size_per_gpu=2 \
   trainer.ckpt_interval=10 \
   trainer.max_prompt_length=512 \
   generator.inference_engine.enforce_eager=$ENFORCE_EAGER \
-  generator.sampling_params.max_generate_length=2048 \
+  generator.sampling_params.max_generate_length=8192 \
   generator.sampling_params.temperature=$TEMPERATURE \
   generator.sampling_params.top_p=$TOP_P \
   generator.eval_sampling_params.temperature=$TEMPERATURE \
   generator.eval_sampling_params.top_p=$EVAL_TOP_P \
-  generator.eval_sampling_params.max_generate_length=2048 \
+  generator.eval_sampling_params.max_generate_length=8192 \
   generator.eval_n_samples_per_prompt=$EVAL_N_SAMPLES_PER_PROMPT \
   trainer.policy.optimizer_config.lr=$LR \
   trainer.policy.optimizer_config.num_warmup_steps=0 \

@@ -57,9 +57,12 @@ Thumbs.db
 # Agent artifacts (local only)
 .gemini/
 .env
+.claude 
 
 # API Keys
 configs/openrouter_api_key.py
+configs/azure_openai_config.py
+inference/test_script.py
 
 # Plotting
 plots/

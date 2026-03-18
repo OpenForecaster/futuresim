@@ -1,74 +1,67 @@
 set -x
 
-# On-Policy Self-Distillation (OPSD) for Math reasoning with Qwen3-0.6B.
-# The SAME model acts as both teacher and student. The teacher sees the question + reference
-# answer (privileged context), while the student sees only the question.
-# See: https://arxiv.org/abs/2601.18734
-#
-# Qwen3-0.6B is an instruct model (not base), so it can produce EOS tokens and
-# follow chat templates properly. Overlong filtering is safe to enable.
-#
-# Setup:
-#   bash examples/train/algorithms/dapo/prepare_dapo_data.sh /fast/nchandak/forecast-sim/data/dapo
-#   bash examples/train/on_policy_self_distillation/run_opsd_math_qwen3_0.6b.sh
+# On-policy distillation for Hendrycks MATH Level 5.
+# Uses Qwen2.5-1.5B-Instruct as the student and Qwen3-4B-Instruct-2507 as the teacher.
+# Train: MATH train split (Level 5 only), Eval: MATH test split (all levels).
+# bash examples/train/on_policy_distillation/run_on_policy_distill_math_level5_qwen2.5_1.5b_from_qwen3_4b.sh
 
-DATA_DIR="/fast/nchandak/forecast-sim/data/dapo"
-TRAIN_FILE="$DATA_DIR/dapo-math-17k-cleaned.parquet"
-TEST_FILE="$DATA_DIR/aime-2024-cleaned.parquet"
-LOGGER=wandb
+: "${DATA_DIR:="/fast/nchandak/forecast-sim/data/math_level5"}"
+TRAIN_FILE="$DATA_DIR/train.parquet"
+TEST_FILE="$DATA_DIR/test.parquet"
+: "${LOGGER:=wandb}"
 
-# OPSD: same model for both teacher and student
-MODEL="/lustre/scratch/nchandak/forecast-sim/skyrl/dapo_rl_aime/exports/dapo_qwen3_4b_base_bs256_v2/global_step_20/policy"
+# On Policy Distillation args
+TEACHER_MODEL="/fast/nchandak/models/Qwen3-4B-Instruct-2507"
+STUDENT_MODEL="/fast/rolmedo/models/qwen2.5-1.5b-it"
 ADVANTAGE_ESTIMATOR="no_op"
 POLICY_LOSS="importance_sampling"
 USE_KL_IN_REWARD=true
 USE_KL_LOSS=false
 
-# Placement args
+# Placement args (override with e.g. NUM_GPUS=4 bash ...)
 NUM_GPUS=8
 NUM_GPUS_PER_NODE=$NUM_GPUS
 NUM_INFERENCE_ENGINES=$NUM_GPUS
 INFERENCE_ENGINE_TP_SIZE=1
 
-# Sampling params
+# sampling params
 TEMPERATURE=1.0
 TOP_P=1.0
 EVAL_TOP_P=0.7
 MAX_PROMPT_LENGTH=$((1024 * 2))
 MAX_RESPONSE_LENGTH=$((1024 * 8))
 
-# Overlong filtering DISABLED: even the instruct model generates max-length responses
-# for complex math problems, causing most loss masks to be zeroed. The KL reward
-# provides the learning signal regardless of EOS.
+# Overlong filtering DISABLED: instruct models may produce max-length responses
+# on hard MATH problems. KL reward provides the learning signal.
 APPLY_OVERLONG_FILTERING=false
 
-# Training params — aligned with reference run_opsd_math.sh
+# training parameters — stabilized: lower LR, warmup, entropy loss
 TRAIN_BATCH_SIZE=256
 MINI_BATCH_SIZE=256
 N_SAMPLES_PER_PROMPT=4
-EVAL_N_SAMPLES_PER_PROMPT=16
+EVAL_N_SAMPLES_PER_PROMPT=8
 ENFORCE_EAGER=true
-LR=2e-6
+LR=1e-6
 
 # Project and run name
-PROJECT_NAME="aime_opsd"
-RUN_NAME="opsd_qwen3_4b_dapo_rl_self_distill_bs${TRAIN_BATCH_SIZE}_lr${LR}_v2"
+PROJECT_NAME="math_level5_on_policy_distillation"
+RUN_NAME="opd_qwen2.5_1.5b_from_qwen3_4b_instruct_2507_v2"
 CKPT_PATH="/lustre/scratch/nchandak/forecast-sim/skyrl/${PROJECT_NAME}/${RUN_NAME}"
 
-uv run --isolated --extra fsdp -m examples.train.on_policy_self_distillation.main_opsd \
+uv run --isolated --extra fsdp -m examples.train.on_policy_distillation.main_on_policy_distill \
   data.train_data="['$TRAIN_FILE']" \
   data.val_data="['$TEST_FILE']" \
   trainer.algorithm.advantage_estimator=$ADVANTAGE_ESTIMATOR \
   trainer.algorithm.policy_loss_type=$POLICY_LOSS \
-  trainer.policy.model.path=$MODEL \
-  trainer.ref.model.path=$MODEL \
+  trainer.policy.model.path=$STUDENT_MODEL \
+  trainer.ref.model.path=$TEACHER_MODEL \
   trainer.placement.colocate_all=true \
   trainer.strategy=fsdp2 \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS_PER_NODE \
   trainer.placement.ref_num_gpus_per_node=$NUM_GPUS_PER_NODE \
   generator.inference_engine.num_engines=$NUM_INFERENCE_ENGINES \
   generator.inference_engine.tensor_parallel_size=$INFERENCE_ENGINE_TP_SIZE \
-  trainer.epochs=10 \
+  trainer.epochs=20 \
   trainer.eval_batch_size=1024 \
   trainer.eval_before_train=true \
   trainer.eval_interval=5 \
@@ -77,7 +70,6 @@ uv run --isolated --extra fsdp -m examples.train.on_policy_self_distillation.mai
   trainer.policy_mini_batch_size=$MINI_BATCH_SIZE \
   trainer.micro_forward_batch_size_per_gpu=2 \
   trainer.micro_train_batch_size_per_gpu=2 \
-  trainer.ckpt_interval=10 \
   trainer.max_prompt_length=$MAX_PROMPT_LENGTH \
   generator.inference_engine.enforce_eager=$ENFORCE_EAGER \
   generator.apply_overlong_filtering=$APPLY_OVERLONG_FILTERING \
@@ -94,7 +86,7 @@ uv run --isolated --extra fsdp -m examples.train.on_policy_self_distillation.mai
   trainer.algorithm.use_kl_loss=$USE_KL_LOSS \
   trainer.algorithm.use_kl_in_reward=$USE_KL_IN_REWARD \
   trainer.algorithm.use_entropy_loss=true \
-  trainer.algorithm.entropy_loss_coef=0.02 \
+  trainer.algorithm.entropy_loss_coef=0.01 \
   trainer.policy.fsdp_config.fsdp_size=$NUM_GPUS_PER_NODE \
   generator.inference_engine.backend=vllm \
   generator.inference_engine.run_engines_locally=true \

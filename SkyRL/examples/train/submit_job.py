@@ -35,7 +35,7 @@ from pathlib import Path
 
 import htcondor2 as htcondor
 
-DEFAULT_JOB_BID = 50
+DEFAULT_JOB_BID = 500
 DEFAULT_MEMORY_PER_GPU = 64  # GB
 DEFAULT_CPUS_PER_GPU = 8
 DEFAULT_LOG_PATH = "/fast/nchandak/logs/forecasting-sim/skyrl-train"

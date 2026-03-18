@@ -29,7 +29,7 @@ TEACHER_TRANSITION_PROMPT = (
     "After understanding the reference solution and the rationale behind each step, "
     "now articulate your own step-by-step reasoning that derives the same final answer "
     "to the problem below:\n"
-    "Please reason step by step, and put your final answer within \\boxed{{}}."
+    'Please reason step by step, and put your final answer on its own line after "Answer:".'
 )
 
 
@@ -72,14 +72,19 @@ class OPSDTrainer(RayPPOTrainer):
         return await super().generate(input_batch)
 
     def _extract_ground_truths(self, env_extras: List[Dict[str, Any]]) -> List[Optional[str]]:
-        """Extract ground-truth solutions from env_extras, supporting multiple dataset formats."""
+        """Extract ground-truth solutions from env_extras, supporting multiple dataset formats.
+
+        Prefers full step-by-step solutions (reward_model.solution / reward_spec.solution)
+        over bare answers (reward_model.ground_truth / reward_spec.ground_truth), so the
+        teacher sees the complete reasoning when available.
+        """
         ground_truths = []
         for extras in env_extras:
             gt = None
             if "reward_model" in extras and isinstance(extras["reward_model"], dict):
-                gt = extras["reward_model"].get("ground_truth")
+                gt = extras["reward_model"].get("solution") or extras["reward_model"].get("ground_truth")
             if gt is None and "reward_spec" in extras and isinstance(extras["reward_spec"], dict):
-                gt = extras["reward_spec"].get("ground_truth")
+                gt = extras["reward_spec"].get("solution") or extras["reward_spec"].get("ground_truth")
             ground_truths.append(gt)
         return ground_truths
 

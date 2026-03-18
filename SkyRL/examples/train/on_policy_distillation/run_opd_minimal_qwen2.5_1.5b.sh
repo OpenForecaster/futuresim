@@ -1,82 +1,65 @@
 set -x
 
-# On-Policy Self-Distillation (OPSD) for Math reasoning with Qwen3-0.6B.
-# The SAME model acts as both teacher and student. The teacher sees the question + reference
-# answer (privileged context), while the student sees only the question.
-# See: https://arxiv.org/abs/2601.18734
-#
-# Qwen3-0.6B is an instruct model (not base), so it can produce EOS tokens and
-# follow chat templates properly. Overlong filtering is safe to enable.
-#
-# Setup:
-#   bash examples/train/algorithms/dapo/prepare_dapo_data.sh /fast/nchandak/forecast-sim/data/dapo
-#   bash examples/train/on_policy_self_distillation/run_opsd_math_qwen3_0.6b.sh
+# Minimal OPD experiment: Qwen2.5-1.5B base student + Qwen2.5-3B-it teacher
+# Uses 2k training subset for fast iteration. Eval on AIME 2024.
 
 DATA_DIR="/fast/nchandak/forecast-sim/data/dapo"
-TRAIN_FILE="$DATA_DIR/dapo-math-17k-cleaned.parquet"
+TRAIN_FILE="$DATA_DIR/dapo-math-2k-subset.parquet"
 TEST_FILE="$DATA_DIR/aime-2024-cleaned.parquet"
 LOGGER=wandb
 
-# OPSD: same model for both teacher and student
-MODEL="/lustre/scratch/nchandak/forecast-sim/skyrl/dapo_rl_aime/exports/dapo_qwen3_4b_base_bs256_v2/global_step_20/policy"
+TEACHER_MODEL="/fast/rolmedo/models/qwen2.5-3b-it"
+STUDENT_MODEL="/fast/rolmedo/models/qwen2.5-1.5b/snapshots/model"
 ADVANTAGE_ESTIMATOR="no_op"
 POLICY_LOSS="importance_sampling"
 USE_KL_IN_REWARD=true
 USE_KL_LOSS=false
 
-# Placement args
 NUM_GPUS=8
 NUM_GPUS_PER_NODE=$NUM_GPUS
 NUM_INFERENCE_ENGINES=$NUM_GPUS
 INFERENCE_ENGINE_TP_SIZE=1
 
-# Sampling params
 TEMPERATURE=1.0
 TOP_P=1.0
 EVAL_TOP_P=0.7
 MAX_PROMPT_LENGTH=$((1024 * 2))
-MAX_RESPONSE_LENGTH=$((1024 * 8))
-
-# Overlong filtering DISABLED: even the instruct model generates max-length responses
-# for complex math problems, causing most loss masks to be zeroed. The KL reward
-# provides the learning signal regardless of EOS.
+MAX_RESPONSE_LENGTH=2048
 APPLY_OVERLONG_FILTERING=false
 
-# Training params — aligned with reference run_opsd_math.sh
-TRAIN_BATCH_SIZE=256
-MINI_BATCH_SIZE=256
+TRAIN_BATCH_SIZE=128
+MINI_BATCH_SIZE=128
 N_SAMPLES_PER_PROMPT=4
 EVAL_N_SAMPLES_PER_PROMPT=16
 ENFORCE_EAGER=true
-LR=2e-6
+LR=1e-5
 
-# Project and run name
-PROJECT_NAME="aime_opsd"
-RUN_NAME="opsd_qwen3_4b_dapo_rl_self_distill_bs${TRAIN_BATCH_SIZE}_lr${LR}_v2"
+PROJECT_NAME="aime_opd_minimal"
+RUN_NAME="opd_qwen2.5_1.5b_from_3b_it_bs${TRAIN_BATCH_SIZE}_lr${LR}_v1"
 CKPT_PATH="/lustre/scratch/nchandak/forecast-sim/skyrl/${PROJECT_NAME}/${RUN_NAME}"
 
-uv run --isolated --extra fsdp -m examples.train.on_policy_self_distillation.main_opsd \
+uv run --isolated --extra fsdp -m examples.train.on_policy_distillation.main_on_policy_distill \
   data.train_data="['$TRAIN_FILE']" \
   data.val_data="['$TEST_FILE']" \
   trainer.algorithm.advantage_estimator=$ADVANTAGE_ESTIMATOR \
   trainer.algorithm.policy_loss_type=$POLICY_LOSS \
-  trainer.policy.model.path=$MODEL \
-  trainer.ref.model.path=$MODEL \
+  trainer.policy.model.path=$STUDENT_MODEL \
+  trainer.ref.model.path=$TEACHER_MODEL \
   trainer.placement.colocate_all=true \
   trainer.strategy=fsdp2 \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS_PER_NODE \
   trainer.placement.ref_num_gpus_per_node=$NUM_GPUS_PER_NODE \
   generator.inference_engine.num_engines=$NUM_INFERENCE_ENGINES \
   generator.inference_engine.tensor_parallel_size=$INFERENCE_ENGINE_TP_SIZE \
-  trainer.epochs=10 \
+  trainer.epochs=20 \
   trainer.eval_batch_size=1024 \
   trainer.eval_before_train=true \
-  trainer.eval_interval=5 \
+  trainer.eval_interval=2 \
   trainer.update_epochs_per_batch=1 \
   trainer.train_batch_size=$TRAIN_BATCH_SIZE \
   trainer.policy_mini_batch_size=$MINI_BATCH_SIZE \
-  trainer.micro_forward_batch_size_per_gpu=2 \
-  trainer.micro_train_batch_size_per_gpu=2 \
+  trainer.micro_forward_batch_size_per_gpu=4 \
+  trainer.micro_train_batch_size_per_gpu=4 \
   trainer.ckpt_interval=10 \
   trainer.max_prompt_length=$MAX_PROMPT_LENGTH \
   generator.inference_engine.enforce_eager=$ENFORCE_EAGER \
@@ -86,15 +69,15 @@ uv run --isolated --extra fsdp -m examples.train.on_policy_self_distillation.mai
   generator.sampling_params.top_p=$TOP_P \
   generator.eval_sampling_params.temperature=$TEMPERATURE \
   generator.eval_sampling_params.top_p=$EVAL_TOP_P \
-  generator.eval_sampling_params.max_generate_length=8192 \
+  generator.eval_sampling_params.max_generate_length=4096 \
   generator.eval_n_samples_per_prompt=$EVAL_N_SAMPLES_PER_PROMPT \
   trainer.policy.optimizer_config.lr=$LR \
-  trainer.policy.optimizer_config.num_warmup_steps=10 \
+  trainer.policy.optimizer_config.num_warmup_steps=0 \
   trainer.policy.optimizer_config.weight_decay=0.1 \
   trainer.algorithm.use_kl_loss=$USE_KL_LOSS \
   trainer.algorithm.use_kl_in_reward=$USE_KL_IN_REWARD \
   trainer.algorithm.use_entropy_loss=true \
-  trainer.algorithm.entropy_loss_coef=0.02 \
+  trainer.algorithm.entropy_loss_coef=0.01 \
   trainer.policy.fsdp_config.fsdp_size=$NUM_GPUS_PER_NODE \
   generator.inference_engine.backend=vllm \
   generator.inference_engine.run_engines_locally=true \

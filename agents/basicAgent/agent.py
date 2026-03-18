@@ -381,7 +381,23 @@ class BasicAgent(BaseAgent):
         """Record answer matcher latency and cost in timing stats."""
         self._timer.record("matcher", duration)
         self._timer.record_cost(cost, "matcher")
-    
+
+    def _build_calibration_summary(self) -> str:
+        """
+        Build a brief performance summary. Kept minimal to avoid
+        inducing self-doubt or probability-capping behavior.
+        """
+        fh = self._feedback_handler
+        if fh.total_resolved_count == 0:
+            return ""
+
+        accuracy = fh.total_accuracy_count / fh.total_resolved_count * 100
+
+        recent = getattr(fh, '_last_resolved', [])
+        today_str = f" ({len(recent)} resolved today)" if recent else ""
+
+        return f"\n{fh.total_resolved_count} questions resolved so far{today_str}, accuracy {accuracy:.1f}%."
+
     # =========================================================================
     # Instructions & Memory
     # =========================================================================
@@ -542,7 +558,20 @@ Example (if options are ["Candidate A", "Candidate B", "Candidate C"]):
 {memory_content}
 </memory>
 
-Use these stored insights to inform today's forecasts. Entry IDs in brackets (e.g. [a1b2c3d4]) can be used to delete stale entries at end of day. The DataFrame includes your latest predictions for active questions and your final prediction snapshot on resolved questions.
+**How to use your memory today:**
+- **reasoning** entries: These explain WHY you predicted something with key evidence. If the question is still active, use this to stay consistent or update based on new info. This saves you from re-searching.
+- **insight** entries: Transferable patterns you discovered. Apply these when making predictions on similar questions.
+- **fact** entries: Hard-to-find facts relevant to active questions. Use them directly.
+
+**CRITICAL — Outcome consolidation before every prediction:**
+Before submitting any prediction, check if your outcomes contain duplicates or near-duplicates. Common patterns:
+- Acronym vs full name: "WFP" and "World Food Programme" are the SAME outcome — merge them.
+- Hyphenation variants: "counter-terrorism" and "counterterrorism" are the SAME — merge them.
+- Name variations: "SAVE Act" and "Safeguard American Voter Eligibility Act" — merge them.
+- Person + title: "Pope Leo XIV" and "Cardinal Prevost" (if same person) — merge them.
+Splitting probability across duplicate outcomes DESTROYS your Brier score. Always merge before submitting.
+
+Entry IDs in brackets (e.g. [a1b2c3d4]) can be used to delete stale entries at end of day.
 
 """
                 else:
@@ -552,6 +581,8 @@ Use these stored insights to inform today's forecasts. Entry IDs in brackets (e.
 </memory>
 
 Use the reasoning and insights above to inform today's forecasts. The DataFrame includes your latest predictions for active questions and your final prediction snapshot on resolved questions.
+
+CRITICAL - Outcome consolidation: Before every prediction, merge duplicate outcomes (acronym vs full name, hyphenation variants, name variations). Splitting probability across duplicates destroys Brier score.
 
 """
             memory_flow_note = "Note: After ending your day, you will be prompted to update your memory."
@@ -714,63 +745,83 @@ You have {self.config.max_actions} actions available. Begin."""
         return f"""End of day {current_date}. You can now update your memory.
 
 ## MEMORY UPDATE
-Your memory entries are the ONLY context retained between days. Everything else resets. Tomorrow you get: search over news articles and the DataFrame (active question predictions, resolved question ground truths, your final predictions on resolved questions).
+Your memory is the ONLY context that persists between days. Everything else (conversation, searches, reasoning) resets. Tomorrow you get: news search and the DataFrame (with your latest predictions and resolved ground truths).
 
 You currently have {self._memory.entry_count} memory entries ({len(self._memory)} chars). Max 30 entries.
 
-### What to store (add new entries for):
-1. **reasoning** — Why you made specific predictions, especially when based on hard-to-find evidence. Example: "Q149: PSG 0.70 because Sky Bet implied 55% and Inter eliminated in semis."
-2. **calibration** — Performance patterns across resolved questions. Example: "Bookmaker odds correct 80% across 15 sports Qs; weight them more."
-3. **insight** — Non-obvious patterns that search alone would not surface. Example: "'First country to X' Qs almost always resolve to a major economy."
-4. **fact** — Critical hard-to-find facts relevant to active questions. Example: "ECB next meeting June 5 — relevant to Q72, Q108."
+**Your goal is to maximize prediction accuracy and Brier score.** Memory should help you be RIGHT more often, not less confident.
+
+## WHAT TO STORE (prioritized by value)
+
+1. **reasoning** (HIGHEST PRIORITY) — Your evidence chain for active predictions that would take multiple searches to reconstruct. This is your most valuable memory: it prevents wasted search effort and keeps predictions consistent.
+   - Good: "Q149: PSG 0.70 — Sky Bet implied 55%, Inter eliminated in semis (May 14 article), PSG home advantage in CL final."
+   - Good: "Q24: Riggs 0.85 — Federal judge Myers ordered NC Board to certify by 734 votes (Fox News May 6), 7-day appeal window passed."
+   - Bad: "Q149: I think PSG will win." (no evidence)
+
+2. **insight** — Transferable patterns that help you predict CORRECTLY, discovered from resolved questions or cross-question analysis.
+   - Good: "Questions asking 'first country to X' resolved to US/China/India in 6/7 cases. Weight major economies heavily."
+   - Good: "When 2025 news articles explicitly confirm an outcome, that outcome resolved correctly 9/10 times. Trust direct evidence."
+   - Good: "Outcome consolidation: always merge acronym vs full name (WFP=World Food Programme), hyphenation variants (counter-terrorism=counterterrorism), name variants (SAVE Act=Safeguard American Voter Eligibility Act). Splitting probability across duplicates destroys Brier."
+   - Bad: "Pay attention to geopolitics." (too generic to act on)
+   - Bad: "Probabilities must sum to 1.0." (you already know this — don't waste memory on obvious rules)
+
+3. **fact** — Hard-to-find facts that are relevant to active questions and cannot be easily re-discovered via search.
+   - Good: "Qatar gifted Boeing 747-8 to Trump admin (JPost May 11). Relevant to Q314, Q790."
+   - Bad: "The Super Bowl is in February." (easily searchable)
 
 ### What NOT to store:
-General forecasting advice (already in instructions), easily searchable facts, prediction outcomes without reasoning.
+- **Basic math/formatting rules** you already know ("probabilities must sum to 1.0", "avoid Other outcomes"). These waste memory slots on things you'll do correctly anyway.
+- Generic probability-capping rules (these hurt accuracy)
+- Resolved question outcomes without a transferable lesson
+- Facts you could re-find with one search query
+- General advice ("be more careful", "research more", "verify before submitting")
+- Self-doubt or rules that make you less confident without evidence
 
 ### How to update:
-Add entries (you may add multiple):
 <memory_add>
 name: Short descriptive title (max 150 chars, include question IDs if relevant)
-type: reasoning|calibration|insight|fact
+type: reasoning|insight|fact
 qids: Q72, Q108 (comma-separated, or leave empty)
 content: Your content here (max 800 chars). Include specific numbers, sources, and reasoning.
 </memory_add>
 
-Delete stale entries by ID (you may delete multiple):
+Delete stale/resolved entries:
 <memory_delete>ENTRY_ID_HERE</memory_delete>
 
-First reflect on today's session, then add/delete entries as needed:
-<reasoning>
-Reflect on today's forecasting session...
-</reasoning>
+### Deletion guidelines:
+- Delete **reasoning** entries when their question has resolved (unless there's a transferable lesson — convert to insight first).
+- Delete **fact** entries you could re-find via search.
+- Do NOT delete **insight** entries unless they've been proven wrong. Insights compound over time — they are your most durable advantage.
+- **Always keep at least 3 entries.** An empty memory wastes the advantage of persistence. If you have fewer than 3 entries, add new ones before deleting.
 
-If no updates needed, just output <reasoning>...</reasoning> without any memory tags."""
+<reasoning>
+Analyze today's session. What evidence and insights should you preserve?
+</reasoning>"""
 
     def _build_plain_memory_prompt(self, current_date: date) -> str:
         """Build the legacy plain-text memory update prompt (full replacement)."""
+        calibration_summary = self._build_calibration_summary()
         return f"""End of day {current_date}. You can now update your memory.
 
 ## MEMORY UPDATE
-Your memory is the ONLY thing that carries over to tomorrow. Everything else resets. Tomorrow you get: search over news articles and access to the DataFrame (active question predictions, resolved question ground truths, and your final predictions on resolved questions).
+Your memory is the ONLY context that persists between days. Everything else resets.
+{calibration_summary}
+Prioritize storing (in order of value):
+1. **Evidence chains** for active predictions that would take multiple searches to reconstruct. E.g., "Q149: PSG 0.70 — Sky Bet implied 55%, Inter eliminated May 14, PSG home advantage."
+2. **Transferable insights** — Patterns that help you predict correctly. E.g., "'First country to X' resolved to major economy 6/7 times."
+3. **Hard-to-find facts** relevant to active questions.
 
-Store things NOT recoverable from those tools:
-1. Reasoning behind predictions and how you did on resolved questions that might help with unresolved questions — once a question resolves, your prediction remains visible in the dataframe, but your reasoning is never stored in the dataframe. Example: "Q149: PSG 0.70 because Sky Bet implied 55% and Inter eliminated in semis."
-2. Performance patterns — track your accuracy across resolved questions so you can calibrate. Example: "Bookmaker odds were correct 80% across 15 sports questions; I should weight them more."
-3. Non-obvious insights that search alone would not surface. Example: "'First country to X' questions almost always resolve to a major economy."
-4. Critical hard-to-find facts directly relevant to active questions. Example: "ECB next meeting June 5 — relevant to Q72, Q108."
+Do NOT store: probability-capping rules, generic advice, easily searchable facts.
+Aim to keep memory under 2000 chars. Drop resolved-question reasoning but keep transferable insights.
+**Always keep at least 3 entries.** Insights compound over time — never let memory go empty.
 
-Do NOT store: general forecasting advice (already in your instructions), easily searchable facts, prediction outcomes without reasoning, or vague tracking lists without reasoning.
-Aim to keep memory under 2000 characters. Prioritize recent and high-impact items and drop stale entries about resolved questions you have already learned from.
-
-To update memory, include it after your reasoning:
 <reasoning>
-Reflect on today's forecasting session...
+What evidence and insights should you preserve?
 </reasoning>
 <memory>
-Your updated memory content here (complete replacement, not a diff)
+Your updated memory content here (complete replacement)
 </memory>
 
-If you don't want to update memory, just output <reasoning>...</reasoning> without <memory> tags.
 Current memory length: {len(self._memory)} characters"""
 
     def _apply_structured_memory_ops(self, response: str) -> None:

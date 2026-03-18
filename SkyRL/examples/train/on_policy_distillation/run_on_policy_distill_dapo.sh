@@ -1,8 +1,8 @@
 set -x
 
-# On-policy distillation for Math on the DAPO math dataset, with eval on AIME 2024.
-# Uses Qwen3-0.6B as the student model and Qwen3-4B as the teacher model.
-# bash examples/train/on_policy_distillation/run_on_policy_distill_math_qwen3_0.6b_from_4b.sh
+# On-policy distillation for GSM8K.
+# Uses Qwen2.5-1.5B-Instruct as the student and Qwen2.5-3B-Instruct as the teacher.
+# bash examples/train/on_policy_distillation/run_on_policy_distill_gsm8k_qwen2.5_1.5b_from_3b.sh
 
 DATA_DIR="/fast/nchandak/forecast-sim/data/dapo"
 TRAIN_FILE="$DATA_DIR/dapo-math-17k-cleaned.parquet"
@@ -10,12 +10,15 @@ TEST_FILE="$DATA_DIR/aime-2024-cleaned.parquet"
 LOGGER=wandb
 
 # On Policy Distillation args
-TEACHER_MODEL="/fast/nchandak/models/Qwen3-4B"
-STUDENT_MODEL="/fast/nchandak/models/Qwen3-0.6B"
+TEACHER_MODEL="/fast/nchandak/models/Qwen3-4B-Instruct-2507"
+STUDENT_MODEL="/fast/rolmedo/models/qwen2.5-3b-it"
 ADVANTAGE_ESTIMATOR="no_op"
 POLICY_LOSS="importance_sampling"
 USE_KL_IN_REWARD=true
 USE_KL_LOSS=false
+
+TEACHER_MODEL_NAME="Qwen3-4B-Ins"
+STUDENT_MODEL_NAME="Qwen2.5-3B-Ins"
 
 # Placement args (override with e.g. NUM_GPUS=4 bash ...)
 NUM_GPUS=8
@@ -28,13 +31,18 @@ TEMPERATURE=1.0
 TOP_P=1.0
 EVAL_TOP_P=0.7
 
-# repro run parameters
+# training parameters
 TRAIN_BATCH_SIZE=256
 MINI_BATCH_SIZE=32
 N_SAMPLES_PER_PROMPT=8
 EVAL_N_SAMPLES_PER_PROMPT=16
 ENFORCE_EAGER=true
 LR=1e-5
+
+
+PROJECT_NAME="aime_on_policy_distillation"
+RUN_NAME="opd_${STUDENT_MODEL_NAME}_from_${TEACHER_MODEL_NAME}_bs${TRAIN_BATCH_SIZE}_lr${LR}"
+CKPT_PATH="/lustre/scratch/nchandak/forecast-sim/skyrl/${PROJECT_NAME}/${RUN_NAME}"
 
 uv run --isolated --extra fsdp -m examples.train.on_policy_distillation.main_on_policy_distill \
   data.train_data="['$TRAIN_FILE']" \
@@ -49,7 +57,7 @@ uv run --isolated --extra fsdp -m examples.train.on_policy_distillation.main_on_
   trainer.placement.ref_num_gpus_per_node=$NUM_GPUS_PER_NODE \
   generator.inference_engine.num_engines=$NUM_INFERENCE_ENGINES \
   generator.inference_engine.tensor_parallel_size=$INFERENCE_ENGINE_TP_SIZE \
-  trainer.epochs=10 \
+  trainer.epochs=20 \
   trainer.eval_batch_size=1024 \
   trainer.eval_before_train=true \
   trainer.eval_interval=5 \
@@ -81,12 +89,12 @@ uv run --isolated --extra fsdp -m examples.train.on_policy_distillation.main_on_
   generator.n_samples_per_prompt=$N_SAMPLES_PER_PROMPT \
   generator.inference_engine.gpu_memory_utilization=0.8 \
   trainer.logger="$LOGGER" \
-  trainer.project_name="aime_on_policy_distillation" \
-  trainer.run_name="on_policy_distillation_aime_qwen3_0.6b_from_4b_bs56" \
+  trainer.project_name="$PROJECT_NAME" \
+  trainer.run_name="$RUN_NAME" \
   trainer.resume_mode=latest \
-  trainer.export_path="$HOME/exports/aime_on_policy_distill_0.6b_from_4b_bs56" \
+  trainer.export_path="lustre/scratch/nchandak/forecast-sim/skyrl/${PROJECT_NAME}/exports/$RUN_NAME" \
   trainer.hf_save_interval=50 \
   trainer.max_ckpts_to_keep=3 \
   trainer.ckpt_interval=50 \
-  trainer.ckpt_path="$HOME/ckpts/aime_on_policy_distill_0.6b_from_4b_bs56" \
+  trainer.ckpt_path="$CKPT_PATH" \
   $@
