@@ -154,6 +154,7 @@ class AllQAgent(BasicAgent):
                         ) from e
             
         self.warmed_up = True
+        forecast_interface.flush_warmup_raw_logs()
 
         # Active memory: seed memo_df from per-question warmup conversations.
         from agents.utils.memory import ActiveMemory
@@ -309,6 +310,7 @@ Output exactly one <memo_add> block. No other text needed."""
         """
         budget = self._create_budget_tracker(warmup=True)
         budget.bootstrap_context(messages)
+        raw_stream = "warmup"
         final_submit_prompt_injected = False
         final_submit_retry_used = False
         empty_retries = 0
@@ -343,7 +345,7 @@ Output exactly one <memo_add> block. No other text needed."""
                 print(f"  [{self.agent_id}] Empty response in warmup after {max_empty_retries} retries, skipping Q.")
                 self._log_action(
                     forecast_interface, messages, response or "", "warmup_empty_skip",
-                    budget, qid=target_qid,
+                    budget, qid=target_qid, raw_stream=raw_stream,
                 )
                 break
                 
@@ -373,6 +375,7 @@ Output exactly one <memo_add> block. No other text needed."""
                         qid=target_qid,
                         error=err,
                         reasoning=reasoning,
+                        raw_stream=raw_stream,
                     )
                     feedback = (
                         "Format error: In singleans mode you must output:\n"
@@ -430,7 +433,7 @@ Output exactly one <memo_add> block. No other text needed."""
                 # In warmup, 'next' isn't really appropriate as we want them to submit.
                 # But if they insist on skipping, we break.
                 self._log_action(forecast_interface, messages, response, "warmup_skip", 
-                               budget, qid=target_qid, reasoning=reasoning)
+                               budget, qid=target_qid, reasoning=reasoning, raw_stream=raw_stream)
                 print(f"  [{self.agent_id}] Agent chose 'next' (skipping submission).")
                 break
             
@@ -438,7 +441,7 @@ Output exactly one <memo_add> block. No other text needed."""
                 # Queries are disabled in warmup (no DataFrame access)
                 budget.consume_action()
                 self._log_action(forecast_interface, messages, response, "warmup_query_disabled",
-                               budget, qid=target_qid, reasoning=reasoning)
+                               budget, qid=target_qid, reasoning=reasoning, raw_stream=raw_stream)
                 feedback = "Error: Database queries are not available in this per-question focused mode. Please use search or submit your forecast."
                 self._append_with_budget(
                     messages,
@@ -449,7 +452,7 @@ Output exactly one <memo_add> block. No other text needed."""
             elif parsed.action_type == "search":
                 self._handle_search(
                     messages, forecast_interface, response, parsed, budget, 
-                    qid=target_qid, reasoning=reasoning
+                    qid=target_qid, reasoning=reasoning, raw_stream=raw_stream
                 )
             
             elif parsed.action_type == "submit":
@@ -465,7 +468,7 @@ Output exactly one <memo_add> block. No other text needed."""
                 if valid_forecasts:
                     submitted = self._handle_submit(
                         messages, forecast_interface, response, parsed, budget, 
-                        qid=target_qid, reasoning=reasoning
+                        qid=target_qid, reasoning=reasoning, raw_stream=raw_stream
                     )
                     # End interaction immediately after successful submission.
                     if submitted:
@@ -475,7 +478,7 @@ Output exactly one <memo_add> block. No other text needed."""
                     # If no valid forecasts, warn agent
                     budget.consume_action()
                     self._log_action(forecast_interface, messages, response, "warmup_submit_wrong_qid",
-                                   budget, qid=target_qid, reasoning=reasoning)
+                                   budget, qid=target_qid, reasoning=reasoning, raw_stream=raw_stream)
                     feedback = f"Error: You must submit a forecast for question {target_qid}. You submitted for different IDs or none."
                     self._append_with_budget(
                         messages,
@@ -486,7 +489,7 @@ Output exactly one <memo_add> block. No other text needed."""
             else:
                 self._handle_invalid(
                     messages, forecast_interface, response, parsed, budget, 
-                    qid=target_qid, reasoning=reasoning
+                    qid=target_qid, reasoning=reasoning, raw_stream=raw_stream
                 )
 
     @staticmethod

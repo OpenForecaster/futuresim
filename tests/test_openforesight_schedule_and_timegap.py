@@ -2,6 +2,7 @@ from collections import Counter
 from datetime import date
 
 import pandas as pd
+import pytest
 
 from agents.basicAgent import AgentConfig, BasicAgent
 from environment.data_loader import Question, QuestionPool
@@ -268,4 +269,76 @@ def test_metrics_builder_can_filter_to_test_split():
         "accuracy": 100.0,
         "exp_acc": 0.8,
         "total_predictions": 1,
+        "daily_submissions": 0,
+        "avg_submission_tv_to_prev": 0.0,
     }]
+
+
+def test_build_metrics_list_includes_daily_submission_stats_and_split_filtering():
+    class DummyAgent:
+        def __init__(self, agent_id: str):
+            self.agent_id = agent_id
+
+    train_q = Question(
+        qid="train_q",
+        title="Train question",
+        background="",
+        resolution_criteria="",
+        answer_type="yes/no",
+        resolution_date=date(2025, 1, 20),
+        ground_truth_answer="Yes",
+        source_split="train",
+    )
+    test_q = Question(
+        qid="test_q",
+        title="Test question",
+        background="",
+        resolution_criteria="",
+        answer_type="yes/no",
+        resolution_date=date(2025, 1, 20),
+        ground_truth_answer="Yes",
+        source_split="test",
+    )
+
+    env = SimulationEnvironment.__new__(SimulationEnvironment)
+    env.current_date = date(2025, 1, 6)
+    env.end_date = date(2025, 1, 31)
+    env.timegap_days = 1
+    env.start_date = date(2025, 1, 1)
+    env.matcher = None
+    env.scorer = DEFAULT_SCORER
+    env.agents = [DummyAgent("agent_a")]
+    env.resolution_events = []
+    env.prediction_histories = {
+        "train_q": PredictionHistory(
+            question_id="train_q",
+            start_date=date(2025, 1, 1),
+            resolution_date=date(2025, 1, 20),
+            predictions={
+                "agent_a": [
+                    DailyPrediction("agent_a", "train_q", date(2025, 1, 5), {"Yes": 0.6, "No": 0.4}),
+                    DailyPrediction("agent_a", "train_q", date(2025, 1, 6), {"Yes": 0.7, "No": 0.3}),
+                ]
+            },
+        ),
+        "test_q": PredictionHistory(
+            question_id="test_q",
+            start_date=date(2025, 1, 1),
+            resolution_date=date(2025, 1, 20),
+            predictions={
+                "agent_a": [
+                    DailyPrediction("agent_a", "test_q", date(2025, 1, 4), {"Yes": 0.2, "No": 0.8}),
+                    DailyPrediction("agent_a", "test_q", date(2025, 1, 6), {"Yes": 0.9, "No": 0.1}),
+                    DailyPrediction("agent_a", "test_q", date(2025, 1, 6), {"Yes": 0.8, "No": 0.2}),
+                ]
+            },
+        ),
+    }
+
+    all_metrics = env._build_metrics_list(active_questions=[train_q, test_q])
+    assert all_metrics[0]["daily_submissions"] == 3
+    assert all_metrics[0]["avg_submission_tv_to_prev"] == pytest.approx(0.3)
+
+    test_metrics = env._build_metrics_list(active_questions=[train_q, test_q], source_split="test")
+    assert test_metrics[0]["daily_submissions"] == 2
+    assert test_metrics[0]["avg_submission_tv_to_prev"] == pytest.approx(0.4)

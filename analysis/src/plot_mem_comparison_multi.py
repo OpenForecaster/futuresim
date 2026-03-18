@@ -14,12 +14,16 @@ except ImportError:
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Compare memory vs no-memory runs (multi-run avg + stddev).")
-    parser.add_argument("--mem_parent", type=str, required=True, help="Parent directory containing memory run subdirectories")
-    parser.add_argument("--nomem_parent", type=str, required=True, help="Parent directory containing no-memory run subdirectories")
+    parser.add_argument("--mem_parent", type=str, default=None, help="Parent directory containing memory run subdirectories")
+    parser.add_argument("--nomem_parent", type=str, default=None, help="Parent directory containing no-memory run subdirectories")
     parser.add_argument("--mem_child_glob", type=str, default="*",
                         help="Glob (under --mem_parent) selecting memory run dirs (e.g., '*_med_r0[0-2]_restart').")
     parser.add_argument("--nomem_child_glob", type=str, default="*",
                         help="Glob (under --nomem_parent) selecting no-memory run dirs.")
+    parser.add_argument("--mem_dirs", type=str, nargs="+", default=None,
+                        help="Explicit list of timestamped memory-run directories containing daily_metrics.csv")
+    parser.add_argument("--nomem_dirs", type=str, nargs="+", default=None,
+                        help="Explicit list of timestamped no-memory-run directories containing daily_metrics.csv")
     parser.add_argument("--output_dir", type=str, required=True, help="Directory to save plots")
     parser.add_argument("--mem_label", type=str, default="With Memory", help="Label for memory runs")
     parser.add_argument("--nomem_label", type=str, default="Without Memory", help="Label for no-memory runs")
@@ -41,6 +45,24 @@ def _latest_csv_in_dir(run_dir):
         return None
     ts_csvs.sort(key=lambda p: os.path.getmtime(p))
     return ts_csvs[-1]
+
+
+def _discover_explicit_run_csvs(run_dirs):
+    """Resolve explicitly provided timestamped run directories to daily_metrics.csv files."""
+    discovered = []
+    for run_dir in run_dirs:
+        run_dir = os.path.abspath(run_dir)
+        if not os.path.isdir(run_dir):
+            print(f"Error: {run_dir} is not a directory.")
+            sys.exit(1)
+        csv_path = os.path.join(run_dir, "daily_metrics.csv")
+        if not os.path.isfile(csv_path):
+            print(f"Error: {run_dir} does not contain daily_metrics.csv")
+            sys.exit(1)
+        parent = os.path.basename(os.path.dirname(run_dir))
+        run_name = f"{parent}/{os.path.basename(run_dir)}"
+        discovered.append((run_name, csv_path))
+    return discovered
 
 
 def _discover_run_csvs(parent_dir, child_glob="*"):
@@ -77,12 +99,21 @@ def _discover_run_csvs(parent_dir, child_glob="*"):
     return discovered
 
 
-def load_all_runs(parent_dir, expected_runs=None, child_glob="*"):
-    """Load per-run daily_metrics.csv discovered under parent_dir."""
+def load_all_runs(parent_dir=None, expected_runs=None, child_glob="*", run_dirs=None):
+    """Load per-run daily_metrics.csv from either discovered run dirs or explicit timestamp dirs."""
     dfs = []
-    discovered = _discover_run_csvs(parent_dir, child_glob=child_glob)
+    if run_dirs is not None:
+        discovered = _discover_explicit_run_csvs(run_dirs)
+        source_label = "explicit run directories"
+    else:
+        discovered = _discover_run_csvs(parent_dir, child_glob=child_glob)
+        source_label = parent_dir
     for run_name, csv_path in discovered:
-        df = pd.read_csv(csv_path)
+        try:
+            df = pd.read_csv(csv_path)
+        except pd.errors.EmptyDataError:
+            print(f"  Warning: skipping unreadable empty daily_metrics.csv for {run_name}: {csv_path}")
+            continue
         if df.empty:
             print(f"  Warning: skipping empty daily_metrics.csv for {run_name}: {csv_path}")
             continue
@@ -91,14 +122,14 @@ def load_all_runs(parent_dir, expected_runs=None, child_glob="*"):
         dfs.append(df)
 
     if not dfs:
-        print(f"Error: No daily_metrics.csv found under {parent_dir}")
+        print(f"Error: No usable daily_metrics.csv found under {source_label}")
         sys.exit(1)
 
-    print(f"  Loaded {len(dfs)} runs from {parent_dir}")
+    print(f"  Loaded {len(dfs)} runs from {source_label}")
     for df in dfs:
         print(f"    {df['run'].iloc[0]}: {len(df)} days ({df['date'].min().date()} to {df['date'].max().date()})")
     if expected_runs is not None and len(dfs) != expected_runs:
-        print(f"  Warning: expected {expected_runs} runs, found {len(dfs)} in {parent_dir}")
+        print(f"  Warning: expected {expected_runs} runs, found {len(dfs)} in {source_label}")
 
     return dfs
 
@@ -121,17 +152,29 @@ def main():
     args = parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
 
+    using_explicit = args.mem_dirs is not None or args.nomem_dirs is not None
+    if using_explicit:
+        if args.mem_dirs is None or args.nomem_dirs is None:
+            print("Error: --mem_dirs and --nomem_dirs must be provided together.")
+            sys.exit(1)
+    else:
+        if args.mem_parent is None or args.nomem_parent is None:
+            print("Error: either provide both --mem_parent/--nomem_parent or both --mem_dirs/--nomem_dirs.")
+            sys.exit(1)
+
     print("Loading memory runs...")
     mem_dfs = load_all_runs(
         args.mem_parent,
         expected_runs=args.expected_runs,
         child_glob=args.mem_child_glob,
+        run_dirs=args.mem_dirs,
     )
     print("Loading no-memory runs...")
     nomem_dfs = load_all_runs(
         args.nomem_parent,
         expected_runs=args.expected_runs,
         child_glob=args.nomem_child_glob,
+        run_dirs=args.nomem_dirs,
     )
 
     metrics = [

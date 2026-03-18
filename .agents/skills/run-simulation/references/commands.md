@@ -72,9 +72,11 @@ python mpi_scripts/run_sim/submit_sim.py \
 - Common artifacts:
   - `config.json`
   - `actions.jsonl`
-  - `daily_metrics.csv` (one cumulative row per wakeup session)
+  - `daily_metrics.csv` (one cumulative row per wakeup session, including daily submission count and avg TV shift vs prior submission)
   - `test_daily_metrics.csv` (same metrics, test questions only)
   - `agents/<agent_id>/model_outputs.jsonl`
+  - `agents/<agent_id>/model_raw_warmup.jsonl`
+  - `agents/<agent_id>/model_raw_daily.jsonl`
   - `agents/<agent_id>/memory/`
 
 ## OpenForesight Session And Split Knobs

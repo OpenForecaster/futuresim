@@ -16,7 +16,10 @@ from .scoring import (
 from .ansmatching import AnswerMatcher
 
 
-DAILY_METRICS_HEADER = "date,agent_id,avg_brier,peer_score,tw_peer_score,accuracy,exp_acc,total_predictions\n"
+DAILY_METRICS_HEADER = (
+    "date,agent_id,avg_brier,peer_score,tw_peer_score,accuracy,exp_acc,"
+    "total_predictions,daily_submissions,avg_submission_tv_to_prev\n"
+)
 
 
 class SimLogger:
@@ -53,19 +56,42 @@ class SimLogger:
         self.agents_dir = os.path.join(output_dir, "agents")
         self.append = append
         self._agent_files: Dict[str, Any] = {}
+        self._warmup_raw_buffers: Dict[str, List[Tuple[str, int, Dict[str, Any]]]] = {}
+        self._warmup_raw_seq = 0
         self._agent_files_lock = Lock()
         
     def _get_agent_output_files(self, agent_id: str):
-        """Get or create the output files for an agent (thread-safe). Returns (output_file, raw_file)."""
+        """Get or create the output files for an agent (thread-safe)."""
         with self._agent_files_lock:
             if agent_id not in self._agent_files:
                 agent_dir = os.path.join(self.agents_dir, agent_id)
                 os.makedirs(agent_dir, exist_ok=True)
                 out_path = os.path.join(agent_dir, "model_outputs.jsonl")
-                raw_path = os.path.join(agent_dir, "model_raw.jsonl")
+                raw_daily_path = os.path.join(agent_dir, "model_raw_daily.jsonl")
+                raw_warmup_path = os.path.join(agent_dir, "model_raw_warmup.jsonl")
                 mode = "a" if self.append else "w"
-                self._agent_files[agent_id] = (open(out_path, mode), open(raw_path, mode))
+                self._agent_files[agent_id] = (
+                    open(out_path, mode),
+                    open(raw_daily_path, mode),
+                    open(raw_warmup_path, mode),
+                )
             return self._agent_files[agent_id]
+
+    @staticmethod
+    def _render_prompt_text(prompt: Any) -> str:
+        if prompt is None:
+            return ""
+        if isinstance(prompt, str):
+            return prompt
+        if isinstance(prompt, list):
+            parts = [SimLogger._render_prompt_text(item) for item in prompt]
+            return "\n\n".join(part for part in parts if part)
+        if isinstance(prompt, dict):
+            if isinstance(prompt.get("content"), str) and prompt.get("content").strip():
+                return prompt["content"]
+            if isinstance(prompt.get("output"), str) and prompt.get("output").strip():
+                return prompt["output"]
+        return json.dumps(prompt, ensure_ascii=False)
         
     def log_prediction(self, sim_date: date, agent_id: str, 
                        question_id: str, outcomes: Dict[str, float]):
@@ -106,7 +132,12 @@ class SimLogger:
 
     def _write_metrics_rows(self, file_obj, sim_date: date, metrics_list: List[Dict[str, Any]]) -> None:
         for m in metrics_list:
-            row = f"{sim_date},{m['agent_id']},{m['avg_brier']:.4f},{m['peer_score']:.4f},{m['tw_peer_score']:.4f},{m['accuracy']:.2f},{m['exp_acc']:.4f},{m['total_predictions']}\n"
+            row = (
+                f"{sim_date},{m['agent_id']},{m['avg_brier']:.4f},{m['peer_score']:.4f},"
+                f"{m['tw_peer_score']:.4f},{m['accuracy']:.2f},{m['exp_acc']:.4f},"
+                f"{m['total_predictions']},{m['daily_submissions']},"
+                f"{m['avg_submission_tv_to_prev']:.4f}\n"
+            )
             file_obj.write(row)
 
     def log_daily_metrics(self, sim_date: date, metrics_list: List[Dict[str, Any]]):
@@ -119,20 +150,25 @@ class SimLogger:
             self._write_metrics_rows(self.test_metrics_file, sim_date, metrics_list)
             self.test_metrics_file.flush()
         
-    def log_model_output(self, sim_date: date, agent_id: str, prompt: str, 
+    def log_model_output(self, sim_date: date, agent_id: str, prompt: Any,
                          response: str, metadata: Optional[Dict[str, Any]] = None):
         """Log model output to per-agent files (thread-safe)."""
         metadata = metadata or {}
+        raw_stream = str(metadata.get("raw_stream", "daily") or "daily").strip().lower()
+        if raw_stream not in {"daily", "warmup"}:
+            raw_stream = "daily"
         
         # Extract qid from metadata if present
         qid = metadata.get("qid")
+        prompt_text = self._render_prompt_text(prompt)
         
-        # Raw record: includes input prompt and reasoning
+        # Raw record: incremental input delta + raw response.
         raw_record = {
             "sim_date": str(sim_date),
             "agent_id": agent_id,
             "qid": qid,
-            "prompt": prompt,
+            "prompt": prompt_text,
+            "input_delta": prompt,
             "response": response,
             "metadata": metadata
         }
@@ -153,13 +189,29 @@ class SimLogger:
             "metadata": clean_metadata
         }
         
-        out_file, raw_file = self._get_agent_output_files(agent_id)
+        out_file, raw_daily_file, raw_warmup_file = self._get_agent_output_files(agent_id)
         # Each agent file is only written by one thread, so no lock needed per-file
         out_file.write(json.dumps(clean_record) + "\n")
         out_file.flush()
-        
-        raw_file.write(json.dumps(raw_record) + "\n")
-        raw_file.flush()
+
+        if raw_stream == "warmup":
+            with self._agent_files_lock:
+                self._warmup_raw_seq += 1
+                qid_key = "" if qid is None else str(qid)
+                self._warmup_raw_buffers.setdefault(agent_id, []).append((qid_key, self._warmup_raw_seq, raw_record))
+        else:
+            raw_daily_file.write(json.dumps(raw_record) + "\n")
+            raw_daily_file.flush()
+
+    def flush_warmup_raw(self, agent_id: str) -> None:
+        with self._agent_files_lock:
+            buffered = self._warmup_raw_buffers.pop(agent_id, [])
+            if not buffered or agent_id not in self._agent_files:
+                return
+            _, _, raw_warmup_file = self._agent_files[agent_id]
+            for _, _, raw_record in sorted(buffered, key=lambda item: (item[0], item[1])):
+                raw_warmup_file.write(json.dumps(raw_record) + "\n")
+            raw_warmup_file.flush()
         
     def log_matcher(self, input_data: Any, output_data: Any, metadata: Optional[Dict] = None):
         """Log matcher decisions."""
@@ -179,9 +231,17 @@ class SimLogger:
         self.test_metrics_file.close()
         self.matcher_file.close()
         with self._agent_files_lock:
-            for f_out, f_raw in self._agent_files.values():
+            for agent_id in list(self._warmup_raw_buffers.keys()):
+                buffered = self._warmup_raw_buffers.pop(agent_id, [])
+                if agent_id in self._agent_files:
+                    _, _, raw_warmup_file = self._agent_files[agent_id]
+                    for _, _, raw_record in sorted(buffered, key=lambda item: (item[0], item[1])):
+                        raw_warmup_file.write(json.dumps(raw_record) + "\n")
+                    raw_warmup_file.flush()
+            for f_out, f_raw_daily, f_raw_warmup in self._agent_files.values():
                 f_out.close()
-                f_raw.close()
+                f_raw_daily.close()
+                f_raw_warmup.close()
             self._agent_files.clear()
 
 
@@ -1047,6 +1107,13 @@ class SimulationEnvironment:
                 entry["count"] += 1.0
         return stats
 
+    @staticmethod
+    def _tv_distance(left: Optional[Dict[str, float]], right: Optional[Dict[str, float]]) -> float:
+        outcomes = set((left or {}).keys()) | set((right or {}).keys())
+        if not outcomes:
+            return 0.0
+        return 0.5 * sum(abs(float((left or {}).get(outcome, 0.0)) - float((right or {}).get(outcome, 0.0))) for outcome in outcomes)
+
     def _build_metrics_list(
         self,
         *,
@@ -1062,6 +1129,23 @@ class SimulationEnvironment:
             evaluation_date=self._get_metrics_evaluation_date(),
         )
         resolved_stats = self._compute_resolved_metrics_from_events(source_split=source_split)
+        daily_submission_stats: Dict[str, Dict[str, float]] = {}
+        for q in filtered_active_questions:
+            history = self.prediction_histories.get(q.qid)
+            if not history:
+                continue
+            for aid, preds in history.predictions.items():
+                for idx, pred in enumerate(preds):
+                    if pred.day != self.current_date:
+                        continue
+                    entry = daily_submission_stats.setdefault(
+                        aid,
+                        {"count": 0.0, "tv_sum": 0.0, "tv_count": 0.0},
+                    )
+                    entry["count"] += 1.0
+                    if idx > 0:
+                        entry["tv_sum"] += self._tv_distance(pred.outcomes, preds[idx - 1].outcomes)
+                        entry["tv_count"] += 1.0
 
         metrics_list = []
         for agent in self.agents:
@@ -1082,6 +1166,11 @@ class SimulationEnvironment:
                 "truth_prob_sum": 0.0,
                 "count": 0.0,
             })
+            submission_stats = daily_submission_stats.get(aid, {
+                "count": 0.0,
+                "tv_sum": 0.0,
+                "tv_count": 0.0,
+            })
 
             total_brier_sum = resolved["raw_brier"] + agent_active["raw_brier"]
             total_peer_sum = resolved["peer_sum"] + agent_active["peer_sum"]
@@ -1093,6 +1182,11 @@ class SimulationEnvironment:
             avg_brier = total_brier_sum / total_count if total_count > 0 else 0.0
             accuracy = (total_correct / total_count * 100) if total_count > 0 else 0.0
             exp_acc = total_truth_prob / total_count if total_count > 0 else 0.0
+            avg_submission_tv = (
+                submission_stats["tv_sum"] / submission_stats["tv_count"]
+                if submission_stats["tv_count"] > 0
+                else 0.0
+            )
 
             metrics_list.append({
                 "agent_id": aid,
@@ -1102,6 +1196,8 @@ class SimulationEnvironment:
                 "accuracy": accuracy,
                 "exp_acc": exp_acc,
                 "total_predictions": int(total_count),
+                "daily_submissions": int(submission_stats["count"]),
+                "avg_submission_tv_to_prev": avg_submission_tv,
             })
         return metrics_list
 
@@ -1716,10 +1812,14 @@ class SimForecastInterface:
                         'date': pred.day
                     }
         return result
-    
-    def log_model_output(self, prompt: str, response: str, 
+
+    def log_model_output(self, prompt: Any, response: str,
                          metadata: Optional[Dict[str, Any]] = None):
         if self.current_agent_id:
             self.logger.log_model_output(
                 self.sim_date, self.current_agent_id, prompt, response, metadata
             )
+
+    def flush_warmup_raw_logs(self) -> None:
+        if self.current_agent_id:
+            self.logger.flush_warmup_raw(self.current_agent_id)

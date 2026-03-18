@@ -36,10 +36,11 @@ Agents work with a pandas DataFrame built from `market.csv`.
 
 - `market.csv`: market snapshot for the current wakeup session
 - `actions.jsonl`: central event log for predictions and resolutions
-- `daily_metrics.csv`: cumulative metrics by agent, one row per wakeup session
+- `daily_metrics.csv`: cumulative metrics by agent, one row per wakeup session, plus submission-count / submission-shift columns for that session
 - `test_daily_metrics.csv`: the same metrics restricted to questions with `source_split == "test"`
 - `agents/<agent_id>/model_outputs.jsonl`: cleaned model outputs
-- `agents/<agent_id>/model_raw.jsonl`: prompt + raw response log
+- `agents/<agent_id>/model_raw_warmup.jsonl`: warmup raw logs, sorted by qid and storing only per-turn input deltas
+- `agents/<agent_id>/model_raw_daily.jsonl`: post-warmup raw logs storing only per-turn input deltas
 
 ## Agent-Visible Cadence State
 

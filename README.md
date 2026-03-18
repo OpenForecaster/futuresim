@@ -111,8 +111,10 @@ python mpi_scripts/skyrl_search/submit_skyrl_search_train.py \
 Simulation results are saved to `FSIM_OUTPUT_BASE/<sim_name>/<timestamp>/`:
 - `config.json` — Run configuration
 - `actions.jsonl` — All predictions and resolutions
-- `daily_metrics.csv` — One cumulative metrics row per wakeup session
+- `daily_metrics.csv` — One cumulative metrics row per wakeup session, including daily submission count and average TV shift vs the previous submission
 - `test_daily_metrics.csv` — Same metrics, filtered to questions whose `source_split` is `test`
+- `agents/<agent_id>/model_raw_warmup.jsonl` — Warmup raw logs, grouped by question id and logging only per-turn input deltas
+- `agents/<agent_id>/model_raw_daily.jsonl` — Post-warmup raw logs, logging only per-turn input deltas
 - `agents/<agent_id>/` — Per-agent logs and memory
 
 ## OpenForesight Notes

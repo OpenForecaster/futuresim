@@ -233,6 +233,13 @@ def main():
     
     # Submission overrides / controls
     parser.add_argument("--runs", type=int, default=1, help="Number of runs (for variance)")
+    parser.add_argument(
+        "--run_ids",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Explicit run indices to submit (e.g. --run_ids 0 2). Overrides --runs.",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Generate config but do not submit job")
     
     parser.add_argument("--resume", help="Directory of a previous run to resume")
@@ -263,7 +270,8 @@ def main():
     base_config = expand_env_tree(base_config)
     raise_for_unresolved_env_vars(base_config, f"submit config {args.config}")
         
-    print(f"Submitting {args.runs} simulation job(s)...")
+    run_ids = args.run_ids if args.run_ids is not None else list(range(args.runs))
+    print(f"Submitting {len(run_ids)} simulation job(s)...")
     print(f"  Config: {args.config}")
     print(f"  Dataset: {base_config.get('dataset', 'unknown')}")
 
@@ -289,7 +297,7 @@ def main():
         print(f"  Requirements: {inferred_requirements}")
     
     cluster_ids = []
-    for i in range(args.runs):
+    for i in run_ids:
         cluster_id = submit_sim_job(
             config=base_config,
             run_id=i,

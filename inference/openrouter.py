@@ -187,7 +187,7 @@ class OpenRouterInference:
                 "pass api_key parameter, or add to configs/openrouter_api_key.py"
             )
         
-        self.max_retries = max_retries
+        self.max_retries = min(3, max(0, int(max_retries)))
         self.base_delay = base_delay
         self.max_delay = max_delay
         self.enable_caching = enable_caching

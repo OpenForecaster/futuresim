@@ -413,7 +413,7 @@ class BasicAgent(BaseAgent):
     # Action Handlers
     # =========================================================================
     
-    def _handle_query(self, messages, forecast_interface, response, parsed, budget: BudgetTracker, qid: str = None, reasoning=None) -> None:
+    def _handle_query(self, messages, forecast_interface, response, parsed, budget: BudgetTracker, qid: str = None, reasoning=None, raw_stream: Optional[str] = None) -> None:
         """Handle query action."""
         budget.consume_action()
         
@@ -423,24 +423,24 @@ class BasicAgent(BaseAgent):
                 extra_ctx = {"memo_df": self._memory.get_memo_df()}
             with self._timer.track("df_query"):
                 result, error = self._query_handler.execute(parsed.code, extra_context=extra_ctx)
-            self._log_action(forecast_interface, messages, response, "query", budget, qid=qid, reasoning=reasoning)
+            self._log_action(forecast_interface, messages, response, "query", budget, qid=qid, reasoning=reasoning, raw_stream=raw_stream)
             
             if error:
                 feedback = f"QUERY ERROR: {error}"
             else:
                 feedback = f"QUERY RESULT:\n{result}"
         else:
-            self._log_action(forecast_interface, messages, response, "query_error", budget, qid=qid, error=parsed.error, reasoning=reasoning)
+            self._log_action(forecast_interface, messages, response, "query_error", budget, qid=qid, error=parsed.error, reasoning=reasoning, raw_stream=raw_stream)
             feedback = f"ERROR: {parsed.error}"
         
         self._append_with_budget(messages, budget, {"role": "user", "content": budget.format_feedback(feedback)})
     
-    def _handle_search(self, messages, forecast_interface, response, parsed, budget: BudgetTracker, qid: str = None, reasoning=None) -> None:
+    def _handle_search(self, messages, forecast_interface, response, parsed, budget: BudgetTracker, qid: str = None, reasoning=None, raw_stream: Optional[str] = None) -> None:
         """Handle search action. Returns full chunk content directly."""
         budget.consume_action()
         
         if not self._search_handler.is_available:
-            self._log_action(forecast_interface, messages, response, "search_unavailable", budget, qid=qid, reasoning=reasoning)
+            self._log_action(forecast_interface, messages, response, "search_unavailable", budget, qid=qid, reasoning=reasoning, raw_stream=raw_stream)
             feedback = "SEARCH ERROR: Search is not available."
         elif parsed.query:
             # Parse date range if provided
@@ -466,19 +466,19 @@ class BasicAgent(BaseAgent):
                     min_date=min_date,
                     max_date=max_date,
                 )
-            self._log_action(forecast_interface, messages, response, "search", budget, qid=qid, reasoning=reasoning)
+            self._log_action(forecast_interface, messages, response, "search", budget, qid=qid, reasoning=reasoning, raw_stream=raw_stream)
             
             if error:
                 feedback = f"SEARCH ERROR: {error}"
             else:
                 feedback = f"SEARCH RESULTS:\n{result}"
         else:
-            self._log_action(forecast_interface, messages, response, "search_error", budget, qid=qid, error=parsed.error, reasoning=reasoning)
+            self._log_action(forecast_interface, messages, response, "search_error", budget, qid=qid, error=parsed.error, reasoning=reasoning, raw_stream=raw_stream)
             feedback = "SEARCH ERROR: No query provided."
         
         self._append_with_budget(messages, budget, {"role": "user", "content": budget.format_feedback(feedback)})
     
-    def _handle_submit(self, messages, forecast_interface, response, parsed, budget: BudgetTracker, qid: str = None, reasoning=None) -> List:
+    def _handle_submit(self, messages, forecast_interface, response, parsed, budget: BudgetTracker, qid: str = None, reasoning=None, raw_stream: Optional[str] = None) -> List:
         """Handle submit action. Returns list of submitted forecasts."""
         submitted = []
         budget.consume_action()
@@ -514,7 +514,7 @@ class BasicAgent(BaseAgent):
             if hasattr(self, '_day_qids'):
                 self._day_qids.update(str(q) for q in submitted_qids)
             self._log_action(forecast_interface, messages, response, "submit", budget, qid=log_qid, submitted_qids=submitted_qids,
-                           num_forecasts=len(submitted), dropped_forecasts=dropped_forecasts, reasoning=reasoning)
+                           num_forecasts=len(submitted), dropped_forecasts=dropped_forecasts, reasoning=reasoning, raw_stream=raw_stream)
             if submitted:
                 sub = submitted[0]
                 outcomes_str = ", ".join(f"{k}: {v:.2f}" for k, v in sub['outcomes'].items())
@@ -527,16 +527,16 @@ class BasicAgent(BaseAgent):
                 feedback = "SUBMIT ERROR: No valid forecast submitted."
         else:
             # Parse error - still consumed action
-            self._log_action(forecast_interface, messages, response, "submit_error", budget, qid=log_qid, error=parsed.error, reasoning=reasoning)
+            self._log_action(forecast_interface, messages, response, "submit_error", budget, qid=log_qid, error=parsed.error, reasoning=reasoning, raw_stream=raw_stream)
             feedback = f"SUBMIT ERROR: {parsed.error}"
         
         self._append_with_budget(messages, budget, {"role": "user", "content": budget.format_feedback(feedback)})
         return submitted
     
-    def _handle_invalid(self, messages, forecast_interface, response, parsed, budget: BudgetTracker, qid: str = None, reasoning=None) -> None:
+    def _handle_invalid(self, messages, forecast_interface, response, parsed, budget: BudgetTracker, qid: str = None, reasoning=None, raw_stream: Optional[str] = None) -> None:
         """Handle invalid/unknown action."""
         budget.consume_action()
-        self._log_action(forecast_interface, messages, response, "invalid", budget, qid=qid, error=parsed.error, reasoning=reasoning)
+        self._log_action(forecast_interface, messages, response, "invalid", budget, qid=qid, error=parsed.error, reasoning=reasoning, raw_stream=raw_stream)
         
         error_msg = parsed.error or 'Use <action type="...">...</action> format.'
         feedback = f"No valid action found. {error_msg}"

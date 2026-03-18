@@ -1,9 +1,6 @@
 from __future__ import annotations
 
 import json
-import hashlib
-import random
-import time
 from datetime import date
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -241,18 +238,19 @@ class GPTOSSBasicAgent(BasicAgent):
         prompt_mode = self._get_gptoss_prompt_mode()
         reasoning_effort = str(getattr(self.config, "gptoss_reasoning_effort", "medium") or "medium").strip().lower()
         include_reasoning = bool(getattr(self.config, "gptoss_include_reasoning", True))
+        raw_stream = "warmup" if warmup_budget else "daily"
         final_submit_prompt_injected = False
         final_submit_retry_used = False
+        consecutive_llm_failures = 0
+        pending_input_delta: List[Any] = ([{"role": "developer", "content": instructions}] if instructions else []) + list(conversation)
 
         while not budget.is_exhausted():
             # Last-action guardrail for per-question runs: force a submit attempt.
             force_final_submit_turn = target_qid is not None and budget.should_force_submit()
             if force_final_submit_turn and not final_submit_prompt_injected:
-                self._append_with_budget(
-                    conversation,
-                    budget,
-                    {"role": "user", "content": self._build_final_submit_tool_instruction(target_qid, budget)},
-                )
+                message = {"role": "user", "content": self._build_final_submit_tool_instruction(target_qid, budget)}
+                self._append_with_budget(conversation, budget, message)
+                pending_input_delta.append(message)
                 final_submit_prompt_injected = True
 
             # Hard-enforce final submit in per-question loops by exposing only the
@@ -264,7 +262,8 @@ class GPTOSSBasicAgent(BasicAgent):
                 if submit_only:
                     effective_tools = submit_only
 
-            model_input_payload = self._build_model_input_for_logging(instructions=instructions, conversation=conversation)
+            model_input_delta = list(pending_input_delta)
+            pending_input_delta = []
             try:
                 with self._timer.track("llm"):
                     resp_json = self._call_responses_with_retries(
@@ -291,7 +290,8 @@ class GPTOSSBasicAgent(BasicAgent):
                         error=str(e),
                         final_submit_retry_used=final_submit_retry_used,
                         will_retry=will_retry,
-                        prompt_override=model_input_payload,
+                        raw_stream=raw_stream,
+                        prompt_override=model_input_delta,
                     )
                     if not final_submit_retry_used:
                         final_submit_retry_used = True
@@ -299,6 +299,7 @@ class GPTOSSBasicAgent(BasicAgent):
                     # Final turn retry already used: end this question attempt without submission.
                     break
                 budget.consume_action()
+                consecutive_llm_failures += 1
                 err_msg = f"LLM ERROR after retries: {e}"
                 self._log_harmony_action(
                     forecast_interface=forecast_interface,
@@ -311,18 +312,22 @@ class GPTOSSBasicAgent(BasicAgent):
                     reasoning_effort=reasoning_effort,
                     include_reasoning=include_reasoning,
                     error=str(e),
-                    prompt_override=model_input_payload,
+                    consecutive_llm_failures=consecutive_llm_failures,
+                    raw_stream=raw_stream,
+                    prompt_override=model_input_delta,
                 )
-                self._append_with_budget(
-                    conversation,
-                    budget,
-                    {
-                        "role": "user",
-                        "content": budget.format_feedback(err_msg),
-                    },
-                )
+                message = {"role": "user", "content": budget.format_feedback(err_msg)}
+                self._append_with_budget(conversation, budget, message)
+                pending_input_delta.append(message)
+                if consecutive_llm_failures >= 3:
+                    print(
+                        f"[{self.agent_id}] Stopping after {consecutive_llm_failures} consecutive LLM failures.",
+                        flush=True,
+                    )
+                    break
                 continue
 
+            consecutive_llm_failures = 0
             raw_tool_calls = extract_function_calls(resp_json)
             allowed_tool_names = {
                 t.get("name")
@@ -394,7 +399,8 @@ class GPTOSSBasicAgent(BasicAgent):
                     usage=usage,
                     final_submit_retry_used=final_submit_retry_used,
                     will_retry=will_retry,
-                    prompt_override=model_input_payload,
+                    raw_stream=raw_stream,
+                    prompt_override=model_input_delta,
                 )
                 if not final_submit_retry_used:
                     final_submit_retry_used = True
@@ -432,7 +438,8 @@ class GPTOSSBasicAgent(BasicAgent):
                 status=status,
                 incomplete_reason=incomplete_reason,
                 usage=usage,
-                prompt_override=model_input_payload,
+                raw_stream=raw_stream,
+                prompt_override=model_input_delta,
             )
 
             if parsed is None:
@@ -447,17 +454,16 @@ class GPTOSSBasicAgent(BasicAgent):
                     feedback = (
                         "No tool call detected. You MUST call exactly one tool each turn."
                     )
-                self._append_with_budget(
-                    conversation,
-                    budget,
-                    {"role": "user", "content": budget.format_feedback(feedback)},
-                )
+                message = {"role": "user", "content": budget.format_feedback(feedback)}
+                self._append_with_budget(conversation, budget, message)
+                pending_input_delta.append(message)
                 continue
 
             if parsed.action_type == "next":
                 break
 
             if parsed.action_type == "query":
+                before_len = len(conversation)
                 self._harmony_handle_query(
                     conversation=conversation,
                     forecast_interface=forecast_interface,
@@ -466,9 +472,11 @@ class GPTOSSBasicAgent(BasicAgent):
                     budget=budget,
                     qid=target_qid,
                 )
+                pending_input_delta.extend(conversation[before_len:])
                 continue
 
             if parsed.action_type == "search":
+                before_len = len(conversation)
                 self._harmony_handle_search(
                     conversation=conversation,
                     forecast_interface=forecast_interface,
@@ -477,9 +485,11 @@ class GPTOSSBasicAgent(BasicAgent):
                     budget=budget,
                     qid=target_qid,
                 )
+                pending_input_delta.extend(conversation[before_len:])
                 continue
 
             if parsed.action_type == "submit":
+                before_len = len(conversation)
                 submitted = self._harmony_handle_submit(
                     conversation=conversation,
                     forecast_interface=forecast_interface,
@@ -489,6 +499,7 @@ class GPTOSSBasicAgent(BasicAgent):
                     qid=target_qid,
                     target_qid=target_qid,
                 )
+                pending_input_delta.extend(conversation[before_len:])
                 all_forecasts.extend(submitted)
                 # In AllQ warmup, a submit should end the interaction for that question.
                 if target_qid is not None and submitted:
@@ -498,14 +509,9 @@ class GPTOSSBasicAgent(BasicAgent):
             # Invalid / unknown
             budget.consume_action()
             err = parsed.error or "Unknown action/tool."
-            self._append_with_budget(
-                conversation,
-                budget,
-                {
-                    "role": "user",
-                    "content": budget.format_feedback(f"Invalid action: {err}"),
-                },
-            )
+            message = {"role": "user", "content": budget.format_feedback(f"Invalid action: {err}")}
+            self._append_with_budget(conversation, budget, message)
+            pending_input_delta.append(message)
 
         return all_forecasts
 
@@ -569,38 +575,14 @@ class GPTOSSBasicAgent(BasicAgent):
         tools: List[Dict[str, Any]],
         sampling_params: Dict[str, Any],
     ) -> Dict[str, Any]:
-        max_retries = max(0, int(getattr(self.config, "gptoss_responses_max_retries", 3)))
-        base_backoff = max(0.0, float(getattr(self.config, "gptoss_retry_backoff_base_s", 1.0)))
-        max_backoff = max(base_backoff, float(getattr(self.config, "gptoss_retry_backoff_max_s", 16.0)))
-        attempts = max_retries + 1
-
-        last_error: Optional[Exception] = None
-        for attempt in range(attempts):
-            try:
-                return self._call_responses(
-                    instructions=instructions,
-                    conversation=conversation,
-                    tools=tools,
-                    sampling_params=sampling_params,
-                )
-            except Exception as e:
-                last_error = e
-                if self._is_fatal_inference_failure(e):
-                    raise
-                if attempt >= max_retries:
-                    break
-                delay = min(max_backoff, base_backoff * (2 ** attempt))
-                # Add light jitter to prevent synchronized retries.
-                delay += delay * 0.2 * random.random()
-                print(
-                    f"[{self.agent_id}] /v1/responses error (attempt {attempt + 1}/{attempts}): {e}. "
-                    f"Retrying in {delay:.1f}s...",
-                    flush=True,
-                )
-                time.sleep(delay)
-
-        assert last_error is not None
-        raise last_error
+        # VLLMInference already retries /v1/responses transport failures up to 3 times.
+        # Do not stack another retry loop on top of that.
+        return self._call_responses(
+            instructions=instructions,
+            conversation=conversation,
+            tools=tools,
+            sampling_params=sampling_params,
+        )
 
     @staticmethod
     def _render_turn_for_logging(assistant_text: str, tool_calls: List[Dict[str, Any]]) -> str:
@@ -641,30 +623,19 @@ class GPTOSSBasicAgent(BasicAgent):
         phase: str,
         budget: Optional[BudgetTracker] = None,
         qid: Optional[str] = None,
-        prompt_override: Optional[str] = None,
+        prompt_override: Any = None,
         **extra,
     ) -> None:
-        last_user = prompt_override if isinstance(prompt_override, str) else ""
-        if not last_user:
+        input_delta = prompt_override
+        if input_delta is None:
             for m in reversed(conversation):
                 if m.get("role") == "user":
-                    last_user = m.get("content") or ""
+                    input_delta = m
                     break
         metadata = {"phase": phase, "qid": qid, **extra}
         if budget is not None:
             metadata.update(budget.metadata())
-        forecast_interface.log_model_output(last_user, rendered_response, metadata)
-
-    @staticmethod
-    def _build_model_input_for_logging(*, instructions: str, conversation: List[Dict[str, Any]]) -> str:
-        """
-        Render the exact Responses request-side context for this turn.
-        """
-        payload = {
-            "instructions": instructions or "",
-            "input": _to_responses_input(conversation),
-        }
-        return json.dumps(payload, ensure_ascii=False)
+        forecast_interface.log_model_output(input_delta, rendered_response, metadata)
 
     @staticmethod
     def _extract_tool_name_candidates(raw_name: Any, allowed_tool_names: Set[str]) -> List[str]:
@@ -1060,7 +1031,7 @@ To update memory, call this tool exactly once:
 If you don't want to update memory, respond without calling any tool.
 Current memory length: {len(self._memory)} characters"""
         conversation.append({"role": "user", "content": memory_prompt})
-        model_input_payload = self._build_model_input_for_logging(instructions=instructions, conversation=conversation)
+        prompt_delta = [{"role": "user", "content": memory_prompt}]
 
         tools = build_memory_tools()
         try:
@@ -1079,7 +1050,8 @@ Current memory length: {len(self._memory)} characters"""
                 phase="memory_update_error",
                 current_memory_len=len(self._memory),
                 error=str(e),
-                prompt_override=model_input_payload,
+                raw_stream="daily",
+                prompt_override=prompt_delta,
             )
             print(f"[{self.agent_id}] Memory update skipped after retries: {e}", flush=True)
             return
@@ -1138,7 +1110,8 @@ Current memory length: {len(self._memory)} characters"""
             status=status,
             incomplete_reason=incomplete_reason,
             usage=usage,
-            prompt_override=model_input_payload,
+            raw_stream="daily",
+            prompt_override=prompt_delta,
         )
 
         # Apply update if present.
@@ -1224,6 +1197,7 @@ class GPTOSSAllQAgent(AllQAgent, GPTOSSBasicAgent):
                         ) from e
 
         self.warmed_up = True
+        forecast_interface.flush_warmup_raw_logs()
         self._timer.end_day()
         if self.config.memory_dir:
             self._timer.save_day_stats(self.config.memory_dir, current_date)

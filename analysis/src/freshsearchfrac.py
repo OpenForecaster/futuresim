@@ -2,7 +2,7 @@
 """
 Compute and plot the daily fraction of search results published after simulation day 0.
 
-Input logs are expected to be model_raw.jsonl files that contain prompts with:
+Input logs are expected to be model_raw*.jsonl files that contain prompt deltas with:
   SEARCH RESULTS:
   ...
   PUBLISHED: YYYY-MM-DD ...
@@ -49,8 +49,8 @@ def parse_args() -> argparse.Namespace:
         "--input-path",
         required=True,
         help=(
-            "Path to a run dir (containing agents/*/model_raw.jsonl), an agent dir "
-            "(containing model_raw.jsonl), or a model_raw.jsonl file."
+            "Path to a run dir (containing agents/*/model_raw*.jsonl), an agent dir "
+            "(containing model_raw*.jsonl), or a model_raw*.jsonl file."
         ),
     )
     parser.add_argument(
@@ -119,6 +119,10 @@ def extract_published_dates(prompt: str) -> List[date]:
     return out
 
 
+def _is_model_raw_file(path: Path) -> bool:
+    return path.name in {"model_raw.jsonl", "model_raw_daily.jsonl", "model_raw_warmup.jsonl"}
+
+
 def discover_model_raw_files(input_path: Path) -> List[Tuple[str, Path]]:
     """
     Return list of (agent_label, model_raw_path).
@@ -127,31 +131,35 @@ def discover_model_raw_files(input_path: Path) -> List[Tuple[str, Path]]:
     files: List[Tuple[str, Path]] = []
 
     if input_path.is_file():
-        if input_path.name != "model_raw.jsonl":
-            raise FileNotFoundError(f"Expected a model_raw.jsonl file, got: {input_path}")
+        if not _is_model_raw_file(input_path):
+            raise FileNotFoundError(f"Expected a model_raw*.jsonl file, got: {input_path}")
         files.append((input_path.parent.name, input_path))
         return files
 
     if not input_path.is_dir():
         raise FileNotFoundError(f"Input path does not exist: {input_path}")
 
-    direct = input_path / "model_raw.jsonl"
-    if direct.is_file():
-        files.append((input_path.name, direct))
+    direct_candidates = [input_path / name for name in ("model_raw.jsonl", "model_raw_daily.jsonl", "model_raw_warmup.jsonl")]
+    direct = [p for p in direct_candidates if p.is_file()]
+    if direct:
+        for p in direct:
+            files.append((input_path.name, p))
         return files
 
     agents_dir = input_path / "agents"
     if agents_dir.is_dir():
-        for p in sorted(agents_dir.glob("*/model_raw.jsonl")):
-            files.append((p.parent.name, p))
+        for p in sorted(agents_dir.glob("*/model_raw*.jsonl")):
+            if _is_model_raw_file(p):
+                files.append((p.parent.name, p))
         if files:
             return files
 
-    for p in sorted(input_path.rglob("model_raw.jsonl")):
-        files.append((p.parent.name, p))
+    for p in sorted(input_path.rglob("model_raw*.jsonl")):
+        if _is_model_raw_file(p):
+            files.append((p.parent.name, p))
 
     if not files:
-        raise FileNotFoundError(f"No model_raw.jsonl files found under: {input_path}")
+        raise FileNotFoundError(f"No model_raw*.jsonl files found under: {input_path}")
     return files
 
 
@@ -179,7 +187,7 @@ def sanitize_name(value: str) -> str:
 def infer_sim_name(input_path: Path, model_raw_files: Sequence[Tuple[str, Path]]) -> str:
     """
     Try to infer the simulation name.
-    For .../<sim_name>/<run_timestamp>/agents/<agent>/model_raw.jsonl, use <sim_name>.
+    For .../<sim_name>/<run_timestamp>/agents/<agent>/model_raw*.jsonl, use <sim_name>.
     """
     candidates: List[str] = []
     for _, p in model_raw_files:
@@ -434,7 +442,7 @@ def main() -> None:
     total_fresh = sum(int(r["results_after_day0"]) for r in rows)
     overall_frac = (total_fresh / total_results) if total_results > 0 else None
 
-    print(f"Analyzed {len(model_raw_files)} model_raw.jsonl file(s).")
+    print(f"Analyzed {len(model_raw_files)} model_raw*.jsonl file(s).")
     print(f"Day 0: {day0.isoformat()}")
     print(f"Days in logs: {len(rows)}")
     print(f"Days with >=1 parsed search result: {days_with_search_results}")

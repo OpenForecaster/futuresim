@@ -101,6 +101,7 @@ async def _async_openrouter_chat(
         "usage": {"include": True},
     }
 
+    max_retries = min(3, max(1, int(max_retries)))
     for attempt in range(max_retries):
         try:
             async with semaphore:

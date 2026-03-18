@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import json
-import random
-import time
 from datetime import date
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -124,20 +122,21 @@ class QwenBasicAgent(BasicAgent):
         )
         budget.bootstrap_context({"messages": messages, "tools": tools})
 
+        raw_stream = "warmup" if warmup_budget else "daily"
         final_submit_prompt_injected = False
         final_submit_retry_used = False
+        consecutive_llm_failures = 0
+        pending_input_delta: List[Any] = list(messages)
 
         while not budget.is_exhausted():
             force_final_submit_turn = target_qid is not None and budget.should_force_submit()
             if force_final_submit_turn and not final_submit_prompt_injected:
-                self._append_with_budget(
-                    messages,
-                    budget,
-                    {
-                        "role": "user",
-                        "content": self._build_final_submit_tool_instruction(target_qid, budget),
-                    },
-                )
+                message = {
+                    "role": "user",
+                    "content": self._build_final_submit_tool_instruction(target_qid, budget),
+                }
+                self._append_with_budget(messages, budget, message)
+                pending_input_delta.append(message)
                 final_submit_prompt_injected = True
 
             effective_tools = tools
@@ -145,7 +144,8 @@ class QwenBasicAgent(BasicAgent):
                 submit_only = [t for t in tools if t.get("function", {}).get("name") == "submit_forecasts"]
                 if submit_only:
                     effective_tools = submit_only
-            model_input_payload = self._build_model_input_for_logging(messages=messages, tools=effective_tools)
+            model_input_delta = list(pending_input_delta)
+            pending_input_delta = []
 
             try:
                 with self._timer.track("llm"):
@@ -167,7 +167,8 @@ class QwenBasicAgent(BasicAgent):
                         budget=budget,
                         qid=target_qid,
                         error=str(e),
-                        prompt_override=model_input_payload,
+                        raw_stream=raw_stream,
+                        prompt_override=model_input_delta,
                     )
                     if target_qid is None:
                         print(
@@ -190,6 +191,7 @@ class QwenBasicAgent(BasicAgent):
                     break
 
                 budget.consume_action()
+                consecutive_llm_failures += 1
                 err_msg = f"LLM ERROR after retries: {e}"
                 self._log_qwen_action(
                     forecast_interface=forecast_interface,
@@ -199,18 +201,22 @@ class QwenBasicAgent(BasicAgent):
                     budget=budget,
                     qid=target_qid,
                     error=str(e),
-                    prompt_override=model_input_payload,
+                    consecutive_llm_failures=consecutive_llm_failures,
+                    raw_stream=raw_stream,
+                    prompt_override=model_input_delta,
                 )
-                self._append_with_budget(
-                    messages,
-                    budget,
-                    {
-                        "role": "user",
-                        "content": budget.format_feedback(err_msg),
-                    },
-                )
+                message = {"role": "user", "content": budget.format_feedback(err_msg)}
+                self._append_with_budget(messages, budget, message)
+                pending_input_delta.append(message)
+                if consecutive_llm_failures >= 3:
+                    print(
+                        f"[{self.agent_id}] Stopping after {consecutive_llm_failures} consecutive LLM failures.",
+                        flush=True,
+                    )
+                    break
                 continue
 
+            consecutive_llm_failures = 0
             usage = self._normalize_chat_usage(resp_json)
             self._timer.record_tokens(usage)
             budget.record_usage(usage)
@@ -250,41 +256,47 @@ class QwenBasicAgent(BasicAgent):
                 finish_reason=finish_reason,
                 usage=usage,
                 reasoning_tokens=reasoning_tokens_turn,
-                prompt_override=model_input_payload,
+                raw_stream=raw_stream,
+                prompt_override=model_input_delta,
             )
 
             if parsed is None:
                 budget.consume_action()
-                feedback = "No tool call detected. You MUST call exactly one tool each turn."
-                self._append_with_budget(
-                    messages,
-                    budget,
-                    {"role": "user", "content": budget.format_feedback(feedback)},
-                )
+                message = {
+                    "role": "user",
+                    "content": budget.format_feedback("No tool call detected. You MUST call exactly one tool each turn."),
+                }
+                self._append_with_budget(messages, budget, message)
+                pending_input_delta.append(message)
                 continue
 
             if parsed.action_type == "next":
                 break
 
             if parsed.action_type == "query":
+                before_len = len(messages)
                 self._qwen_handle_query(
                     messages=messages,
                     parsed=parsed,
                     tool_call=tool_calls[0] if tool_calls else None,
                     budget=budget,
                 )
+                pending_input_delta.extend(messages[before_len:])
                 continue
 
             if parsed.action_type == "search":
+                before_len = len(messages)
                 self._qwen_handle_search(
                     messages=messages,
                     parsed=parsed,
                     tool_call=tool_calls[0] if tool_calls else None,
                     budget=budget,
                 )
+                pending_input_delta.extend(messages[before_len:])
                 continue
 
             if parsed.action_type == "submit":
+                before_len = len(messages)
                 submitted = self._qwen_handle_submit(
                     messages=messages,
                     forecast_interface=forecast_interface,
@@ -293,6 +305,7 @@ class QwenBasicAgent(BasicAgent):
                     budget=budget,
                     target_qid=target_qid,
                 )
+                pending_input_delta.extend(messages[before_len:])
                 all_forecasts.extend(submitted)
                 if target_qid is not None and submitted:
                     break
@@ -300,14 +313,9 @@ class QwenBasicAgent(BasicAgent):
 
             budget.consume_action()
             err = parsed.error or "Unknown action/tool."
-            self._append_with_budget(
-                messages,
-                budget,
-                {
-                    "role": "user",
-                    "content": budget.format_feedback(f"Invalid action: {err}"),
-                },
-            )
+            message = {"role": "user", "content": budget.format_feedback(f"Invalid action: {err}")}
+            self._append_with_budget(messages, budget, message)
+            pending_input_delta.append(message)
 
         return all_forecasts, context_limit_hit
 
@@ -361,34 +369,9 @@ class QwenBasicAgent(BasicAgent):
         tools: List[Dict[str, Any]],
         sampling_params: Dict[str, Any],
     ) -> Dict[str, Any]:
-        max_retries = max(0, int(getattr(self.config, "gptoss_responses_max_retries", 3)))
-        base_backoff = max(0.0, float(getattr(self.config, "gptoss_retry_backoff_base_s", 1.0)))
-        max_backoff = max(base_backoff, float(getattr(self.config, "gptoss_retry_backoff_max_s", 16.0)))
-        attempts = max_retries + 1
-
-        last_error: Optional[Exception] = None
-        for attempt in range(attempts):
-            try:
-                return self._call_chat_json(messages=messages, tools=tools, sampling_params=sampling_params)
-            except Exception as e:
-                last_error = e
-                if self._is_context_limit_error(e):
-                    raise
-                if self._is_fatal_inference_failure(e):
-                    raise
-                if attempt >= max_retries:
-                    break
-                delay = min(max_backoff, base_backoff * (2 ** attempt))
-                delay += delay * 0.2 * random.random()
-                print(
-                    f"[{self.agent_id}] /v1/chat/completions error (attempt {attempt + 1}/{attempts}): {e}. "
-                    f"Retrying in {delay:.1f}s...",
-                    flush=True,
-                )
-                time.sleep(delay)
-
-        assert last_error is not None
-        raise last_error
+        # VLLMInference already retries chat/completions transport failures up to 3 times.
+        # Do not stack another retry loop on top of that.
+        return self._call_chat_json(messages=messages, tools=tools, sampling_params=sampling_params)
 
     @staticmethod
     def _normalize_chat_usage(resp_json: Dict[str, Any]) -> Dict[str, Any]:
@@ -405,14 +388,6 @@ class QwenBasicAgent(BasicAgent):
         if "prompt_tokens_details" not in usage and "input_tokens_details" in usage:
             usage["prompt_tokens_details"] = usage.get("input_tokens_details")
         return usage
-
-    @staticmethod
-    def _build_model_input_for_logging(*, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]]) -> str:
-        payload = {
-            "messages": messages,
-            "tools": tools,
-        }
-        return json.dumps(payload, ensure_ascii=False)
 
     @staticmethod
     def _append_assistant_message(
@@ -655,23 +630,19 @@ class QwenBasicAgent(BasicAgent):
         phase: str,
         budget: Optional[BudgetTracker] = None,
         qid: Optional[str] = None,
-        prompt_override: Optional[str] = None,
+        prompt_override: Any = None,
         **extra,
     ) -> None:
-        last_user = prompt_override if isinstance(prompt_override, str) else ""
-        if not last_user:
+        input_delta = prompt_override
+        if input_delta is None:
             for m in reversed(messages):
                 if m.get("role") == "user":
-                    content = m.get("content")
-                    if isinstance(content, str):
-                        last_user = content
-                    else:
-                        last_user = str(content)
+                    input_delta = m
                     break
         metadata = {"phase": phase, "qid": qid, **extra}
         if budget is not None:
             metadata.update(budget.metadata())
-        forecast_interface.log_model_output(last_user, rendered_response, metadata)
+        forecast_interface.log_model_output(input_delta, rendered_response, metadata)
 
 
 class QwenAllQAgent(AllQAgent, QwenBasicAgent):
