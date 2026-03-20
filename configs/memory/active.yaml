@@ -1,12 +1,12 @@
-# Active memory full run: memo_df + reduced structured meta-insights.
+# Active memory run: memo_df + reduced structured meta-insights, restarting from shared warmup.
 #
-# Usage: python aisa_scripts/run_sim/submit_sim_aisa.py --config configs/allq_mem_restart_aisa.yaml --runs 1 --gpus 1 --memory 80 --time 2-00:00:00
+# Usage: python aisa_scripts/run_sim/submit_sim_aisa.py --config configs/memory/active.yaml --runs 1 --gpus 1 --memory 80 --time 2-00:00:00
 
 # --- Restart ---
 # Pass at submit time: --set restart_from=/path/to/run --set restart_from_day=2025-04-25
 
 # --- Simulation Meta ---
-sim_name: "allq_active_mem_deepseek_aisa"
+sim_name: "deepseek_active_mem"
 start_date: "2025-05-01"
 end_date: "2025-08-23"
 lookback_days: 7
@@ -15,16 +15,16 @@ split: "test"
 
 # --- Data Paths ---
 dataset: "openforesight"
-dataset_path: "${FSIM_DATASET_PATH}"
-dataset_cache: "${FSIM_DATASET_CACHE}"
+dataset_path: "nikhilchandak/OpenForesight"
+dataset_cache: "/mnt/nfs/datasets_ac/cache/huggingface/datasets"
 min_forecasters: 10
 resolved_only: true
-output_base: "${FSIM_OUTPUT_BASE}"
+output_base: "logs/current_sim"
 warmup_parallelism: 64
 
 # --- Search Settings ---
-search_db: "${FSIM_SEARCH_DB}"
-embedding_model: "${FSIM_EMBEDDING_MODEL}"
+search_db: "/mnt/nfs/datasets_ac/news/deduped_articles/lance/Qwen3-Embedding-8B"
+embedding_model: "/mnt/nfs/home/ac146091/forecast-sim/models/Qwen3-Embedding-8B"
 embedding_gpu_mem: 0.7
 
 # --- Answer Matching ---

@@ -1,7 +1,6 @@
-"""Tests for StructuredMemory and extract_memory_ops."""
+"""Tests for StructuredMemory (skills-style, name-keyed) and memory action parsing."""
 
 import tempfile
-import shutil
 from datetime import date
 from pathlib import Path
 
@@ -9,9 +8,11 @@ import pytest
 import yaml
 
 from agents.utils.memory import (
-    StructuredMemory, MemoryEntry, VALID_ENTRY_TYPES, FIELD_LIMITS, MAX_ENTRIES,
+    StructuredMemory, MemoryEntry, FIELD_LIMITS, MAX_ENTRIES, _strip_xml_tags,
 )
-from agents.utils.forecast_parser import extract_memory_ops, extract_memory
+from agents.utils.forecast_parser import (
+    extract_memory_ops, extract_memory, parse_action, _parse_memory_entry_body,
+)
 
 
 # ── StructuredMemory tests ──────────────────────────────────────────────────
@@ -29,6 +30,7 @@ class TestStructuredMemoryBasics:
         assert mem.entry_count == 0
         assert not mem
         assert mem.get() == ""
+        assert mem.get_index() == ""
 
     def test_init_with_dir(self, tmp_memory_dir):
         mem = StructuredMemory("agent1", tmp_memory_dir)
@@ -37,14 +39,13 @@ class TestStructuredMemoryBasics:
     def test_add_entry(self, tmp_memory_dir):
         mem = StructuredMemory("agent1", tmp_memory_dir)
         mem.set_date(date(2025, 6, 1))
-        entry_id = mem.add_entry(
-            "Q149 PSG prediction reasoning",
-            "reasoning",
-            "Q149",
+        name = mem.add_entry(
+            "Q149 PSG prediction",
+            "Reasoning behind PSG 0.70. Use for Q149 re-forecasting.",
             "Predicted PSG 0.70 because Sky Bet implied 55%.",
         )
-        assert isinstance(entry_id, str)
-        assert len(entry_id) == 8
+        assert isinstance(name, str)
+        assert name == "q149-psg-prediction"  # auto-normalized
         assert mem.entry_count == 1
         assert bool(mem) is True
 
@@ -52,26 +53,56 @@ class TestStructuredMemoryBasics:
         mem = StructuredMemory("agent1", tmp_memory_dir)
         mem.set_date(date(2025, 6, 1))
         long_name = "x" * 300
-        long_content = "y" * 1500
-        long_qids = "z" * 200
-        mem.add_entry(long_name, "fact", long_qids, long_content)
+        long_desc = "d" * 500
+        long_content = "y" * 2000
+        mem.add_entry(long_name, long_desc, long_content)
         entry = mem._entries[0]
-        assert len(entry.name) == FIELD_LIMITS["name"]
+        assert len(entry.name) <= FIELD_LIMITS["name"]
+        assert len(entry.description) == FIELD_LIMITS["description"]
         assert len(entry.content) == FIELD_LIMITS["content"]
-        assert len(entry.qids) == FIELD_LIMITS["qids"]
 
-    def test_add_entry_invalid_type_defaults_to_insight(self, tmp_memory_dir):
+    def test_add_entry_empty_description_uses_name(self, tmp_memory_dir):
         mem = StructuredMemory("agent1", tmp_memory_dir)
         mem.set_date(date(2025, 6, 1))
-        mem.add_entry("test", "invalid_type", "", "content")
-        assert mem._entries[0].type == "insight"
+        mem.add_entry("my-title", "", "some content")
+        assert mem._entries[0].description == "my-title"
+
+    def test_add_entry_strips_xml_tags(self, tmp_memory_dir):
+        mem = StructuredMemory("agent1", tmp_memory_dir)
+        mem.set_date(date(2025, 6, 1))
+        mem.add_entry("<b>Bold name</b>", "<i>Italic desc</i>", "<p>content</p>")
+        assert "<b>" not in mem._entries[0].name
+        assert "<i>" not in mem._entries[0].description
+        assert "<p>" not in mem._entries[0].content
+
+    def test_add_entry_normalizes_name(self, tmp_memory_dir):
+        mem = StructuredMemory("agent1", tmp_memory_dir)
+        mem.set_date(date(2025, 6, 1))
+        name = mem.add_entry("Q515 Brown Flag Awards!", "desc", "content")
+        assert name == "q515-brown-flag-awards"
+        assert mem._entries[0].name == "q515-brown-flag-awards"
+
+    def test_add_entry_duplicate_raises(self, tmp_memory_dir):
+        mem = StructuredMemory("agent1", tmp_memory_dir)
+        mem.set_date(date(2025, 6, 1))
+        mem.add_entry("my-entry", "desc", "content")
+        with pytest.raises(ValueError, match="already exists"):
+            mem.add_entry("my-entry", "desc2", "content2")
+
+    def test_add_entry_reserved_word_raises(self, tmp_memory_dir):
+        mem = StructuredMemory("agent1", tmp_memory_dir)
+        mem.set_date(date(2025, 6, 1))
+        with pytest.raises(ValueError, match="reserved word"):
+            mem.add_entry("claude-helper", "desc", "content")
+        with pytest.raises(ValueError, match="reserved word"):
+            mem.add_entry("anthropic-tools", "desc", "content")
 
     def test_delete_entry(self, tmp_memory_dir):
         mem = StructuredMemory("agent1", tmp_memory_dir)
         mem.set_date(date(2025, 6, 1))
-        eid = mem.add_entry("test", "fact", "", "content")
+        name = mem.add_entry("test-entry", "test desc", "content")
         assert mem.entry_count == 1
-        assert mem.delete_entry(eid) is True
+        assert mem.delete_entry(name) is True
         assert mem.entry_count == 0
 
     def test_delete_nonexistent_entry(self, tmp_memory_dir):
@@ -80,20 +111,106 @@ class TestStructuredMemoryBasics:
         assert mem.delete_entry("nonexistent") is False
 
     def test_max_entries_enforcement(self, tmp_memory_dir):
+        max_ent = 10
+        mem = StructuredMemory("agent1", tmp_memory_dir, max_entries=max_ent)
+        mem.set_date(date(2025, 6, 1))
+        names = []
+        for i in range(max_ent + 5):
+            name = mem.add_entry(f"entry-{i}", f"desc {i}", f"content {i}")
+            names.append(name)
+        assert mem.entry_count == max_ent
+        # Oldest entries should have been dropped
+        remaining_names = {e.name for e in mem._entries}
+        for old_name in names[:5]:
+            assert old_name not in remaining_names
+        for new_name in names[-max_ent:]:
+            assert new_name in remaining_names
+
+
+class TestStructuredMemoryIndex:
+    def test_get_index_empty(self):
+        mem = StructuredMemory("agent1")
+        assert mem.get_index() == ""
+
+    def test_get_index_single(self, tmp_memory_dir):
         mem = StructuredMemory("agent1", tmp_memory_dir)
         mem.set_date(date(2025, 6, 1))
-        ids = []
-        for i in range(MAX_ENTRIES + 5):
-            eid = mem.add_entry(f"entry {i}", "fact", "", f"content {i}")
-            ids.append(eid)
-        assert mem.entry_count == MAX_ENTRIES
-        # Oldest entries should have been dropped
-        remaining_ids = {e.id for e in mem._entries}
-        for old_id in ids[:5]:
-            assert old_id not in remaining_ids
-        # Newest entries should remain
-        for new_id in ids[-MAX_ENTRIES:]:
-            assert new_id in remaining_ids
+        name = mem.add_entry("test-entry", "Some description here", "Full content")
+        index = mem.get_index()
+        assert f"[{name}]" in index
+        assert "Some description here" in index
+        assert "2025-06-01" in index
+        assert "Full content" not in index  # content should NOT be in index
+
+    def test_get_index_multiple(self, tmp_memory_dir):
+        mem = StructuredMemory("agent1", tmp_memory_dir)
+        mem.set_date(date(2025, 6, 1))
+        name1 = mem.add_entry("entry-a", "Desc A", "Content A")
+        name2 = mem.add_entry("entry-b", "Desc B", "Content B")
+        index = mem.get_index()
+        assert f"[{name1}]" in index
+        assert f"[{name2}]" in index
+        assert "Desc A" in index
+        assert "Desc B" in index
+        assert "Content A" not in index
+        assert "Content B" not in index
+
+
+class TestStructuredMemoryRetrieve:
+    def test_retrieve_existing(self, tmp_memory_dir):
+        mem = StructuredMemory("agent1", tmp_memory_dir)
+        mem.set_date(date(2025, 6, 1))
+        name = mem.add_entry("test-entry", "Test desc", "Full content here")
+        result = mem.retrieve(name)
+        assert result is not None
+        assert "test-entry" in result
+        assert "Test desc" in result
+        assert "Full content here" in result
+        assert "2025-06-01" in result
+
+    def test_retrieve_nonexistent(self, tmp_memory_dir):
+        mem = StructuredMemory("agent1", tmp_memory_dir)
+        mem.set_date(date(2025, 6, 1))
+        assert mem.retrieve("nonexistent") is None
+
+    def test_retrieve_with_whitespace(self, tmp_memory_dir):
+        mem = StructuredMemory("agent1", tmp_memory_dir)
+        mem.set_date(date(2025, 6, 1))
+        name = mem.add_entry("test-entry", "desc", "content")
+        assert mem.retrieve("  test-entry  ") is not None
+
+
+class TestStructuredMemoryUpdate:
+    def test_update_entry_partial(self, tmp_memory_dir):
+        mem = StructuredMemory("agent1", tmp_memory_dir)
+        mem.set_date(date(2025, 6, 1))
+        name = mem.add_entry("old-name", "Old desc", "Old content")
+        ok = mem.update_entry(name, content="New content")
+        assert ok is True
+        assert mem._entries[0].description == "Old desc"
+        assert mem._entries[0].content == "New content"
+
+    def test_update_entry_all_fields(self, tmp_memory_dir):
+        mem = StructuredMemory("agent1", tmp_memory_dir)
+        mem.set_date(date(2025, 6, 1))
+        name = mem.add_entry("old-entry", "Old desc", "Old content")
+        ok = mem.update_entry(name, description="New desc", content="New content")
+        assert ok is True
+        assert mem._entries[0].description == "New desc"
+        assert mem._entries[0].content == "New content"
+
+    def test_update_entry_nonexistent(self, tmp_memory_dir):
+        mem = StructuredMemory("agent1", tmp_memory_dir)
+        mem.set_date(date(2025, 6, 1))
+        ok = mem.update_entry("nonexistent", content="new")
+        assert ok is False
+
+    def test_update_entry_strips_xml(self, tmp_memory_dir):
+        mem = StructuredMemory("agent1", tmp_memory_dir)
+        mem.set_date(date(2025, 6, 1))
+        name = mem.add_entry("test-entry", "desc", "content")
+        mem.update_entry(name, description="<i>Italic</i>")
+        assert mem._entries[0].description == "Italic"
 
 
 class TestStructuredMemoryRendering:
@@ -104,48 +221,39 @@ class TestStructuredMemoryRendering:
     def test_render_single_entry(self, tmp_memory_dir):
         mem = StructuredMemory("agent1", tmp_memory_dir)
         mem.set_date(date(2025, 6, 1))
-        mem.add_entry("Test entry", "reasoning", "Q1", "Some content here")
+        mem.add_entry("test-entry", "Q1 reasoning desc", "Some content here")
         rendered = mem.get()
-        assert "[" in rendered  # has ID in brackets
-        assert "(reasoning, Q1)" in rendered
-        assert "Test entry" in rendered
+        assert "[test-entry]" in rendered
+        assert "Q1 reasoning desc" in rendered
         assert "Some content here" in rendered
-        assert "added: 2025-06-01" in rendered
-
-    def test_render_entry_without_qids(self, tmp_memory_dir):
-        mem = StructuredMemory("agent1", tmp_memory_dir)
-        mem.set_date(date(2025, 6, 1))
-        mem.add_entry("General insight", "insight", "", "Pattern observed")
-        rendered = mem.get()
-        assert "(insight)" in rendered
-        assert ", )" not in rendered  # no dangling comma
+        assert "2025-06-01" in rendered
 
 
 class TestStructuredMemoryPersistence:
     def test_yaml_roundtrip(self, tmp_memory_dir):
         mem = StructuredMemory("agent1", tmp_memory_dir)
         mem.set_date(date(2025, 6, 1))
-        mem.add_entry("Entry A", "reasoning", "Q1", "Content A")
-        mem.add_entry("Entry B", "calibration", "Q2, Q3", "Content B")
+        mem.add_entry("entry-a", "Desc A", "Content A")
+        mem.add_entry("entry-b", "Desc B", "Content B")
 
         # Load into a new instance
         mem2 = StructuredMemory("agent1", tmp_memory_dir)
         mem2.set_date(date(2025, 6, 2))  # loads 2025-06-01 snapshot
         assert mem2.entry_count == 2
-        assert mem2._entries[0].name == "Entry A"
-        assert mem2._entries[1].name == "Entry B"
-        assert mem2._entries[1].qids == "Q2, Q3"
+        assert mem2._entries[0].name == "entry-a"
+        assert mem2._entries[0].description == "Desc A"
+        assert mem2._entries[1].name == "entry-b"
 
     def test_set_date_picks_most_recent(self, tmp_memory_dir):
         mem = StructuredMemory("agent1", tmp_memory_dir)
         # Day 1
         mem.set_date(date(2025, 6, 1))
-        mem.add_entry("Day 1", "fact", "", "First day")
+        mem.add_entry("day-1", "desc 1", "First day")
         # Day 2
         mem.set_date(date(2025, 6, 2))
         # Should load day 1 entries
         assert mem.entry_count == 1
-        mem.add_entry("Day 2", "fact", "", "Second day")
+        mem.add_entry("day-2", "desc 2", "Second day")
 
         # Day 3 should load day 2 snapshot (which has 2 entries)
         mem2 = StructuredMemory("agent1", tmp_memory_dir)
@@ -165,9 +273,9 @@ class TestStructuredMemoryPersistence:
         mem = StructuredMemory("agent1", tmp_memory_dir)
         mem.set_date(date(2025, 6, 2))
         assert mem.entry_count > 0
-        # Should have migrated the text into entries
-        rendered = mem.get()
-        assert "Key observations" in rendered or "Calibration notes" in rendered
+        # Should have migrated the text into entries with descriptions
+        for e in mem._entries:
+            assert e.description  # should be non-empty
 
     def test_yaml_preferred_over_txt(self, tmp_memory_dir):
         """When both .yaml and .txt exist for same date, .yaml should win."""
@@ -178,54 +286,315 @@ class TestStructuredMemoryPersistence:
         txt_path = mem_dir / "2025-06-01.txt"
         txt_path.write_text("Old text memory")
 
-        # Write a .yaml file for the same date
+        # Write a .yaml file for the same date (old schema with id/type/qids)
         yaml_data = [{"id": "abcd1234", "name": "YAML entry", "type": "fact",
-                       "qids": "", "content": "From YAML", "added": "2025-06-01"}]
+                       "qids": "Q1", "content": "From YAML", "added": "2025-06-01"}]
         yaml_path = mem_dir / "2025-06-01.yaml"
         yaml_path.write_text(yaml.safe_dump(yaml_data))
 
         mem = StructuredMemory("agent1", tmp_memory_dir)
         mem.set_date(date(2025, 6, 2))
         assert mem.entry_count == 1
-        assert mem._entries[0].name == "YAML entry"
+        # Name should be normalized (id is ignored)
+        assert mem._entries[0].name == "yaml-entry"
 
     def test_ephemeral_add_no_crash(self):
         """Adding entries without a memory_dir should work (no disk writes)."""
         mem = StructuredMemory("agent1")
         mem._current_date = date(2025, 6, 1)
-        eid = mem.add_entry("test", "fact", "", "content")
+        name = mem.add_entry("test-entry", "test desc", "content")
         assert mem.entry_count == 1
-        assert len(eid) == 8
+        assert name == "test-entry"
+
+    def test_yaml_no_id_field(self, tmp_memory_dir):
+        """Saved YAML should not contain id field."""
+        mem = StructuredMemory("agent1", tmp_memory_dir)
+        mem.set_date(date(2025, 6, 1))
+        mem.add_entry("test-entry", "desc", "content")
+
+        yaml_path = Path(tmp_memory_dir) / "memory" / "2025-06-01.yaml"
+        data = yaml.safe_load(yaml_path.read_text())
+        assert "id" not in data[0]
+        assert data[0]["name"] == "test-entry"
 
 
 class TestStructuredMemoryBackwardCompat:
+    def test_load_old_yaml_with_type_qids(self, tmp_memory_dir):
+        """Old YAML files with id/type/qids and no description should auto-migrate."""
+        mem_dir = Path(tmp_memory_dir) / "memory"
+        mem_dir.mkdir(parents=True)
+        yaml_data = [
+            {"id": "aaa11111", "name": "Old entry", "type": "reasoning",
+             "qids": "Q42, Q99", "content": "Some reasoning content", "added": "2025-06-01"},
+        ]
+        yaml_path = mem_dir / "2025-06-01.yaml"
+        yaml_path.write_text(yaml.safe_dump(yaml_data))
+
+        mem = StructuredMemory("agent1", tmp_memory_dir)
+        mem.set_date(date(2025, 6, 2))
+        assert mem.entry_count == 1
+        entry = mem._entries[0]
+        assert entry.name == "old-entry"  # normalized from "Old entry"
+        # description should be auto-generated from type + qids + content
+        assert "reasoning" in entry.description.lower() or "Q42" in entry.description
+        assert entry.content == "Some reasoning content"
+
+    def test_load_new_yaml_with_description(self, tmp_memory_dir):
+        """New YAML files with description field should load directly (id ignored)."""
+        mem_dir = Path(tmp_memory_dir) / "memory"
+        mem_dir.mkdir(parents=True)
+        yaml_data = [
+            {"id": "bbb22222", "name": "new-entry", "description": "My custom desc",
+             "content": "Full content", "added": "2025-06-01"},
+        ]
+        yaml_path = mem_dir / "2025-06-01.yaml"
+        yaml_path.write_text(yaml.safe_dump(yaml_data))
+
+        mem = StructuredMemory("agent1", tmp_memory_dir)
+        mem.set_date(date(2025, 6, 2))
+        assert mem.entry_count == 1
+        assert mem._entries[0].description == "My custom desc"
+        assert mem._entries[0].name == "new-entry"
+
     def test_update_with_plain_text(self, tmp_memory_dir):
         """update() with plain text should replace entries (backward compat)."""
         mem = StructuredMemory("agent1", tmp_memory_dir)
         mem.set_date(date(2025, 6, 1))
-        mem.add_entry("old", "fact", "", "old content")
+        mem.add_entry("old-entry", "old desc", "old content")
         assert mem.entry_count == 1
 
         mem.update("New plain text memory content.\n\nSecond paragraph.")
         assert mem.entry_count == 2  # two paragraphs -> two entries
         rendered = mem.get()
-        assert "New plain text memory content" in rendered
+        assert "new-plain-text-memory-content" in rendered or "New plain text" in rendered
 
     def test_update_with_empty_clears(self, tmp_memory_dir):
         mem = StructuredMemory("agent1", tmp_memory_dir)
         mem.set_date(date(2025, 6, 1))
-        mem.add_entry("test", "fact", "", "content")
+        mem.add_entry("test-entry", "desc", "content")
         mem.update("")
         assert mem.entry_count == 0
 
 
-# ── Parser tests ────────────────────────────────────────────────────────────
+class TestNameValidation:
+    def test_lowercase_normalization(self, tmp_memory_dir):
+        mem = StructuredMemory("agent1", tmp_memory_dir)
+        mem.set_date(date(2025, 6, 1))
+        name = mem.add_entry("MY UPPERCASE NAME", "desc", "content")
+        assert name == "my-uppercase-name"
+
+    def test_special_chars_stripped(self, tmp_memory_dir):
+        mem = StructuredMemory("agent1", tmp_memory_dir)
+        mem.set_date(date(2025, 6, 1))
+        name = mem.add_entry("Q515: Brown Flag Awards!", "desc", "content")
+        assert name == "q515-brown-flag-awards"
+
+    def test_underscores_to_hyphens(self, tmp_memory_dir):
+        mem = StructuredMemory("agent1", tmp_memory_dir)
+        mem.set_date(date(2025, 6, 1))
+        name = mem.add_entry("my_test_entry", "desc", "content")
+        assert name == "my-test-entry"
+
+    def test_xml_tags_stripped(self, tmp_memory_dir):
+        mem = StructuredMemory("agent1", tmp_memory_dir)
+        mem.set_date(date(2025, 6, 1))
+        name = mem.add_entry("<name>my-entry</name>", "desc", "content")
+        assert name == "my-entry"
+
+    def test_multiple_hyphens_collapsed(self, tmp_memory_dir):
+        mem = StructuredMemory("agent1", tmp_memory_dir)
+        mem.set_date(date(2025, 6, 1))
+        name = mem.add_entry("my---entry", "desc", "content")
+        assert name == "my-entry"
+
+    def test_empty_name_raises(self, tmp_memory_dir):
+        mem = StructuredMemory("agent1", tmp_memory_dir)
+        mem.set_date(date(2025, 6, 1))
+        with pytest.raises(ValueError):
+            mem.add_entry("!!!", "desc", "content")
+
+
+# ── Helper tests ───────────────────────────────────────────────────────────
+
+
+class TestStripXmlTags:
+    def test_basic(self):
+        assert _strip_xml_tags("<b>text</b>") == "text"
+        assert _strip_xml_tags("no tags") == "no tags"
+        assert _strip_xml_tags("<a href='x'>link</a>") == "link"
+        assert _strip_xml_tags("") == ""
+
+
+# ── Parser tests: action-based memory tools ────────────────────────────────
+
+
+class TestParseMemoryActions:
+    def test_memory_retrieve(self):
+        response = '<reasoning>Need details.</reasoning>\n<action type="memory_retrieve">q149-psg-prediction</action>'
+        parsed = parse_action(response)
+        assert parsed.action_type == "memory_retrieve"
+        assert parsed.memory_entry_name == "q149-psg-prediction"
+        assert parsed.error is None
+
+    def test_memory_retrieve_empty(self):
+        response = '<action type="memory_retrieve"></action>'
+        parsed = parse_action(response)
+        assert parsed.action_type == "memory_retrieve"
+        assert parsed.error is not None
+
+    def test_memory_add(self):
+        response = '''<reasoning>Adding entry.</reasoning>
+<action type="memory_add">
+<name>q149-psg-prediction</name>
+<description>Reasoning for Q149 PSG 0.70. Use when re-forecasting Champions League.</description>
+<content>Predicted PSG 0.70 because Sky Bet implied 55% and Inter eliminated.</content>
+</action>'''
+        parsed = parse_action(response)
+        assert parsed.action_type == "memory_add"
+        assert parsed.memory_add_data is not None
+        assert parsed.memory_add_data["name"] == "q149-psg-prediction"
+        assert "Q149" in parsed.memory_add_data["description"]
+        assert "Sky Bet" in parsed.memory_add_data["content"]
+        assert parsed.error is None
+
+    def test_memory_add_plain_text_format(self):
+        """Plain text key: value format should still work."""
+        response = '''<action type="memory_add">
+name: Q149 PSG prediction
+description: Reasoning for Q149 PSG 0.70.
+content: Predicted PSG 0.70 because Sky Bet implied 55%.
+</action>'''
+        parsed = parse_action(response)
+        assert parsed.action_type == "memory_add"
+        assert parsed.memory_add_data is not None
+        assert "Q149" in parsed.memory_add_data["name"]
+
+    def test_memory_add_missing_fields(self):
+        response = '<action type="memory_add">\n<name>title only</name>\n</action>'
+        parsed = parse_action(response)
+        assert parsed.action_type == "memory_add"
+        assert parsed.error is not None  # missing description and content
+
+    def test_memory_update(self):
+        response = '<action type="memory_update" name="q149-psg-prediction">\n<description>Updated desc</description>\n<content>Updated content</content>\n</action>'
+        parsed = parse_action(response)
+        assert parsed.action_type == "memory_update"
+        assert parsed.memory_entry_name == "q149-psg-prediction"
+        assert parsed.memory_update_data is not None
+        assert parsed.memory_update_data["description"] == "Updated desc"
+        assert parsed.memory_update_data["content"] == "Updated content"
+        assert parsed.error is None
+
+    def test_memory_update_with_id_backward_compat(self):
+        """Old id= attribute should still work as fallback."""
+        response = '<action type="memory_update" id="q149-psg-prediction">\n<content>Updated content</content>\n</action>'
+        parsed = parse_action(response)
+        assert parsed.action_type == "memory_update"
+        assert parsed.memory_entry_name == "q149-psg-prediction"
+
+    def test_memory_update_no_name(self):
+        response = '<action type="memory_update">\n<content>new content</content>\n</action>'
+        parsed = parse_action(response)
+        assert parsed.action_type == "memory_update"
+        assert parsed.error is not None  # missing name attribute
+
+    def test_memory_update_partial(self):
+        response = '<action type="memory_update" name="q149-psg-prediction">\n<content>Only updating content</content>\n</action>'
+        parsed = parse_action(response)
+        assert parsed.action_type == "memory_update"
+        assert parsed.memory_update_data == {"content": "Only updating content"}
+        assert "name" not in parsed.memory_update_data
+
+    def test_memory_delete(self):
+        response = '<action type="memory_delete">q149-psg-prediction</action>'
+        parsed = parse_action(response)
+        assert parsed.action_type == "memory_delete"
+        assert parsed.memory_entry_name == "q149-psg-prediction"
+        assert parsed.error is None
+
+    def test_memory_delete_empty(self):
+        response = '<action type="memory_delete"></action>'
+        parsed = parse_action(response)
+        assert parsed.action_type == "memory_delete"
+        assert parsed.error is not None
+
+
+class TestParseMemoryEntryBody:
+    def test_all_fields_xml(self):
+        body = "<name>Title</name>\n<description>Short desc</description>\n<content>Full content here</content>"
+        result = _parse_memory_entry_body(body, require_all=True)
+        assert result is not None
+        assert result["name"] == "Title"
+        assert result["description"] == "Short desc"
+        assert result["content"] == "Full content here"
+
+    def test_all_fields_plain(self):
+        body = "name: Title\ndescription: Short desc\ncontent: Full content here"
+        result = _parse_memory_entry_body(body, require_all=True)
+        assert result is not None
+        assert result["name"] == "Title"
+        assert result["description"] == "Short desc"
+        assert result["content"] == "Full content here"
+
+    def test_xml_no_closing_tags(self):
+        """XML without closing tags should auto-close at next opening tag."""
+        body = "<name>Title\n<description>Short desc\n<content>Full content here"
+        result = _parse_memory_entry_body(body, require_all=True)
+        assert result is not None
+        assert result["name"] == "Title"
+        assert result["description"] == "Short desc"
+        assert result["content"] == "Full content here"
+
+    def test_multiline_content(self):
+        body = "<name>Title</name>\n<description>Desc</description>\n<content>Line 1\nLine 2\nLine 3</content>"
+        result = _parse_memory_entry_body(body, require_all=True)
+        assert result is not None
+        assert "Line 2" in result["content"]
+        assert "Line 3" in result["content"]
+
+    def test_multiline_description(self):
+        body = "name: Title\ndescription: First part\nSecond part\ncontent: Content"
+        result = _parse_memory_entry_body(body, require_all=True)
+        assert result is not None
+        assert "Second part" in result["description"]
+
+    def test_partial_for_update(self):
+        body = "<content>Just updating content</content>"
+        result = _parse_memory_entry_body(body, require_all=False)
+        assert result is not None
+        assert result["content"] == "Just updating content"
+        assert "name" not in result
+
+    def test_require_all_fails_partial(self):
+        body = "<name>Only name</name>"
+        result = _parse_memory_entry_body(body, require_all=True)
+        assert result is None  # missing description and content
+
+    def test_empty_body(self):
+        assert _parse_memory_entry_body("", require_all=True) is None
+        assert _parse_memory_entry_body("", require_all=False) is None
+
+
+# ── Parser tests: extract_memory_ops (end-of-day, backward compat) ─────────
 
 
 class TestExtractMemoryOps:
-    def test_single_add(self):
-        response = """<reasoning>Good day.</reasoning>
-<memory_add>
+    def test_new_format_add(self):
+        response = """<memory_add>
+name: Q149 prediction
+description: Reasoning for Q149 PSG 0.70
+content: Predicted 0.70 based on bookmaker data.
+</memory_add>"""
+        adds, deletes = extract_memory_ops(response)
+        assert len(adds) == 1
+        assert adds[0]["name"] == "Q149 prediction"
+        assert "Q149" in adds[0]["description"]
+        assert "0.70" in adds[0]["content"]
+        assert len(deletes) == 0
+
+    def test_old_format_add_backward_compat(self):
+        """Old-style type/qids format should still work, folding into description."""
+        response = """<memory_add>
 name: Q149 prediction reasoning
 type: reasoning
 qids: Q149
@@ -234,41 +603,34 @@ content: Predicted 0.70 based on bookmaker data.
         adds, deletes = extract_memory_ops(response)
         assert len(adds) == 1
         assert adds[0]["name"] == "Q149 prediction reasoning"
-        assert adds[0]["type"] == "reasoning"
-        assert adds[0]["qids"] == "Q149"
+        # Old type/qids should be folded into description
+        assert "description" in adds[0]
         assert "0.70" in adds[0]["content"]
-        assert len(deletes) == 0
 
     def test_multiple_adds_and_deletes(self):
-        response = """<reasoning>Cleanup time.</reasoning>
-<memory_add>
+        response = """<memory_add>
 name: Entry one
-type: fact
-qids: Q1
-content: Fact one content.
+description: Desc one
+content: Content one.
 </memory_add>
-<memory_delete>abc12345</memory_delete>
+<memory_delete>q149-psg-prediction</memory_delete>
 <memory_add>
 name: Entry two
-type: calibration
-qids:
-content: Calibration pattern here.
+description: Desc two
+content: Content two.
 </memory_add>
-<memory_delete>def67890</memory_delete>"""
+<memory_delete>q515-brown-flag</memory_delete>"""
         adds, deletes = extract_memory_ops(response)
         assert len(adds) == 2
         assert len(deletes) == 2
-        assert adds[0]["name"] == "Entry one"
-        assert adds[1]["type"] == "calibration"
-        assert deletes == ["abc12345", "def67890"]
+        assert deletes == ["q149-psg-prediction", "q515-brown-flag"]
 
     def test_missing_required_fields_skips(self):
         response = """<memory_add>
-type: fact
-content: Missing name field.
+content: Missing name and description.
 </memory_add>"""
         adds, deletes = extract_memory_ops(response)
-        assert len(adds) == 0  # skipped because no name
+        assert len(adds) == 0
 
     def test_no_ops_returns_empty(self):
         response = "<reasoning>Nothing to add.</reasoning>"
@@ -279,8 +641,7 @@ content: Missing name field.
     def test_multiline_content(self):
         response = """<memory_add>
 name: Multi-line test
-type: insight
-qids: Q1, Q2
+description: Testing multiline content
 content: First line of content.
 Second line of content.
 Third line with numbers: 0.75, 0.80.
@@ -301,42 +662,3 @@ Old style full replacement memory content.
         # But old parser still works
         old = extract_memory(response)
         assert old == "Old style full replacement memory content."
-
-    def test_qids_not_swallowed_by_content(self):
-        """Regression: qids field must not capture content text when agent omits qids."""
-        response = """<memory_add>
-name: Champions Cup final matchup confirmed May 4
-type: fact
-qids:
-content: On 2025-05-04, Bordeaux-Begles defeated Toulouse 35-18 in the Champions Cup semi-final, setting up a final against Northampton on May 24, 2025.
-</memory_add>"""
-        adds, _ = extract_memory_ops(response)
-        assert len(adds) == 1
-        assert adds[0]["qids"] == ""
-        assert "Bordeaux" in adds[0]["content"]
-
-    def test_qids_no_bleed_when_missing(self):
-        """When agent skips qids line entirely, content should still parse."""
-        response = """<memory_add>
-name: All active questions have predictions
-type: insight
-content: As of 2025-05-02, all 295 unresolved questions have predictions. No new submissions needed.
-</memory_add>"""
-        adds, _ = extract_memory_ops(response)
-        assert len(adds) == 1
-        assert adds[0]["qids"] == ""
-        assert "295" in adds[0]["content"]
-
-    def test_qids_prose_is_cleared(self):
-        """If qids somehow contains prose (>100 chars), it should be cleared."""
-        response = """<memory_add>
-name: Test entry
-type: fact
-qids: content: On 2025-05-02, searched for Q695 (Trumps claim about obliterated Iranian facility) and Q920 but they are not in dataset
-content: Real content here.
-</memory_add>"""
-        adds, _ = extract_memory_ops(response)
-        assert len(adds) == 1
-        # The qids line contains prose — should be cleared
-        assert len(adds[0]["qids"]) <= 100
-        assert "Real content here" in adds[0]["content"]

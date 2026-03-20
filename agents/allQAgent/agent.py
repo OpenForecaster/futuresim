@@ -85,11 +85,21 @@ class AllQAgent(BasicAgent):
         # Setup handlers for this "day" (Day 0)
         self._setup_warmup_day(forecast_interface, current_date)
 
+        # Ensure memory object has correct date for entry timestamps and saves.
+        # Safe on Day 0: no prior files exist, so set_date() just sets the date.
+        if self._memory is not None:
+            self._memory.set_date(current_date)
+
         # Collect per-question memo entries from parallel warmup threads.
         # Python list.append is thread-safe (GIL), so no lock needed.
         from agents.utils.memory import ActiveMemory
         if isinstance(self._memory, ActiveMemory):
             self._warmup_memo_entries = []
+
+        # Collect per-question structured memory entries from parallel warmup threads.
+        from agents.utils.memory import StructuredMemory
+        if isinstance(self._memory, StructuredMemory):
+            self._warmup_structured_entries = []
 
         # Set agent context so submissions are recorded correctly
         forecast_interface.current_agent_id = self.agent_id
@@ -172,6 +182,22 @@ class AllQAgent(BasicAgent):
             self._memory.save(current_date)
             del self._warmup_memo_entries
 
+        # Structured memory: seed entries from per-question warmup conversations.
+        from agents.utils.memory import StructuredMemory
+        if isinstance(self._memory, StructuredMemory) and hasattr(self, '_warmup_structured_entries'):
+            entries = self._warmup_structured_entries
+            print(f"[{self.agent_id}] Seeding structured memory with {len(entries)} warmup entries...")
+            for entry in entries:
+                try:
+                    self._memory.add_entry(
+                        name=entry["name"],
+                        description=entry["description"],
+                        content=entry["content"],
+                    )
+                except ValueError as e:
+                    print(f"[{self.agent_id}] Warmup memory seed skipped: {e}")
+            del self._warmup_structured_entries
+
         # End timing and save stats for Day 0
         self._timer.end_day()
         if self.config.memory_dir:
@@ -198,6 +224,12 @@ class AllQAgent(BasicAgent):
             memo_entry = self._request_warmup_memo(messages, q.qid, q.title)
             if memo_entry:
                 self._warmup_memo_entries.append(memo_entry)
+
+        # Structured memory: extract question-specific memory entry from warmup.
+        if hasattr(self, '_warmup_structured_entries'):
+            structured_entry = self._request_warmup_structured_memory(messages, q.qid, q.title)
+            if structured_entry:
+                self._warmup_structured_entries.append(structured_entry)
 
     def _request_warmup_memo(self, messages: List[Dict], qid, question_title: str) -> Optional[Dict]:
         """Ask the LLM to produce a memo entry from the warmup conversation.
@@ -242,6 +274,78 @@ Output exactly one <memo_add> block. No other text needed."""
                 "category": add.get("category"),
             }
         return None
+
+    def _request_warmup_structured_memory(self, messages: List[Dict], qid, question_title: str) -> Optional[Dict]:
+        """Ask the LLM to produce a structured memory entry from the warmup conversation.
+
+        Makes one additional LLM call with the full conversation context.
+        Returns a dict with {name, description, content} or None on failure.
+        """
+        from agents.utils.forecast_parser import parse_action
+
+        memory_prompt = f"""You just finished reasoning about and predicting question {qid}: "{question_title}".
+
+Store one memory entry capturing your key reasoning, evidence, and calibration insights for this question. This will help you on future forecasting days.
+
+Guidelines:
+- Include the Question ID ({qid}) in the name or description so you can find it later
+- Focus on: key evidence found, reasoning chain, confidence level, what would change your mind
+- Be specific: include numbers, sources, dates — not vague summaries
+- Descriptions should answer: "Why would future-me want to read this?" not just "What did I do today"
+
+
+Memory tool call to add the entry:
+<action type="memory_add">
+<name>q{qid}-lowercase-hyphenated-topic (max 64 chars, a-z 0-9 hyphens only)</name>
+<description>What this stores and when to use it (max 256 chars, include Question ID)</description>
+<content>Your key reasoning, evidence, confidence, and triggers for updating (max 1024 chars)</content>
+</action>
+
+Output only the action block above. No other text needed."""
+
+        mem_messages = messages + [{"role": "user", "content": memory_prompt}]
+        try:
+            response, usage = self.inference.chat(mem_messages, self.config.sampling_params)
+            self._timer.record_tokens(usage)
+            self._timer.record_cost(usage.get("cost", 0), "llm")
+        except Exception as e:
+            print(f"[{self.agent_id}] Warmup structured memory LLM call failed for qid {qid}: {e}")
+            return None
+
+        parsed = parse_action(response, self.config.max_outcomes_per_question)
+        if parsed.action_type == "memory_add" and parsed.memory_add_data:
+            return parsed.memory_add_data  # dict with {name, description, content}
+
+        # Retry up to 3 times with the same context (strip failed attempt each time)
+        print(
+            f"[{self.agent_id}] Warmup structured memory parse failed for qid {qid}, retrying: "
+            f"action_type={parsed.action_type}, has_data={parsed.memory_add_data is not None}, "
+            f"response_preview={response[:200]!r}"
+        )
+        for attempt in range(3):
+            try:
+                response, usage = self.inference.chat(mem_messages, self.config.sampling_params)
+                self._timer.record_tokens(usage)
+                self._timer.record_cost(usage.get("cost", 0), "llm")
+            except Exception as e:
+                print(f"[{self.agent_id}] Warmup structured memory retry {attempt+1} LLM error for qid {qid}: {e}")
+                continue
+
+            parsed = parse_action(response, self.config.max_outcomes_per_question)
+            if parsed.action_type == "memory_add" and parsed.memory_add_data:
+                return parsed.memory_add_data
+            print(
+                f"[{self.agent_id}] Warmup structured memory retry {attempt+1} failed for qid {qid}: "
+                f"response_preview={response[:200]!r}"
+            )
+
+        # All retries exhausted — create a deterministic placeholder entry
+        print(f"[{self.agent_id}] Warmup structured memory all retries failed for qid {qid}, using placeholder.")
+        return {
+            "name": f"q{qid}-placeholder",
+            "description": f"Question {qid}: {question_title[:200]}",
+            "content": "No memory created during warmup. Update this entry with reasoning and evidence.",
+        }
 
     def act(self,
             doc_interface,

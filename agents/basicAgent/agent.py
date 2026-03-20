@@ -71,7 +71,8 @@ class BasicAgent(BaseAgent):
             if self.config.memory_format == "active":
                 self._memory = ActiveMemory(agent_id, self.config.memory_dir)
             elif self.config.memory_format == "structured":
-                self._memory = StructuredMemory(agent_id, self.config.memory_dir)
+                self._memory = StructuredMemory(agent_id, self.config.memory_dir,
+                                                   max_entries=self.config.memory_max_entries)
             else:
                 self._memory = BasicMemory(agent_id, self.config.memory_dir)
         else:
@@ -318,6 +319,38 @@ class BasicAgent(BaseAgent):
             "predictions on resolved questions)."
         )
     
+    def _format_and_cache_feedback(self, current_date: date) -> str:
+        """Generate feedback, cache it for the memory prompt, and return formatted text."""
+        feedback_data = self._feedback_handler.generate_feedback(
+            self._forecast_interface, current_date, self.inference
+        )
+        self._last_feedback_data = feedback_data
+        return self._feedback_handler.format_feedback(
+            feedback_data,
+            show_tw_peer=not self.config.single_agent_mode,
+        )
+
+    def _build_resolution_recap_for_memory(self) -> str:
+        """Build a compact recap of this session's resolutions for the memory update prompt."""
+        feedback = getattr(self, '_last_feedback_data', None)
+        if not feedback:
+            return ""
+        resolved = feedback.get('resolved_today', [])
+        if not resolved:
+            return ""
+
+        lines = ["## QUESTIONS RESOLVED THIS SESSION (extract lessons from these)"]
+        for item in resolved:
+            dist = FeedbackHandler._format_distribution(
+                item.get('my_pred_distribution') or {}
+            )
+            lines.append(
+                f"- Q{item['qid']}: \"{item['title']}\"\n"
+                f"  Predicted: {dist} | Truth: {item['ground_truth']} | Brier: {item['brier']:+.2f}"
+            )
+        lines.append("")
+        return "\n".join(lines)
+
     # =========================================================================
     # Action Loop
     # =========================================================================
@@ -395,7 +428,12 @@ class BasicAgent(BaseAgent):
                 self._handle_search(
                     messages, forecast_interface, response, parsed, budget, reasoning=reasoning
                 )
-            
+
+            elif parsed.action_type in ("memory_retrieve", "memory_add", "memory_update", "memory_delete"):
+                self._handle_memory_action(
+                    messages, forecast_interface, response, parsed, budget, reasoning=reasoning
+                )
+
             elif parsed.action_type == "submit":
                 forecasts = self._handle_submit(
                     messages, forecast_interface, response, parsed, budget, reasoning=reasoning
@@ -477,7 +515,53 @@ class BasicAgent(BaseAgent):
             feedback = "SEARCH ERROR: No query provided."
         
         self._append_with_budget(messages, budget, {"role": "user", "content": budget.format_feedback(feedback)})
-    
+
+    def _handle_memory_action(self, messages, forecast_interface, response, parsed,
+                              budget: BudgetTracker, reasoning=None) -> None:
+        """Handle memory tool calls (retrieve/add/update/delete). Follows search handler pattern."""
+        budget.consume_action()
+
+        if not isinstance(self._memory, (StructuredMemory, ActiveMemory)):
+            feedback = "MEMORY ERROR: Structured memory is not enabled."
+            self._log_action(forecast_interface, messages, response, "memory_unavailable", budget, reasoning=reasoning)
+        elif parsed.error:
+            feedback = f"MEMORY ERROR: {parsed.error}"
+            self._log_action(forecast_interface, messages, response, f"{parsed.action_type}_error", budget, error=parsed.error, reasoning=reasoning)
+        elif parsed.action_type == "memory_retrieve":
+            entry = self._memory.retrieve(parsed.memory_entry_name)
+            if entry is None:
+                feedback = f"MEMORY ERROR: No entry with name '{parsed.memory_entry_name}'."
+            else:
+                feedback = f"MEMORY ENTRY:\n{entry}"
+            self._log_action(forecast_interface, messages, response, "memory_retrieve", budget, reasoning=reasoning)
+        elif parsed.action_type == "memory_add":
+            data = parsed.memory_add_data
+            try:
+                entry_name = self._memory.add_entry(data["name"], data["description"], data["content"])
+                feedback = f"MEMORY: Added entry [{entry_name}]. Total entries: {self._memory.entry_count}/{self._memory._max_entries if hasattr(self._memory, '_max_entries') else '?'}."
+            except ValueError as exc:
+                feedback = f"MEMORY ERROR: {exc}"
+            self._log_action(forecast_interface, messages, response, "memory_add", budget, reasoning=reasoning)
+        elif parsed.action_type == "memory_update":
+            ok = self._memory.update_entry(parsed.memory_entry_name, **parsed.memory_update_data)
+            if ok:
+                feedback = f"MEMORY: Updated [{parsed.memory_entry_name}]."
+            else:
+                feedback = f"MEMORY ERROR: No entry with name '{parsed.memory_entry_name}'."
+            self._log_action(forecast_interface, messages, response, "memory_update", budget, reasoning=reasoning)
+        elif parsed.action_type == "memory_delete":
+            ok = self._memory.delete_entry(parsed.memory_entry_name)
+            if ok:
+                feedback = f"MEMORY: Deleted [{parsed.memory_entry_name}]. Remaining: {self._memory.entry_count}."
+            else:
+                feedback = f"MEMORY ERROR: No entry with name '{parsed.memory_entry_name}'."
+            self._log_action(forecast_interface, messages, response, "memory_delete", budget, reasoning=reasoning)
+        else:
+            feedback = f"MEMORY ERROR: Unknown memory action '{parsed.action_type}'."
+            self._log_action(forecast_interface, messages, response, "memory_unknown", budget, reasoning=reasoning)
+
+        self._append_with_budget(messages, budget, {"role": "user", "content": budget.format_feedback(feedback)})
+
     def _handle_submit(self, messages, forecast_interface, response, parsed, budget: BudgetTracker, qid: str = None, reasoning=None, raw_stream: Optional[str] = None) -> List:
         """Handle submit action. Returns list of submitted forecasts."""
         submitted = []
@@ -744,18 +828,28 @@ print(memo_df[memo_df['category'] == 'sports'][['qid', 'memory']].head())
 Use meta-insights and memo_df to inform today's forecasts. Entry IDs in brackets (e.g. [a1b2c3d4]) can be used to delete stale meta-insight entries at end of day.
 
 """
-            elif memory_content:
-                if isinstance(self._memory, StructuredMemory):
-                    memory_section = f"""## YOUR MEMORY ({self._memory.entry_count} entries)
-<memory>
-{memory_content}
-</memory>
+            elif isinstance(self._memory, StructuredMemory):
+                max_ent = self._memory._max_entries
+                memory_index = self._memory.get_index()
+                if memory_index:
+                    memory_section = f"""## YOUR MEMORY ({self._memory.entry_count} entries, max {max_ent})
+<memory_index>
+{memory_index}
+</memory_index>
 
-Use these stored insights to inform today's forecasts. Entry IDs in brackets (e.g. [a1b2c3d4]) can be used to delete stale entries at end of day. The DataFrame includes your latest predictions for active questions and your final prediction snapshot on resolved questions.
+The index above shows entry names and short descriptions. Use the memory tools below to retrieve full content, add/update/delete entries.
+Entries should be: question-specific reasoning (include QIDs), post-resolution lessons (what went wrong/right), or meta-patterns (cross-question calibration insights).
 
 """
                 else:
-                    memory_section = f"""## YOUR MEMORY (reasoning, patterns, and insights from previous days)
+                    memory_section = f"""## YOUR MEMORY (0 entries, max {max_ent})
+No memory entries yet. Use the memory tools below to add entries during this session.
+Entries should be: question-specific reasoning (include QIDs), post-resolution lessons (what went wrong/right), or meta-patterns (cross-question calibration insights).
+
+"""
+            elif memory_content:
+                # BasicMemory (legacy)
+                memory_section = f"""## YOUR MEMORY (reasoning, patterns, and insights from previous days)
 <memory>
 {memory_content}
 </memory>
@@ -770,19 +864,18 @@ Use the reasoning and insights above to inform today's forecasts. The DataFrame 
         # Search section (only if enabled)
         search_section = ""
         search_advice = ""
-        end_day_num = 3  # Default without search
-        submit_num = 2   # Default without search
+        has_memory_tools = isinstance(self._memory, (StructuredMemory, ActiveMemory))
+        memory_tool_section = ""
+        # Action numbering: 1=query, then optionally search, then optionally memory tools, then submit, then end
+        next_num = 2
         if self._search_handler.is_available:
-            end_day_num = 4  # Shift to 4 when search is enabled
-            submit_num = 3
-            
             cutoff_desc = "today's date"
             if self.config.search_cutoff_days > 0:
                 cutoff_date = current_date - timedelta(days=self.config.search_cutoff_days)
                 cutoff_desc = f"{cutoff_date} (today - {self.config.search_cutoff_days} days)"
 
             search_section = f"""
-### 2. Search News Articles
+### {next_num}. Search News Articles
 <action type="search">
 your search query here
 </action>
@@ -799,13 +892,42 @@ You can use search to gather evidence before submitting forecasts.
             search_advice = f"""
 
 You have access to a news article database. {self._search_results_description()}"""
-        
+            next_num += 1
+
+        if has_memory_tools:
+            max_ent = getattr(self._memory, '_max_entries', 500)
+            memory_tool_section = f"""
+### {next_num}. Retrieve Memory Entry
+<action type="memory_retrieve">ENTRY_NAME</action>
+Retrieves the full content of a memory entry by its name from the index above.
+
+### {next_num + 1}. Add Memory Entry
+<action type="memory_add">
+<name>lowercase-hyphenated-name-with-qid (max 64 chars, a-z 0-9 hyphens only)</name>
+<description>What it stores + when to use it + QIDs (max 256 chars)</description>
+<content>Full content (max 1024 chars)</content>
+</action>
+
+### {next_num + 2}. Update Memory Entry
+<action type="memory_update" name="ENTRY_NAME">
+<description>Updated description</description>
+<content>Updated content</content>
+</action>
+Only include the fields you want to change.
+
+### {next_num + 3}. Delete Memory Entry
+<action type="memory_delete">ENTRY_NAME</action>
+
+Tip: After submitting a forecast, consider updating or adding the memory entry for that QID with your current reasoning and key evidence. At end of day, you will be give another opportunity to update your memory.
+"""
+            next_num += 4
+
+        submit_num = next_num
+        end_day_num = next_num + 1
+
         return f"""You are a forecasting agent. Today is {current_date}. Your goal: make accurate probability predictions.
 
-{self._feedback_handler.format_feedback(
-    self._feedback_handler.generate_feedback(self._forecast_interface, current_date, self.inference),
-    show_tw_peer=not self.config.single_agent_mode,
-)}
+{self._format_and_cache_feedback(current_date)}
 
 {getattr(self._forecast_interface, 'source_context', '')}
 
@@ -854,7 +976,7 @@ print(df[df['is_resolved'] == False][['qid', 'title', 'answer_type']].head())
 ```
 </action>
 Use `print()` to ensure you see output. We are not executing in a jupyter notebook, so .head() preview alone can be unreliable.
-{search_section}
+{search_section}{memory_tool_section}
 ### {submit_num}. Submit Forecast
 <action type="submit">
 <forecast qid="QUESTION_ID">
@@ -889,7 +1011,8 @@ When ready to move on, use <action type="next"/> to end this session.
         """
         Ask the agent to update its memory at the end of the day.
 
-        For StructuredMemory: uses add/delete operations on individual entries.
+        For StructuredMemory: runs a mini action loop with memory tool calls.
+        For ActiveMemory: single-shot with XML ops (existing behavior).
         For BasicMemory (legacy): uses full replacement via <memory> tags.
         """
         if isinstance(self._memory, ActiveMemory):
@@ -910,10 +1033,21 @@ When ready to move on, use <action type="next"/> to end this session.
                 )
                 memory_prompt = cheat_section + "\n\n" + memory_prompt
 
+        # For StructuredMemory: run a mini action loop with memory tools
+        if isinstance(self._memory, StructuredMemory) and not isinstance(self._memory, ActiveMemory):
+            self._run_memory_update_loop(messages, forecast_interface, memory_prompt, current_date)
+            return
+
+        # For ActiveMemory and BasicMemory: single-shot (existing behavior)
         messages.append({"role": "user", "content": memory_prompt})
         response, usage = self.inference.chat(messages, self.config.sampling_params)
         self._timer.record_tokens(usage)
         self._timer.record_cost(usage.get("cost", 0), "llm")
+
+        if not response:
+            print(f"  [{self.agent_id}] Memory update got empty response from LLM, skipping.")
+            return
+
         messages.append({"role": "assistant", "content": response})
 
         reasoning = usage.get("_reasoning_content") if usage else None
@@ -925,49 +1059,151 @@ When ready to move on, use <action type="next"/> to end this session.
 
         if isinstance(self._memory, ActiveMemory):
             self._apply_active_memory_ops(response, current_date)
-        elif isinstance(self._memory, StructuredMemory):
-            self._apply_structured_memory_ops(response)
         else:
             new_memory = extract_memory(response)
             if new_memory is not None:
                 self._memory.update(new_memory)
 
+    def _run_memory_update_loop(self, messages: List[Dict[str, str]],
+                                 forecast_interface, memory_prompt: str,
+                                 current_date: date) -> None:
+        """Run a mini action loop for structured memory updates with its own budget."""
+        mem_budget = BudgetTracker(BudgetSettings(
+            max_total_tokens=self.config.memory_update_max_total_tokens,
+            submit_reserve_tokens=self.config.submit_reserve_tokens,
+            force_submit_threshold_tokens=self.config.force_submit_threshold_tokens,
+        ))
+
+        messages.append({"role": "user", "content": memory_prompt})
+        # Bootstrap only from the memory prompt — NOT the full conversation.
+        # The main loop already consumed its own budget; this mini-loop has an
+        # independent token budget (memory_update_max_total_tokens).
+        mem_budget.bootstrap_context(memory_prompt)
+
+        while not mem_budget.is_exhausted():
+            try:
+                with self._timer.track("llm"):
+                    response, usage = self.inference.chat(messages, self.config.sampling_params)
+            except Exception as e:
+                print(f"  [{self.agent_id}] Memory update LLM error: {e}")
+                break
+
+            if not response or not response.strip():
+                print(f"  [{self.agent_id}] Memory update got empty response, ending.")
+                break
+
+            self._timer.record_tokens(usage)
+            self._timer.record_cost(usage.get("cost", 0), "llm")
+            mem_budget.record_usage(usage)
+
+            reasoning = usage.get("_reasoning_content") if usage else None
+
+            self._append_with_budget(messages, mem_budget, {"role": "assistant", "content": response})
+
+            forecast_interface.log_model_output(
+                "(memory_update_loop)", response,
+                {"phase": "memory_update", "current_memory_entries": self._memory.entry_count, "reasoning": reasoning}
+            )
+
+            parsed = parse_action(response, self.config.max_outcomes_per_question)
+
+            if parsed.action_type == "next":
+                break
+
+            if parsed.action_type in ("memory_retrieve", "memory_add", "memory_update", "memory_delete"):
+                self._handle_memory_action(messages, forecast_interface, response, parsed, mem_budget, reasoning=reasoning)
+            else:
+                # In the memory update loop, also try legacy XML ops as fallback
+                adds, deletes = extract_memory_ops(response)
+                if adds or deletes:
+                    for entry_name in deletes:
+                        self._memory.delete_entry(entry_name)
+                    for add in adds:
+                        try:
+                            self._memory.add_entry(
+                                add["name"], add.get("description", add.get("name", "")), add.get("content", "")
+                            )
+                        except ValueError:
+                            pass  # skip duplicates in legacy fallback
+                    feedback = f"MEMORY: Applied {len(adds)} adds, {len(deletes)} deletes. Total entries: {self._memory.entry_count}."
+                    self._append_with_budget(messages, mem_budget, {"role": "user", "content": mem_budget.format_feedback(feedback)})
+                else:
+                    # No recognized action — end the loop
+                    break
+
+        # Persist memory to disk
+        self._memory._save(current_date)
+
     def _build_structured_memory_prompt(self, current_date: date) -> str:
-        """Build the structured memory update prompt (add/delete entries)."""
-        return f"""End of session {current_date}. You can now update your memory.
+        """Build the structured memory update prompt (tool-call-based)."""
+        memory_index = self._memory.get_index()
+        max_ent = self._memory._max_entries
+        index_block = ""
+        if memory_index:
+            index_block = f"""<memory_index>
+{memory_index}
+</memory_index>
+"""
+        resolution_recap = self._build_resolution_recap_for_memory()
+
+        return f"""End of session {current_date}. Update your memory now.
 
 ## MEMORY UPDATE
 {self._build_memory_carryover_note(current_date)}
 
-You currently have {self._memory.entry_count} memory entries ({len(self._memory)} chars). Max 30 entries.
+{resolution_recap}You currently have {self._memory.entry_count} memory entries (max {max_ent}).
+{index_block}
 
-### What to store (add new entries for):
-1. **reasoning** — Why you made specific predictions, especially when based on hard-to-find evidence. Example: "Q149: PSG 0.70 because Sky Bet implied 55% and Inter eliminated in semis."
-2. **calibration** — Performance patterns across resolved questions. Example: "Bookmaker odds correct 80% across 15 sports Qs; weight them more."
-3. **insight** — Non-obvious patterns that search alone would not surface. Example: "'First country to X' Qs almost always resolve to a major economy."
-4. **fact** — Critical hard-to-find facts relevant to active questions. Example: "ECB next meeting June 5 — relevant to Q72, Q108."
+### STEP 1: Extract lessons from resolved questions
+For each question resolved this session, create a lesson entry:
+- Name it `q<QID>-lesson-<topic>` (e.g., `q247-lesson-ceremony-precedent`)
+- Content: What you predicted, what actually happened, WHY you were wrong/right, and a transferable rule for similar future questions
+- Delete the old forecast entry for that QID — replace it with the lesson
+- If no questions resolved this session, skip to Step 2.
 
-### What NOT to store:
-General forecasting advice (already in instructions), easily searchable facts, prediction outcomes without reasoning.
+Example lesson entry:
+  name: q247-lesson-ceremony-precedent
+  description: Lesson from Q247 resolution — weight historical precedent for rituals
+  content: Predicted St. Peter's Square 0.70, Lateran 0.10. Truth: St. Peter's Square. Brier +0.85. Lesson: For ceremonial events with strong historical patterns (all recent popes used same venue), assign 0.85+ to the precedent option.
 
-### How to update:
-Add entries (you may add multiple):
-<memory_add>
-name: Short descriptive title (max 150 chars, include question IDs if relevant)
-type: reasoning|calibration|insight|fact
-qids: Q72, Q108 (comma-separated, or leave empty)
-content: Your content here (max 800 chars). Include specific numbers, sources, and reasoning.
-</memory_add>
+### STEP 2: Update meta-patterns
+If you see a pattern across 2+ resolved questions (or resolved + active), add or update a meta-pattern entry:
+- Name it `meta-<pattern-topic>`
+- Content: The pattern, supporting evidence (which QIDs), and how to apply it
 
-Delete stale entries by ID (you may delete multiple):
-<memory_delete>ENTRY_ID_HERE</memory_delete>
+### STEP 3: Update active question entries
+For questions you researched or updated today, store your current reasoning and key evidence. Merge duplicate entries about the same question.
 
-First reflect on today's session, then add/delete entries as needed:
-<reasoning>
-Reflect on today's forecasting session...
-</reasoning>
+### STEP 4: Cleanup
+Delete stale entries (resolved questions with no useful lesson, outdated facts). Descriptions should answer: "Why would future-me read this?" — not just "What did I do today."
 
-If no updates needed, just output <reasoning>...</reasoning> without any memory tags."""
+### Rules
+- Every entry must contain a reusable insight or reasoning chain — NOT a log of what you did
+- Do NOT just create entries like `2025-05-14-updates-summary` that just list probability changes. You must include a reusable insight or reasoning chain.
+- Do NOT just store general forecasting advice or easily searchable facts. You must include a reusable insight or reasoning chain.
+
+### Memory tools (use one per turn):
+
+Retrieve: <action type="memory_retrieve">ENTRY_NAME</action>
+
+Add:
+<action type="memory_add">
+<name>lowercase-hyphenated-name-with-qid (max 64 chars, a-z 0-9 hyphens only)</name>
+<description>What it stores + when to use it (max 256 chars, include QIDs)</description>
+<content>Full content (max 1024 chars). Include specific numbers, sources, reasoning.</content>
+</action>
+
+Update:
+<action type="memory_update" name="ENTRY_NAME">
+<description>Updated description</description>
+<content>Updated content</content>
+</action>
+
+Delete: <action type="memory_delete">ENTRY_NAME</action>
+
+Done: <action type="next"/>
+
+Start with Step 1. If questions resolved this session, create lesson entries first."""
 
     def _build_plain_memory_prompt(self, current_date: date) -> str:
         """Build the legacy plain-text memory update prompt (full replacement)."""
@@ -997,15 +1233,22 @@ If you don't want to update memory, just output <reasoning>...</reasoning> witho
 Current memory length: {len(self._memory)} characters"""
 
     def _apply_structured_memory_ops(self, response: str) -> None:
-        """Apply structured memory operations from agent response, with fallback."""
+        """Apply structured memory operations from agent response, with fallback.
+
+        Kept for backward compatibility (ActiveMemory meta-insight path).
+        The primary StructuredMemory path now uses ``_run_memory_update_loop``.
+        """
         adds, deletes = extract_memory_ops(response)
         if adds or deletes:
-            for entry_id in deletes:
-                self._memory.delete_entry(entry_id)
+            for entry_name in deletes:
+                self._memory.delete_entry(entry_name)
             for add in adds:
-                self._memory.add_entry(
-                    add["name"], add["type"], add.get("qids", ""), add["content"]
-                )
+                try:
+                    self._memory.add_entry(
+                        add["name"], add.get("description", add.get("name", "")), add.get("content", "")
+                    )
+                except ValueError:
+                    pass  # skip duplicates
         else:
             # Fallback: try old-style <memory> full replacement
             old_memory = extract_memory(response)
@@ -1070,7 +1313,7 @@ qids: Q72, Q108 (comma-separated, or leave empty)
 content: Your content here (max 400 chars). Focus on cross-question patterns.
 </memory_add>
 
-<memory_delete>ENTRY_ID_HERE</memory_delete>
+<memory_delete>ENTRY_NAME_HERE</memory_delete>
 
 First reflect on today's session, then update both layers as needed:
 <reasoning>
@@ -1104,12 +1347,15 @@ If no updates needed, just output <reasoning>...</reasoning> without any memory 
 
         # Parse meta-insight operations (reuse existing parser)
         meta_adds, meta_deletes = extract_memory_ops(response)
-        for entry_id in meta_deletes:
-            self._memory.delete_entry(entry_id)
+        for entry_name in meta_deletes:
+            self._memory.delete_entry(entry_name)
         for add in meta_adds:
-            self._memory.add_entry(
-                add["name"], add["type"], add.get("qids", ""), add["content"]
-            )
+            try:
+                self._memory.add_entry(
+                    add["name"], add.get("description", add.get("name", "")), add.get("content", "")
+                )
+            except ValueError:
+                pass  # skip duplicates
 
         # Persist both layers
         self._memory.save(current_date)

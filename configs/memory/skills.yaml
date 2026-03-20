@@ -1,0 +1,68 @@
+# Index-based structured memory with token budgets (new memory system).
+#
+# Usage: python aisa_scripts/run_sim/submit_sim_aisa.py --config configs/memory/new_structured.yaml --runs 1 --gpus 1 --memory 80 --time 2-00:00:00
+
+# --- Restart ---
+# Pass at submit time: --set restart_from=/path/to/run --set restart_from_day=2025-04-25
+
+# --- Simulation Meta ---
+sim_name: "deepseek_skills_mem"
+start_date: "2025-05-01"
+end_date: "2025-08-23"
+lookback_days: 7
+search_cutoff_days: 0
+split: "test"
+
+# --- Data Paths ---
+dataset: "openforesight"
+dataset_path: "nikhilchandak/OpenForesight"
+dataset_cache: "/mnt/nfs/datasets_ac/cache/huggingface/datasets"
+min_forecasters: 10
+resolved_only: true
+output_base: "logs/current_sim"
+warmup_parallelism: 64
+
+# --- Search Settings ---
+search_db: "/mnt/nfs/datasets_ac/news/deduped_articles/lance/Qwen3-Embedding-8B"
+embedding_model: "/mnt/nfs/home/ac146091/forecast-sim/models/Qwen3-Embedding-8B"
+embedding_gpu_mem: 0.7
+
+# --- Answer Matching ---
+matching: "openrouter"
+matcher: "deepseek/deepseek-v3.2"
+matcher_gpu_mem: 0.0
+max_model_len: 8192
+
+# --- Inference Defaults ---
+rate_limit: 32.0
+parallel: true
+
+# --- Cheat Feedback (privileged directional-correctness before memory update) ---
+# cheat_feedback: true
+# cheat_feedback_detail: "direction"  # "full" (Brier scores) or "direction" (labels only)
+
+# --- Agents Configuration ---
+defaults:
+  provider: "openrouter"
+  scaffold: "allQ"
+  temperature: 0.7
+  max_tokens: 2048
+  max_retries: 3
+  enable_memory: true
+  memory_format: "structured"
+
+  # --- Context-window budgets (replaces action budgets) ---
+  max_actions: null                  # No action limit; token budget is the only constraint
+  warmup_max_actions: null
+  max_total_tokens: 100000           # Main loop context token budget
+  warmup_max_total_tokens: 30000     # Per-question warmup token budget
+  submit_reserve_tokens: 8192
+  force_submit_threshold_tokens: 16384
+
+  # --- Memory settings ---
+  memory_max_entries: 500           # Max structured memory entries (300+ Qs + meta)
+  memory_update_max_total_tokens: 50000  # End-of-day memory mini-loop token budget
+
+agents:
+  - model: "deepseek/deepseek-v3.2"
+    provider: "openrouter"

@@ -13,11 +13,15 @@ from datetime import date
 from dataclasses import dataclass, asdict
 from typing import Optional, List, Dict
 import csv
-import hashlib
-import time
+import re
 
 import pandas as pd
 import yaml
+
+
+def _strip_xml_tags(text: str) -> str:
+    """Remove XML/HTML tags from text."""
+    return re.sub(r"<[^>]+>", "", text)
 
 
 class BasicMemory:
@@ -114,18 +118,16 @@ class BasicMemory:
 
 # --- Structured Memory ---
 
-VALID_ENTRY_TYPES = {"reasoning", "calibration", "insight", "fact"}
-FIELD_LIMITS = {"name": 150, "qids": 100, "content": 800}
-MAX_ENTRIES = 30
+FIELD_LIMITS = {"name": 64, "description": 256, "content": 1024}
+MAX_ENTRIES = 500
+RESERVED_WORDS = {"anthropic", "claude"}
 
 
 @dataclass
 class MemoryEntry:
-    """A single structured memory entry."""
-    id: str
-    name: str
-    type: str
-    qids: str
+    """A single structured memory entry (skills-style, name is primary key)."""
+    name: str          # primary key: lowercase, hyphens, numbers only
+    description: str
     content: str
     added: str  # ISO date string
 
@@ -134,7 +136,7 @@ class StructuredMemory:
     """
     YAML-based structured memory for forecasting agents.
 
-    Each memory entry has metadata (id, name, type, qids) and content.
+    Each memory entry uses name as primary key (skills-style).
     Agents add new entries and delete stale ones instead of rewriting everything.
 
     Storage: {memory_dir}/memory/{YYYY-MM-DD}.yaml
@@ -186,50 +188,69 @@ class StructuredMemory:
                 continue
         return most_recent
 
-    _TYPE_PRIORITY = {"reasoning": 0, "insight": 1, "fact": 2, "calibration": 3}
 
     def get(self) -> str:
-        """Render entries into compact text for prompt injection.
-
-        Entries are grouped by type priority (reasoning > insight > fact > calibration)
-        so evidence for active predictions appears first in the context window.
-        """
+        """Render entries into compact text for prompt injection."""
         if not self._entries:
             return ""
-        sorted_entries = sorted(
-            self._entries,
-            key=lambda e: (self._TYPE_PRIORITY.get(e.type, 9), e.added),
-        )
         lines = []
-        for e in sorted_entries:
-            qids_part = f", {e.qids}" if e.qids else ""
-            lines.append(f"[{e.id}] ({e.type}{qids_part}) {e.name}")
-            lines.append(f"  {e.content} (added: {e.added})")
+        for e in self._entries:
+            lines.append(f"[{e.name}] {e.description} ({e.added})")
+            if e.content:
+                lines.append(f"  {e.content}")
             lines.append("")
         return "\n".join(lines).strip()
 
-    def add_entry(self, name: str, entry_type: str, qids: str, content: str) -> str:
+    def get_index(self) -> str:
+        """Render entry index (name + description) for prompt injection. No content."""
+        if not self._entries:
+            return ""
+        lines = []
+        for e in self._entries:
+            desc = e.description or "(no description)"
+            lines.append(f"[{e.name}] {desc} ({e.added})")
+        return "\n".join(lines)
+
+    def retrieve(self, entry_name: str) -> Optional[str]:
+        """Retrieve full content of a single entry by name. Returns None if not found."""
+        entry_name = self._normalize_lookup_name(entry_name)
+        for e in self._entries:
+            if e.name == entry_name:
+                lines = [
+                    f"[{e.name}]",
+                    f"Description: {e.description}",
+                    f"Content: {e.content}",
+                    f"Added: {e.added}",
+                ]
+                return "\n".join(lines)
+        return None
+
+    def _normalize_lookup_name(self, raw: str) -> str:
+        """Normalize a name for lookup (strip, lowercase, collapse whitespace to hyphens)."""
+        return raw.strip().lower().replace(" ", "-")
+
+    def add_entry(self, name: str, description: str, content: str) -> str:
         """
-        Add a new memory entry. Returns the generated entry ID.
+        Add a new memory entry. Returns the validated name on success,
+        or raises ValueError on duplicate/invalid name.
 
-        Fields are truncated to their character limits.
-        If entry count exceeds MAX_ENTRIES, the oldest entry is dropped.
+        Name is auto-normalized (lowercase, hyphens). Fields are truncated.
+        If entry count exceeds max_entries, the oldest entry is dropped.
         """
-        # Validate type
-        if entry_type not in VALID_ENTRY_TYPES:
-            entry_type = "insight"  # Default fallback
+        name = self._validate_name(name)
+        description = _strip_xml_tags(description).strip()[:self._field_limits["description"]]
+        content = _strip_xml_tags(content).strip()[:self._field_limits["content"]]
 
-        # Truncate fields
-        name = name.strip()[:self._field_limits["name"]]
-        qids = qids.strip()[:self._field_limits["qids"]]
-        content = content.strip()[:self._field_limits["content"]]
+        if not description:
+            description = name  # Fallback: use name as description
 
-        entry_id = self._generate_id()
+        # Reject duplicates
+        if any(e.name == name for e in self._entries):
+            raise ValueError(f"Entry '{name}' already exists — use update_entry to modify it")
+
         entry = MemoryEntry(
-            id=entry_id,
             name=name,
-            type=entry_type,
-            qids=qids,
+            description=description,
             content=content,
             added=str(self._current_date) if self._current_date else "",
         )
@@ -240,13 +261,28 @@ class StructuredMemory:
             self._entries.pop(0)
 
         self._save(self._current_date)
-        return entry_id
+        return name
 
-    def delete_entry(self, entry_id: str) -> bool:
-        """Delete an entry by ID. Returns True if found and deleted."""
-        entry_id = entry_id.strip()
+    def update_entry(self, entry_name: str, *,
+                     description: Optional[str] = None,
+                     content: Optional[str] = None) -> bool:
+        """Partial update of an existing entry by name. Returns True if found."""
+        entry_name = self._normalize_lookup_name(entry_name)
+        for e in self._entries:
+            if e.name == entry_name:
+                if description is not None:
+                    e.description = _strip_xml_tags(description).strip()[:self._field_limits["description"]]
+                if content is not None:
+                    e.content = _strip_xml_tags(content).strip()[:self._field_limits["content"]]
+                self._save(self._current_date)
+                return True
+        return False
+
+    def delete_entry(self, entry_name: str) -> bool:
+        """Delete an entry by name. Returns True if found and deleted."""
+        entry_name = self._normalize_lookup_name(entry_name)
         for i, e in enumerate(self._entries):
-            if e.id == entry_id:
+            if e.name == entry_name:
                 self._entries.pop(i)
                 self._save(self._current_date)
                 return True
@@ -300,17 +336,50 @@ class StructuredMemory:
             return []
 
     def _parse_entry_list(self, data: list) -> List[MemoryEntry]:
-        """Parse a list of dicts into MemoryEntry objects."""
+        """Parse a list of dicts into MemoryEntry objects.
+
+        Backward compatible: old YAML files with ``id``/``type``/``qids`` fields
+        are handled (id is ignored, type/qids folded into description).
+        """
         entries = []
-        for d in data:
+        seen_names: set = set()
+        for i, d in enumerate(data):
             if not isinstance(d, dict):
                 continue
             try:
+                raw_name = str(d.get("name", ""))
+                try:
+                    name = self._validate_name(raw_name) if raw_name else f"migrated-entry-{i}"
+                except ValueError:
+                    name = f"migrated-entry-{i}"
+
+                # Dedup: append suffix if name collision
+                base_name = name
+                suffix = 2
+                while name in seen_names:
+                    name = f"{base_name}-{suffix}"[:self._field_limits["name"]]
+                    suffix += 1
+                seen_names.add(name)
+
+                # Backward compat: generate description from old type/qids if missing
+                description = d.get("description")
+                if description is None:
+                    parts = []
+                    old_type = d.get("type", "")
+                    old_qids = d.get("qids", "")
+                    if old_type:
+                        parts.append(f"[{old_type}]")
+                    if old_qids:
+                        parts.append(f"({old_qids})")
+                    content_preview = str(d.get("content", ""))[:150]
+                    if content_preview:
+                        parts.append(content_preview)
+                    description = " ".join(parts) if parts else name
+                description = str(description)[:self._field_limits["description"]]
+
                 entries.append(MemoryEntry(
-                    id=str(d.get("id", self._generate_id())),
-                    name=str(d.get("name", ""))[:self._field_limits["name"]],
-                    type=str(d.get("type", "insight")) if str(d.get("type", "insight")) in VALID_ENTRY_TYPES else "insight",
-                    qids=str(d.get("qids", ""))[:self._field_limits["qids"]],
+                    name=name,
+                    description=description,
                     content=str(d.get("content", ""))[:self._field_limits["content"]],
                     added=str(d.get("added", "")),
                 ))
@@ -328,29 +397,58 @@ class StructuredMemory:
             paragraphs = [txt_content.strip()]
 
         entries = []
+        seen_names: set = set()
         for i, para in enumerate(paragraphs):
             # Use first line (up to limit) as name, rest as content
             lines = para.split("\n", 1)
-            name = lines[0].strip()[:self._field_limits["name"]]
+            raw_name = lines[0].strip()
             content = (lines[1].strip() if len(lines) > 1 else para.strip())[:self._field_limits["content"]]
-            if not name:
-                name = f"Migrated entry {i+1}"
+            try:
+                name = self._validate_name(raw_name) if raw_name else f"migrated-entry-{i+1}"
+            except ValueError:
+                name = f"migrated-entry-{i+1}"
+
+            # Dedup
+            base_name = name
+            suffix = 2
+            while name in seen_names:
+                name = f"{base_name}-{suffix}"[:self._field_limits["name"]]
+                suffix += 1
+            seen_names.add(name)
+
+            description = content[:self._field_limits["description"]]
 
             entries.append(MemoryEntry(
-                id=self._generate_id(),
                 name=name,
-                type="insight",
-                qids="",
+                description=description,
                 content=content,
                 added=added_date,
             ))
 
         return entries[:self._max_entries]
 
-    def _generate_id(self) -> str:
-        """Generate an 8-char hex ID."""
-        raw = f"{self.agent_id}:{time.time_ns()}"
-        return hashlib.sha256(raw.encode()).hexdigest()[:8]
+    def _validate_name(self, raw: str) -> str:
+        """Normalize and validate a memory entry name (skills-style).
+
+        Auto-normalizes: strip XML tags, lowercase, replace spaces/underscores
+        with hyphens, remove invalid chars, collapse multiple hyphens,
+        strip leading/trailing hyphens, truncate to limit.
+
+        Raises ValueError if result is empty or contains reserved words.
+        """
+        name = _strip_xml_tags(raw).strip().lower()
+        name = re.sub(r'[\s_]+', '-', name)           # spaces/underscores -> hyphens
+        name = re.sub(r'[^a-z0-9-]', '', name)        # strip invalid chars
+        name = re.sub(r'-{2,}', '-', name)            # collapse multiple hyphens
+        name = name.strip('-')                         # no leading/trailing hyphens
+        name = name[:self._field_limits["name"]]
+
+        if not name:
+            raise ValueError("Name is empty after normalization")
+        for word in RESERVED_WORDS:
+            if word in name:
+                raise ValueError(f"Name cannot contain reserved word '{word}'")
+        return name
 
     def __bool__(self) -> bool:
         return bool(self._entries)
@@ -367,7 +465,7 @@ class StructuredMemory:
 # --- Active Memory ---
 
 ACTIVE_META_MAX_ENTRIES = 15
-ACTIVE_META_FIELD_LIMITS = {"name": 150, "qids": 100, "content": 400}
+ACTIVE_META_FIELD_LIMITS = {"name": 64, "description": 256, "content": 400}
 ACTIVE_MEMO_CHAR_LIMIT = 500
 MEMO_DF_COLUMNS = ["qid", "question", "last_updated", "memory", "confidence", "category"]
 
@@ -543,13 +641,25 @@ class ActiveMemory:
 
     # --- Meta-insight delegation ---
 
-    def add_entry(self, name: str, entry_type: str, qids: str, content: str) -> str:
+    def add_entry(self, name: str, description: str, content: str) -> str:
         """Add a meta-insight entry (delegates to StructuredMemory)."""
-        return self._meta.add_entry(name, entry_type, qids, content)
+        return self._meta.add_entry(name, description, content)
 
-    def delete_entry(self, entry_id: str) -> bool:
-        """Delete a meta-insight entry by ID."""
-        return self._meta.delete_entry(entry_id)
+    def delete_entry(self, entry_name: str) -> bool:
+        """Delete a meta-insight entry by name."""
+        return self._meta.delete_entry(entry_name)
+
+    def update_entry(self, entry_name: str, **kwargs) -> bool:
+        """Update a meta-insight entry (delegates to StructuredMemory)."""
+        return self._meta.update_entry(entry_name, **kwargs)
+
+    def get_index(self) -> str:
+        """Render meta-insight index (delegates to StructuredMemory)."""
+        return self._meta.get_index()
+
+    def retrieve(self, entry_name: str) -> Optional[str]:
+        """Retrieve full meta-insight entry (delegates to StructuredMemory)."""
+        return self._meta.retrieve(entry_name)
 
     @property
     def entry_count(self) -> int:
