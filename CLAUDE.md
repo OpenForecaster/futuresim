@@ -22,7 +22,7 @@ python scripts/test_basic_agent.py \
     --start_date 2025-04-01 --end_date 2025-04-05 --sim_name test_run
 
 # Run from YAML config
-python scripts/test_basic_agent.py --config configs/allq_nomem_restart_qwen3.5_27b.yaml
+python scripts/test_basic_agent.py --config configs/qwen3.5/allq_nomem_restart_qwen3.5_27b.yaml
 
 # Resume from last checkpoint
 python scripts/test_basic_agent.py --resume /path/to/output_dir
@@ -32,10 +32,10 @@ python scripts/test_basic_agent.py \
     --restart_from /path/to/original/run --restart_from_day 2025-04-05
 
 # Submit HTCondor cluster jobs
-python mpi_scripts/run_sim/submit_sim.py --config configs/allq_sim.yaml --runs 3
+python mpi_scripts/run_sim/submit_sim.py --config configs/shared/metaculus_sim.yaml --runs 3
 ```
 
-SkyRL has a separate venv (`.skyrl-venv/`). FlashAttention is optional — install manually if needed.
+SkyRL training uses the **same repo `.venv`** as the rest of forecast-sim: run `uv sync` at the repo root, then `cd third_party/SkyRL && uv sync --active --extra fsdp` so the SkyRL submodule’s dependencies install into that env (see `.agents/skills/skyrl-training/references/setup-and-launch.md`). FlashAttention is optional — install manually if needed.
 
 ## Architecture
 
@@ -48,6 +48,7 @@ SkyRL has a separate venv (`.skyrl-venv/`). FlashAttention is optional — insta
 - **AllQAgent** (`allQAgent/agent.py`): Warmup variant — Day 0 iterates through ALL questions (parallelized), then standard BasicAgent behavior on subsequent days.
 - **AllQDailyAgent**: Every day predicts on each question sequentially, no DataFrame queries.
 - **GPTOSSBasicAgent/GPTOSSAllQAgent** (`gptossAgent/`): OpenAI Responses API variants with extended thinking support.
+- **QwenBasicAgent/QwenAllQAgent** (`qwenAgent/`): vLLM Chat Completions with native `tool_calls` — **intended for Qwen3.5** (`qwen3_coder` parser). **Qwen3** should use `BasicAgent`/`AllQAgent` scaffolds with `vllm_enable_tools: false` (see `.agents/skills/agent-scaffolds/references/model-specific-notes.md`).
 
 ### Scoring (`environment/scoring/`)
 Brier score (`1 - Σ(p_i - y_i)²`), peer score (`100 × (my_score - avg_others)`), time-weighted peer score. Answer matching uses LLM-based semantic matching with Union-Find for transitive closure (`environment/ansmatching.py`).
