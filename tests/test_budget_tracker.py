@@ -95,6 +95,7 @@ def test_combined_budget_feedback_shows_both_constraints():
 
 
 def test_budget_overview_mentions_dual_budget_rules():
+    # Non-warmup without memory: no submit_reserve / force_submit language
     agent = BasicAgent(
         agent_id="test_agent",
         inference_provider=None,
@@ -111,9 +112,89 @@ def test_budget_overview_mentions_dual_budget_rules():
     assert "context budget of 4096 tokens" in overview
     assert "for this session" in overview
     assert "tracks the current prompt length" in overview
-    assert "Keep at least 512 tokens free" in overview
-    assert "at or below 1024" in overview
+    # Non-warmup days no longer mention submit_reserve / force_submit
+    assert "Keep at least" not in overview
+    assert "Force-submit" not in overview
     assert "session ends" in overview
+
+    # Warmup still uses submit_reserve / force_submit semantics
+    agent_with_warmup = BasicAgent(
+        agent_id="test_agent",
+        inference_provider=None,
+        config=AgentConfig(
+            max_actions=5,
+            max_total_tokens=4096,
+            warmup_max_total_tokens=2048,
+            submit_reserve_tokens=512,
+            force_submit_threshold_tokens=1024,
+        ),
+    )
+    warmup_overview = agent_with_warmup._build_budget_overview(warmup=True)
+    assert "Keep at least 512 tokens free" in warmup_overview
+    assert "at or below 1024" in warmup_overview
+
+
+def test_budget_overview_shows_memory_phase_for_structured_memory():
+    from agents.utils.memory import StructuredMemory
+    agent = BasicAgent(
+        agent_id="test_agent",
+        inference_provider=None,
+        config=AgentConfig(
+            max_total_tokens=100000,
+            memory_update_max_total_tokens=30000,
+        ),
+    )
+    # Simulate structured memory being enabled
+    agent._memory = StructuredMemory.__new__(StructuredMemory)
+    agent._memory._max_entries = 500
+    agent._memory._entries = {}
+
+    overview = agent._build_budget_overview()
+    assert "memory update phase" in overview
+    assert "~30000 tokens are reserved for memory" in overview
+    assert "~70000 tokens have been used" in overview
+    assert "Keep at least" not in overview
+
+
+def test_memory_phase_threshold_triggers_correctly():
+    budget = BudgetTracker(BudgetSettings(
+        max_total_tokens=100000,
+        submit_reserve_tokens=0,
+        force_submit_threshold_tokens=0,
+        memory_phase_threshold_tokens=30000,
+    ))
+
+    budget.record_usage({"prompt_tokens": 60000})
+    assert budget.should_enter_memory_phase() is False
+    assert budget.tokens_until_memory_phase() == 10000
+
+    budget.record_usage({"prompt_tokens": 70000})
+    assert budget.should_enter_memory_phase() is True
+    assert budget.tokens_until_memory_phase() == 0
+
+    # After entering memory phase, should_enter returns False
+    budget.memory_phase = True
+    assert budget.should_enter_memory_phase() is False
+
+
+def test_status_text_shows_memory_phase_metric():
+    budget = BudgetTracker(BudgetSettings(
+        max_total_tokens=100000,
+        submit_reserve_tokens=0,
+        force_submit_threshold_tokens=0,
+        memory_phase_threshold_tokens=30000,
+    ))
+    budget.record_usage({"prompt_tokens": 50000})
+
+    text = budget.status_text()
+    assert "Context tokens remaining: 50000" in text
+    assert "Tokens remaining until memory phase: 20000" in text
+
+    # In memory phase, the "until memory phase" line disappears
+    budget.memory_phase = True
+    text = budget.status_text()
+    assert "Context tokens remaining: 50000" in text
+    assert "Tokens remaining until memory phase" not in text
 
 
 def test_search_tool_descriptions_mention_chunk_limits():

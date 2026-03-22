@@ -45,13 +45,19 @@ parallel: true
 defaults:
   provider: "openrouter"
   scaffold: "allQ"
-  max_actions: 20
-  warmup_max_actions: 10
   temperature: 0.7
   max_tokens: 2048
   max_retries: 3
   enable_memory: true
   memory_format: "plain"
+
+  # --- Context-window budgets (replaces action budgets) ---
+  max_actions: null                  # No action limit; token budget is the only constraint
+  warmup_max_actions: null
+  max_total_tokens: 100000           # Main loop context token budget
+  warmup_max_total_tokens: 30000     # Per-question warmup token budget
+  submit_reserve_tokens: 8192
+  force_submit_threshold_tokens: 16384
 
 agents:
   - model: "deepseek/deepseek-v3.2"

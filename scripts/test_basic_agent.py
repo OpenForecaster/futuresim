@@ -147,29 +147,36 @@ def prepare_restart_directory(source_dir: str, restart_day: str, output_dir: str
                 dst_memory_dir = os.path.join(dst_agent_dir, "memory")
                 os.makedirs(dst_memory_dir, exist_ok=True)
                 
-                for mem_file in os.listdir(src_memory_dir):
+                for entry in os.listdir(src_memory_dir):
+                    entry_path = os.path.join(src_memory_dir, entry)
                     # Support all memory formats:
                     #   plain:      YYYY-MM-DD.txt
                     #   structured: YYYY-MM-DD.yaml
-                    #   active:     YYYY-MM-DD.yaml + memo_YYYY-MM-DD.csv
-                    if mem_file.endswith(".txt") or mem_file.endswith(".yaml"):
+                    #   active (old): YYYY-MM-DD.yaml + memo_YYYY-MM-DD.csv
+                    #   active (new): YYYY-MM-DD/ directory with mem.csv + meta.yaml
+                    if os.path.isdir(entry_path):
+                        # New directory format: memory/YYYY-MM-DD/
                         try:
-                            file_date = date.fromisoformat(mem_file.rsplit(".", 1)[0])
-                            if file_date < restart_date:
-                                shutil.copy(
-                                    os.path.join(src_memory_dir, mem_file),
-                                    os.path.join(dst_memory_dir, mem_file)
+                            dir_date = date.fromisoformat(entry)
+                            if dir_date < restart_date:
+                                shutil.copytree(
+                                    entry_path,
+                                    os.path.join(dst_memory_dir, entry)
                                 )
                         except ValueError:
                             continue
-                    elif mem_file.startswith("memo_") and mem_file.endswith(".csv"):
+                    elif entry.endswith(".txt") or entry.endswith(".yaml"):
                         try:
-                            file_date = date.fromisoformat(mem_file[len("memo_"):-len(".csv")])
+                            file_date = date.fromisoformat(entry.rsplit(".", 1)[0])
                             if file_date < restart_date:
-                                shutil.copy(
-                                    os.path.join(src_memory_dir, mem_file),
-                                    os.path.join(dst_memory_dir, mem_file)
-                                )
+                                shutil.copy(entry_path, os.path.join(dst_memory_dir, entry))
+                        except ValueError:
+                            continue
+                    elif entry.startswith("memo_") and entry.endswith(".csv"):
+                        try:
+                            file_date = date.fromisoformat(entry[len("memo_"):-len(".csv")])
+                            if file_date < restart_date:
+                                shutil.copy(entry_path, os.path.join(dst_memory_dir, entry))
                         except ValueError:
                             continue
                             

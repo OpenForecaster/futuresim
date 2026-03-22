@@ -17,7 +17,7 @@ from dataclasses import dataclass
 @dataclass
 class ParsedAction:
     """Result of parsing an action from agent response."""
-    action_type: Optional[str]  # "query", "submit", "search", "memory_*", "next", or None
+    action_type: Optional[str]  # "query", "submit", "search", "memory_*", "mem_*", "next", or None
     code: Optional[str]  # For query: the Python code
     forecasts: Optional[List[Dict]]  # For submit: list of {qid, outcomes}
     query: Optional[str]  # For search: the search query
@@ -26,6 +26,8 @@ class ParsedAction:
     memory_entry_name: Optional[str] = None  # For memory_retrieve/update/delete: entry name
     memory_add_data: Optional[Dict] = None  # For memory_add: {name, description, content}
     memory_update_data: Optional[Dict] = None  # For memory_update: partial fields
+    mem_data: Optional[Dict] = None  # For mem_add/update: {qid, question, memory, category}
+    mem_qid: Optional[str] = None  # For mem_update/delete: target qid
     error: Optional[str] = None  # Error message if parsing failed
 
 
@@ -194,6 +196,35 @@ def parse_action(response: str, max_outcomes: int = 5) -> ParsedAction:
         return ParsedAction(action_type="memory_delete", code=None, forecasts=None,
                            query=None, error="No entry name provided for memory_delete")
 
+    elif action_type == "mem_add":
+        data = _parse_mem_body(content, require_question=True)
+        if data:
+            return ParsedAction(action_type="mem_add", code=None, forecasts=None,
+                               query=None, mem_data=data)
+        return ParsedAction(action_type="mem_add", code=None, forecasts=None,
+                           query=None, error="Could not parse mem_add fields (qid and memory required)")
+
+    elif action_type == "mem_update":
+        qid = _extract_attr(extra_attrs, "qid")
+        if not qid:
+            return ParsedAction(action_type="mem_update", code=None, forecasts=None,
+                               query=None, error='mem_update requires qid attribute: <action type="mem_update" qid="Q123">')
+        data = _parse_mem_body(content, require_question=False)
+        if data:
+            data["qid"] = qid
+            return ParsedAction(action_type="mem_update", code=None, forecasts=None,
+                               query=None, mem_data=data, mem_qid=qid)
+        return ParsedAction(action_type="mem_update", code=None, forecasts=None,
+                           query=None, mem_qid=qid, error="mem_update requires at least a memory field")
+
+    elif action_type == "mem_delete":
+        qid = content.strip() or _extract_attr(extra_attrs, "qid")
+        if qid:
+            return ParsedAction(action_type="mem_delete", code=None, forecasts=None,
+                               query=None, mem_qid=qid)
+        return ParsedAction(action_type="mem_delete", code=None, forecasts=None,
+                           query=None, error="No qid provided for mem_delete")
+
     elif action_type == "next":
         return ParsedAction(action_type="next", code=None, forecasts=None,
                            query=None, error=None)
@@ -201,7 +232,7 @@ def parse_action(response: str, max_outcomes: int = 5) -> ParsedAction:
     else:
         return ParsedAction(action_type=None, code=None, forecasts=None,
                            query=None,
-                           error=f"Unknown action type: '{action_type}'. Valid types: query, submit, search, memory_retrieve, memory_add, memory_update, memory_delete, next")
+                           error=f"Unknown action type: '{action_type}'. Valid types: query, submit, search, memory_retrieve, memory_add, memory_update, memory_delete, mem_add, mem_update, mem_delete, next")
 
 
 
@@ -332,20 +363,20 @@ def _parse_forecasts(content: str, max_outcomes: int = 5) -> Tuple[List[Dict], O
     return list(unique_forecasts.values()), None
 
 
+def _extract_attr(extra_attrs: str, attr_name: str) -> Optional[str]:
+    """Extract attr_name="..." from extra attributes on an action tag."""
+    if not extra_attrs:
+        return None
+    match = re.search(rf'{attr_name}=["\']([^"\']+)["\']', extra_attrs)
+    return match.group(1).strip() if match else None
+
+
 def _extract_name_attr(extra_attrs: str) -> Optional[str]:
     """Extract name="..." from extra attributes on an action tag.
 
     Falls back to id="..." for backward compatibility with old model outputs.
     """
-    if not extra_attrs:
-        return None
-    # Try name= first
-    match = re.search(r'name=["\']([^"\']+)["\']', extra_attrs)
-    if match:
-        return match.group(1).strip()
-    # Fallback: id= for backward compat
-    match = re.search(r'id=["\']([^"\']+)["\']', extra_attrs)
-    return match.group(1).strip() if match else None
+    return _extract_attr(extra_attrs, "name") or _extract_attr(extra_attrs, "id")
 
 
 def _parse_memory_entry_body(body: str, require_all: bool = True) -> Optional[dict]:
@@ -523,38 +554,38 @@ def _parse_memory_add_body(body: str) -> Optional[dict]:
     }
 
 
-def extract_memo_ops(response: str) -> Tuple[List[dict], List[dict], List[str]]:
+def extract_mem_ops(response: str) -> Tuple[List[dict], List[dict], List[str]]:
     """
-    Extract memo_df operations from <memo_add>, <memo_update>, <memo_delete> tags.
+    Extract mem_df operations from <mem_add>/<memo_add>, <mem_update>/<memo_update>,
+    <mem_delete>/<memo_delete> tags.
 
     Returns:
         (adds, updates, deletes) where:
-        - adds: list of dicts with keys {qid, question, memory, confidence, category}
-        - updates: list of dicts with keys {qid, memory, confidence, category}
+        - adds: list of dicts with keys {qid, question, memory, category}
+        - updates: list of dicts with keys {qid, memory, category}
         - deletes: list of qid strings
     """
     adds = []
-    for match in re.finditer(r'<memo_add>(.*?)</memo_add>', response, re.DOTALL | re.IGNORECASE):
-        entry = _parse_memo_body(match.group(1).strip(), require_question=True)
+    # Support both <mem_add> and <memo_add> (backward compat)
+    for match in re.finditer(r'<mem(?:o)?_add>(.*?)</mem(?:o)?_add>', response, re.DOTALL | re.IGNORECASE):
+        entry = _parse_mem_body(match.group(1).strip(), require_question=True)
         if entry:
             adds.append(entry)
 
     updates = []
-    # <memo_update qid="...">...</memo_update>
-    for match in re.finditer(r'<memo_update\s+qid\s*=\s*"([^"]*)">(.*?)</memo_update>', response, re.DOTALL | re.IGNORECASE):
+    for match in re.finditer(r'<mem(?:o)?_update\s+qid\s*=\s*"([^"]*)">(.*?)</mem(?:o)?_update>', response, re.DOTALL | re.IGNORECASE):
         qid = match.group(1).strip()
-        entry = _parse_memo_body(match.group(2).strip(), require_question=False)
+        entry = _parse_mem_body(match.group(2).strip(), require_question=False)
         if entry and qid:
             entry["qid"] = qid
             updates.append(entry)
 
     deletes = []
-    # <memo_delete qid="..."/> or <memo_delete>QID</memo_delete>
-    for match in re.finditer(r'<memo_delete\s+qid\s*=\s*"([^"]*)"\s*/?\s*>', response, re.IGNORECASE):
+    for match in re.finditer(r'<mem(?:o)?_delete\s+qid\s*=\s*"([^"]*)"\s*/?\s*>', response, re.IGNORECASE):
         qid = match.group(1).strip()
         if qid:
             deletes.append(qid)
-    for match in re.finditer(r'<memo_delete>(.*?)</memo_delete>', response, re.DOTALL | re.IGNORECASE):
+    for match in re.finditer(r'<mem(?:o)?_delete>(.*?)</mem(?:o)?_delete>', response, re.DOTALL | re.IGNORECASE):
         qid = match.group(1).strip()
         if qid:
             deletes.append(qid)
@@ -562,35 +593,61 @@ def extract_memo_ops(response: str) -> Tuple[List[dict], List[dict], List[str]]:
     return adds, updates, deletes
 
 
-def _parse_memo_body(body: str, require_question: bool = True) -> Optional[dict]:
-    """
-    Parse key: value format inside <memo_add> or <memo_update> tags.
+# Backward compat alias
+extract_memo_ops = extract_mem_ops
 
-    Expected fields: qid, question, memory, confidence, category.
+
+def _parse_mem_body(body: str, require_question: bool = True) -> Optional[dict]:
+    """
+    Parse key: value format inside <mem_add> or <mem_update> tags.
+
+    Expected fields: qid, question, memory, category.
     The memory field captures everything after "memory:" until the next
-    known field (confidence, category) or end of body.
+    known field (category) or end of body.
     """
     if not body:
         return None
 
     result = {}
 
-    # Extract memory: captures everything after "memory:" up to the next
-    # known trailing field (confidence or category) or end of body.
-    memory_match = re.search(
-        r'(?:^|\n)\s*memory\s*:\s*(.*?)(?=\n\s*(?:confidence|category)\s*:|$)',
-        body, re.DOTALL | re.IGNORECASE,
-    )
-    if memory_match:
-        result["memory"] = memory_match.group(1).strip()
+    # Try XML-style tags first: <qid>...</qid>, <memory>...</memory>, etc.
+    _MEM_FIELDS = ("qid", "question", "memory", "category")
+    tag_positions = []
+    for field in _MEM_FIELDS:
+        m = re.search(rf'<{field}\s*>', body, re.IGNORECASE)
+        if m:
+            tag_positions.append((field, m.end()))
+    tag_positions.sort(key=lambda x: x[1])
 
-    # Extract single-line fields from the ENTIRE body (they can appear
-    # before or after the memory block).
-    for key in ["qid", "question", "confidence", "category"]:
-        pattern = rf'^\s*{key}\s*:\s*(.+)$'
-        match = re.search(pattern, body, re.MULTILINE | re.IGNORECASE)
-        if match:
-            result[key] = match.group(1).strip()
+    if tag_positions:
+        for i, (field, val_start) in enumerate(tag_positions):
+            if i + 1 < len(tag_positions):
+                next_open = re.search(
+                    rf'<{tag_positions[i + 1][0]}\s*>',
+                    body[val_start:], re.IGNORECASE,
+                )
+                val_end = val_start + next_open.start() if next_open else tag_positions[i + 1][1]
+            else:
+                val_end = len(body)
+            raw = body[val_start:val_end]
+            raw = re.sub(rf'</{field}\s*>\s*$', '', raw, flags=re.IGNORECASE)
+            result[field] = raw.strip()
+
+    # Fall back to key: value format
+    if "memory" not in result:
+        memory_match = re.search(
+            r'(?:^|\n)\s*memory\s*:\s*(.*?)(?=\n\s*(?:category)\s*:|$)',
+            body, re.DOTALL | re.IGNORECASE,
+        )
+        if memory_match:
+            result["memory"] = memory_match.group(1).strip()
+
+    for key in ["qid", "question", "category"]:
+        if key not in result:
+            pattern = rf'^\s*{key}\s*:\s*(.+)$'
+            match = re.search(pattern, body, re.MULTILINE | re.IGNORECASE)
+            if match:
+                result[key] = match.group(1).strip()
 
     # memory is required
     if "memory" not in result:
@@ -600,21 +657,16 @@ def _parse_memo_body(body: str, require_question: bool = True) -> Optional[dict]
     if require_question and "qid" not in result:
         return None
 
-    # Parse confidence as float
-    conf = None
-    if "confidence" in result:
-        try:
-            conf = float(result["confidence"])
-        except (ValueError, TypeError):
-            conf = None
-
     return {
         "qid": result.get("qid", ""),
         "question": result.get("question", ""),
         "memory": result.get("memory", ""),
-        "confidence": conf,
         "category": result.get("category", ""),
     }
+
+
+# Backward compat alias
+_parse_memo_body = _parse_mem_body
 
 
 # Legacy exports for backward compatibility (deprecated)

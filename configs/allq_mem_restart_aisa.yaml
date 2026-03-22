@@ -1,4 +1,4 @@
-# Active memory full run: memo_df + reduced structured meta-insights.
+# Active memory full run: mem_df + meta-insights.
 #
 # Usage: python aisa_scripts/run_sim/submit_sim_aisa.py --config configs/allq_mem_restart_aisa.yaml --runs 1 --gpus 1 --memory 80 --time 2-00:00:00
 

@@ -666,13 +666,15 @@ class QwenAllQAgent(AllQAgent, QwenBasicAgent):
         messages = [{"role": "user", "content": system_prompt}]
 
         context_limit_hit = self._run_warmup_loop(messages, forecast_interface, q.qid)
-        if context_limit_hit:
-            return
 
-        if hasattr(self, "_warmup_memo_entries"):
-            memo_entry = self._request_warmup_memo(messages, q.qid, q.title)
-            if memo_entry:
-                self._warmup_memo_entries.append(memo_entry)
+        if hasattr(self, "_warmup_mem_entries"):
+            if context_limit_hit:
+                # Context limit hit — still create a placeholder so every question has an entry
+                self._warmup_mem_entries.append(self._warmup_mem_placeholder(q.qid, q.title))
+            else:
+                mem_entry = self._request_warmup_mem(messages, q.qid, q.title)
+                if mem_entry:
+                    self._warmup_mem_entries.append(mem_entry)
 
     def _run_warmup_loop(self, messages: List[Dict], forecast_interface, target_qid: str) -> bool:
         # Delegate warmup action handling to the shared Qwen tool-calling loop.

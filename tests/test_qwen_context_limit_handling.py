@@ -76,13 +76,13 @@ class WarmupContextLimitAgent(QwenAllQAgent):
             config=AgentConfig(enable_memory=False, warmup_max_actions=3),
             start_date=date(2025, 1, 1),
         )
-        self.memo_calls = 0
+        self.mem_calls = 0
 
     def _call_chat_json_with_retries(self, *, messages, tools, sampling_params):
         raise RuntimeError(CONTEXT_LIMIT_ERROR)
 
-    def _request_warmup_memo(self, messages, qid, question_title):
-        self.memo_calls += 1
+    def _request_warmup_mem(self, messages, qid, question_title):
+        self.mem_calls += 1
         return {
             "qid": qid,
             "question": question_title,
@@ -115,9 +115,9 @@ def test_qwen_session_context_limit_ends_session_without_memory_update():
     assert forecast_interface.logs[-1]["metadata"]["phase"] == "llm_context_limit"
 
 
-def test_qwen_warmup_context_limit_skips_question_memo():
+def test_qwen_warmup_context_limit_creates_placeholder_mem():
     agent = WarmupContextLimitAgent()
-    agent._warmup_memo_entries = []
+    agent._warmup_mem_entries = []
     forecast_interface = DummyForecastInterface()
     question = SimpleNamespace(
         qid="Q123",
@@ -129,6 +129,8 @@ def test_qwen_warmup_context_limit_skips_question_memo():
 
     agent._process_single_question(question, date(2025, 1, 1), forecast_interface)
 
-    assert agent.memo_calls == 0
-    assert agent._warmup_memo_entries == []
+    assert agent.mem_calls == 0  # LLM not called for mem (context limit)
+    assert len(agent._warmup_mem_entries) == 1  # placeholder created
+    assert agent._warmup_mem_entries[0]["qid"] == "Q123"
+    assert "placeholder" in agent._warmup_mem_entries[0]["memory"].lower() or "no memory" in agent._warmup_mem_entries[0]["memory"].lower()
     assert forecast_interface.logs[-1]["metadata"]["phase"] == "llm_context_limit"

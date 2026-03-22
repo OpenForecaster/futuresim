@@ -22,7 +22,7 @@ class AgentConfig:
     singleans: bool = False
     memory_dir: Optional[str] = None
     enable_memory: bool = True
-    memory_format: str = "structured"  # "structured" (YAML entries), "plain" (legacy text), or "active" (memo_df + reduced structured)
+    memory_format: str = "structured"  # "structured" (YAML entries), "plain" (legacy text), or "active" (mem_df + meta-insights)
     memory_max_entries: int = 500  # Max number of structured memory entries
     memory_update_max_total_tokens: int = 50000  # Token budget for end-of-day memory mini-loop
     sampling_params: Optional[Dict[str, Any]] = None

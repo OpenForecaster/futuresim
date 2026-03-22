@@ -12,8 +12,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 import yaml
 
-from agents.utils.memory import StructuredMemory, ActiveMemory, FIELD_LIMITS, MAX_ENTRIES
-from agents.utils.forecast_parser import parse_action, extract_memory_ops
+from agents.utils.memory import StructuredMemory, ActiveMemory, FIELD_LIMITS, MAX_ENTRIES, ACTIVE_MEM_CHAR_LIMIT, MEM_DF_COLUMNS
+from agents.utils.forecast_parser import parse_action, extract_memory_ops, extract_mem_ops
 from agents.utils.budget import BudgetSettings, BudgetTracker
 
 
@@ -498,6 +498,421 @@ class TestActiveMemoryDelegation:
         assert ok is True
         full = amem.retrieve(name)
         assert "Updated meta content" in full
+
+
+# ── ActiveMemory mem_df operations ────────────────────────────────────────
+
+class TestActiveMemoryMemDf:
+    """Test mem_add/update/delete on the per-question mem_df layer."""
+
+    def test_mem_add_and_count(self, tmp_path):
+        amem = ActiveMemory("agent1", str(tmp_path))
+        amem.set_date(date(2025, 6, 1))
+        amem.mem_add(qid="Q42", question="Will X happen?", memory="Key evidence here", category="politics")
+        assert amem.mem_count == 1
+        df = amem.get_mem_df()
+        assert len(df) == 1
+        assert df.iloc[0]["qid"] == "Q42"
+        assert df.iloc[0]["memory"] == "Key evidence here"
+        assert df.iloc[0]["category"] == "politics"
+
+    def test_mem_add_no_confidence_column(self, tmp_path):
+        """mem_df should not have a confidence column."""
+        amem = ActiveMemory("agent1", str(tmp_path))
+        amem.set_date(date(2025, 6, 1))
+        amem.mem_add(qid="Q1", question="Test Q", memory="Test mem", category="test")
+        df = amem.get_mem_df()
+        assert "confidence" not in df.columns
+        assert list(df.columns) == MEM_DF_COLUMNS
+
+    def test_mem_update(self, tmp_path):
+        amem = ActiveMemory("agent1", str(tmp_path))
+        amem.set_date(date(2025, 6, 1))
+        amem.mem_add(qid="Q42", question="Will X happen?", memory="Old evidence", category="politics")
+        amem.mem_update(qid="Q42", memory="New evidence with updates")
+        df = amem.get_mem_df()
+        assert df.iloc[0]["memory"] == "New evidence with updates"
+
+    def test_mem_update_category(self, tmp_path):
+        amem = ActiveMemory("agent1", str(tmp_path))
+        amem.set_date(date(2025, 6, 1))
+        amem.mem_add(qid="Q42", question="Will X happen?", memory="Evidence", category="politics")
+        amem.mem_update(qid="Q42", memory="Evidence", category="economics")
+        df = amem.get_mem_df()
+        assert df.iloc[0]["category"] == "economics"
+
+    def test_mem_update_preserves_category_when_empty(self, tmp_path):
+        """mem_update with category='' should preserve existing category."""
+        amem = ActiveMemory("agent1", str(tmp_path))
+        amem.set_date(date(2025, 6, 1))
+        amem.mem_add(qid="Q42", question="Will X happen?", memory="Old", category="politics")
+        amem.mem_update(qid="Q42", memory="New", category="")
+        df = amem.get_mem_df()
+        assert df.iloc[0]["memory"] == "New"
+        assert df.iloc[0]["category"] == "politics"
+
+    def test_mem_update_preserves_category_when_none(self, tmp_path):
+        """mem_update with category=None should preserve existing category."""
+        amem = ActiveMemory("agent1", str(tmp_path))
+        amem.set_date(date(2025, 6, 1))
+        amem.mem_add(qid="Q42", question="Will X happen?", memory="Old", category="politics")
+        amem.mem_update(qid="Q42", memory="New", category=None)
+        df = amem.get_mem_df()
+        assert df.iloc[0]["memory"] == "New"
+        assert df.iloc[0]["category"] == "politics"
+
+    def test_mem_delete(self, tmp_path):
+        amem = ActiveMemory("agent1", str(tmp_path))
+        amem.set_date(date(2025, 6, 1))
+        amem.mem_add(qid="Q42", question="Will X happen?", memory="Evidence", category="politics")
+        assert amem.mem_count == 1
+        ok = amem.mem_delete("Q42")
+        assert ok is True
+        assert amem.mem_count == 0
+
+    def test_mem_delete_nonexistent(self, tmp_path):
+        amem = ActiveMemory("agent1", str(tmp_path))
+        amem.set_date(date(2025, 6, 1))
+        ok = amem.mem_delete("Q999")
+        assert ok is False
+
+    def test_mem_char_limit_is_1000(self):
+        assert ACTIVE_MEM_CHAR_LIMIT == 1000
+
+    def test_mem_summary_no_confidence(self, tmp_path):
+        amem = ActiveMemory("agent1", str(tmp_path))
+        amem.set_date(date(2025, 6, 1))
+        amem.mem_add(qid="Q42", question="Will X?", memory="Evidence here", category="test")
+        summary = amem.mem_summary()
+        assert "confidence" not in summary.lower()
+        assert "Q42" in summary
+
+    def test_mem_add_preserves_category_on_upsert(self, tmp_path):
+        """mem_add with no category should preserve the existing category."""
+        amem = ActiveMemory("agent1", str(tmp_path))
+        amem.set_date(date(2025, 6, 1))
+        amem.mem_add(qid="Q42", question="Will X?", memory="Old evidence", category="politics")
+        amem.mem_add(qid="Q42", question="Will X?", memory="New evidence")  # no category
+        df = amem.get_mem_df()
+        row = df[df["qid"] == "Q42"].iloc[0]
+        assert row["memory"] == "New evidence"
+        assert row["category"] == "politics"  # preserved
+
+    def test_mem_add_overrides_category_when_provided(self, tmp_path):
+        """mem_add with an explicit category should override the old one."""
+        amem = ActiveMemory("agent1", str(tmp_path))
+        amem.set_date(date(2025, 6, 1))
+        amem.mem_add(qid="Q42", question="Will X?", memory="Evidence", category="politics")
+        amem.mem_add(qid="Q42", question="Will X?", memory="Evidence", category="sports")
+        df = amem.get_mem_df()
+        assert df[df["qid"] == "Q42"].iloc[0]["category"] == "sports"
+
+
+# ── ActiveMemory directory format ─────────────────────────────────────────
+
+class TestActiveMemoryDirectoryFormat:
+    """Test new per-day directory format: memory/YYYY-MM-DD/{mem.csv, meta.yaml}."""
+
+    def test_save_creates_directory(self, tmp_path):
+        amem = ActiveMemory("agent1", str(tmp_path))
+        amem.set_date(date(2025, 6, 1))
+        amem.mem_add(qid="Q1", question="Test", memory="Test memory", category="test")
+        amem.add_entry("meta-1", "Meta desc", "Meta content")
+        amem.save(date(2025, 6, 1))
+
+        date_dir = tmp_path / "memory" / "2025-06-01"
+        assert date_dir.is_dir()
+        assert (date_dir / "mem.csv").exists()
+        assert (date_dir / "meta.yaml").exists()
+
+    def test_load_from_directory_format(self, tmp_path):
+        # Save in directory format
+        amem = ActiveMemory("agent1", str(tmp_path))
+        amem.set_date(date(2025, 6, 1))
+        amem.mem_add(qid="Q1", question="Test Q", memory="Saved memory", category="test")
+        amem.add_entry("meta-1", "Meta desc", "Meta content")
+        amem.save(date(2025, 6, 1))
+
+        # Load in new instance
+        amem2 = ActiveMemory("agent1", str(tmp_path))
+        amem2.set_date(date(2025, 6, 2))
+        assert amem2.mem_count == 1
+        df = amem2.get_mem_df()
+        assert df.iloc[0]["qid"] == "Q1"
+        assert df.iloc[0]["memory"] == "Saved memory"
+        assert amem2.entry_count == 1
+        assert amem2.retrieve("meta-1") is not None
+
+    def test_restart_copy_directory_format(self, tmp_path):
+        """Simulate restart: save → copytree to new dir → load from new dir."""
+        import shutil
+
+        src = tmp_path / "src"
+        dst = tmp_path / "dst"
+
+        # Save in source directory
+        amem = ActiveMemory("agent1", str(src))
+        amem.set_date(date(2025, 6, 1))
+        amem.mem_add(qid="Q1", question="Test Q1", memory="Evidence for Q1", category="politics")
+        amem.mem_add(qid="Q2", question="Test Q2", memory="Evidence for Q2", category="sports")
+        amem.add_entry("meta-pattern", "Cross-question pattern", "Sports Qs need bookmaker odds")
+        amem.save(date(2025, 6, 1))
+
+        # Simulate restart copy (like prepare_restart_directory)
+        src_mem_dir = src / "memory"
+        dst_mem_dir = dst / "memory"
+        dst_mem_dir.mkdir(parents=True)
+        for entry in src_mem_dir.iterdir():
+            if entry.is_dir():
+                shutil.copytree(entry, dst_mem_dir / entry.name)
+
+        # Load from destination
+        amem2 = ActiveMemory("agent1", str(dst))
+        amem2.set_date(date(2025, 6, 2))
+        assert amem2.mem_count == 2
+        df = amem2.get_mem_df()
+        assert set(df["qid"].tolist()) == {"Q1", "Q2"}
+        assert amem2.entry_count == 1
+        assert amem2.retrieve("meta-pattern") is not None
+
+    def test_multi_day_directory_format(self, tmp_path):
+        """Multiple days saved in directory format, set_date picks the most recent."""
+        amem = ActiveMemory("agent1", str(tmp_path))
+
+        # Day 1
+        amem.set_date(date(2025, 6, 1))
+        amem.mem_add(qid="Q1", question="Test Q1", memory="Day 1 evidence", category="test")
+        amem.save(date(2025, 6, 1))
+
+        # Day 2
+        amem.set_date(date(2025, 6, 2))
+        assert amem.mem_count == 1  # loaded from day 1
+        amem.mem_add(qid="Q2", question="Test Q2", memory="Day 2 evidence", category="test")
+        amem.save(date(2025, 6, 2))
+
+        # Day 3: should load day 2 snapshot (2 entries)
+        amem2 = ActiveMemory("agent1", str(tmp_path))
+        amem2.set_date(date(2025, 6, 3))
+        assert amem2.mem_count == 2
+
+        # Restart from day 2: should only load day 1 snapshot (1 entry)
+        amem3 = ActiveMemory("agent1", str(tmp_path))
+        amem3.set_date(date(2025, 6, 2))
+        assert amem3.mem_count == 1
+        assert amem3.get_mem_df().iloc[0]["qid"] == "Q1"
+
+    def test_backward_compat_flat_format(self, tmp_path):
+        """Should load from old flat format (memo_YYYY-MM-DD.csv + YYYY-MM-DD.yaml)."""
+        import csv
+        mem_dir = tmp_path / "memory"
+        mem_dir.mkdir(parents=True)
+
+        # Write old-format CSV with confidence column
+        csv_path = mem_dir / "memo_2025-06-01.csv"
+        with open(csv_path, "w", newline="") as f:
+            writer = csv.writer(f, quoting=csv.QUOTE_ALL)
+            writer.writerow(["qid", "question", "last_updated", "memory", "confidence", "category"])
+            writer.writerow(["Q42", "Will X happen?", "2025-06-01", "Old evidence", "0.75", "politics"])
+
+        # Write old-format YAML
+        yaml_path = mem_dir / "2025-06-01.yaml"
+        yaml_data = [{"name": "old-meta", "description": "Old desc", "content": "Old content", "added": "2025-06-01"}]
+        yaml_path.write_text(yaml.safe_dump(yaml_data))
+
+        amem = ActiveMemory("agent1", str(tmp_path))
+        amem.set_date(date(2025, 6, 2))
+        assert amem.mem_count == 1
+        df = amem.get_mem_df()
+        assert "confidence" not in df.columns  # confidence column dropped
+        assert df.iloc[0]["qid"] == "Q42"
+        assert amem.entry_count == 1
+
+
+# ── Parse mem_add/update/delete action types ──────────────────────────────
+
+class TestParseMemActions:
+    """Test parsing of mem_add, mem_update, mem_delete action types."""
+
+    def test_parse_mem_add(self):
+        response = '''<reasoning>Storing Q42 analysis.</reasoning>
+<action type="mem_add">
+<qid>Q42</qid>
+<question>Will X happen by Y?</question>
+<memory>Key evidence: polls show 55% support. Confidence ~0.6.</memory>
+<category>politics</category>
+</action>'''
+        parsed = parse_action(response)
+        assert parsed.action_type == "mem_add"
+        assert parsed.error is None
+        assert parsed.mem_data is not None
+        assert parsed.mem_data["qid"] == "Q42"
+        assert parsed.mem_data["question"] == "Will X happen by Y?"
+        assert "polls show 55%" in parsed.mem_data["memory"]
+        assert parsed.mem_data["category"] == "politics"
+
+    def test_parse_mem_add_plain_text(self):
+        response = '''<action type="mem_add">
+qid: Q42
+question: Will X happen by Y?
+memory: Key evidence here
+category: politics
+</action>'''
+        parsed = parse_action(response)
+        assert parsed.action_type == "mem_add"
+        assert parsed.error is None
+        assert parsed.mem_data["qid"] == "Q42"
+
+    def test_parse_mem_add_missing_fields(self):
+        response = '<action type="mem_add">\n<memory>Just memory, no qid</memory>\n</action>'
+        parsed = parse_action(response)
+        assert parsed.action_type == "mem_add"
+        assert parsed.error is not None
+
+    def test_parse_mem_update(self):
+        response = '''<action type="mem_update" qid="Q42">
+<memory>Updated evidence: new polls show 60%.</memory>
+</action>'''
+        parsed = parse_action(response)
+        assert parsed.action_type == "mem_update"
+        assert parsed.error is None
+        assert parsed.mem_qid == "Q42"
+        assert parsed.mem_data is not None
+        assert "60%" in parsed.mem_data["memory"]
+
+    def test_parse_mem_update_no_qid(self):
+        response = '<action type="mem_update">\n<memory>Update without qid</memory>\n</action>'
+        parsed = parse_action(response)
+        assert parsed.action_type == "mem_update"
+        assert parsed.error is not None
+
+    def test_parse_mem_delete(self):
+        response = '<action type="mem_delete">Q42</action>'
+        parsed = parse_action(response)
+        assert parsed.action_type == "mem_delete"
+        assert parsed.error is None
+        assert parsed.mem_qid == "Q42"
+
+    def test_parse_mem_delete_empty(self):
+        response = '<action type="mem_delete"></action>'
+        parsed = parse_action(response)
+        assert parsed.action_type == "mem_delete"
+        assert parsed.error is not None
+
+
+# ── Extract mem ops (end-of-day XML format) ───────────────────────────────
+
+class TestExtractMemOps:
+    """Test extract_mem_ops for both new <mem_add> and old <memo_add> tags."""
+
+    def test_new_mem_add_tag(self):
+        response = """<mem_add>
+qid: Q42
+question: Will X happen?
+memory: Key evidence here.
+category: politics
+</mem_add>"""
+        adds, updates, deletes = extract_mem_ops(response)
+        assert len(adds) == 1
+        assert adds[0]["qid"] == "Q42"
+        assert adds[0]["memory"] == "Key evidence here."
+
+    def test_old_memo_add_backward_compat(self):
+        response = """<memo_add>
+qid: Q42
+question: Will X happen?
+memory: Old style evidence.
+category: politics
+</memo_add>"""
+        adds, updates, deletes = extract_mem_ops(response)
+        assert len(adds) == 1
+        assert adds[0]["qid"] == "Q42"
+
+    def test_no_confidence_in_parsed_result(self):
+        response = """<mem_add>
+qid: Q42
+question: Test Q
+memory: Evidence
+confidence: 0.75
+category: test
+</mem_add>"""
+        adds, _, _ = extract_mem_ops(response)
+        assert len(adds) == 1
+        assert "confidence" not in adds[0]
+
+
+# ── Warmup interop: ActiveMemory → StructuredMemory ───────────────────────
+
+class TestWarmupInterop:
+    """Test that ActiveMemory warmup can be loaded by StructuredMemory via flat YAML."""
+
+    def test_active_warmup_interop_creates_flat_yaml(self, tmp_path):
+        """Simulating _save_warmup_interop: flat yaml created from mem_df."""
+        from pathlib import Path
+
+        amem = ActiveMemory("agent1", str(tmp_path))
+        amem.set_date(date(2025, 6, 1))
+        amem.mem_add(qid="Q42", question="Will X happen?", memory="Key evidence for Q42", category="politics")
+        amem.mem_add(qid="Q99", question="Will Y happen?", memory="Key evidence for Q99", category="sports")
+        amem.save(date(2025, 6, 1))
+
+        # Simulate interop write (same logic as _save_warmup_interop)
+        memory_dir = tmp_path / "memory"
+        flat_yaml_path = memory_dir / "2025-06-01.yaml"
+        assert not flat_yaml_path.exists()
+
+        entries = []
+        for _, row in amem.get_mem_df().iterrows():
+            qid = str(row["qid"])
+            entries.append({
+                "name": f"q{qid}-warmup",
+                "description": f"Q{qid}: {str(row['question'])[:200]}",
+                "content": str(row["memory"])[:1024],
+                "added": "2025-06-01",
+            })
+        flat_yaml_path.write_text(yaml.safe_dump(entries, default_flow_style=False))
+
+        assert flat_yaml_path.exists()
+        loaded = yaml.safe_load(flat_yaml_path.read_text())
+        assert len(loaded) == 2
+        names = {e["name"] for e in loaded}
+        assert "qQ42-warmup" in names
+        assert "qQ99-warmup" in names
+
+    def test_active_warmup_flat_yaml_loads_as_structured(self, tmp_path):
+        """StructuredMemory.set_date() loads the flat yaml written by interop."""
+        from agents.utils.memory import StructuredMemory
+
+        # Create ActiveMemory warmup output
+        amem = ActiveMemory("agent1", str(tmp_path))
+        amem.set_date(date(2025, 6, 1))
+        amem.mem_add(qid="Q42", question="Will X happen?", memory="Evidence for Q42", category="politics")
+        amem.mem_add(qid="Q99", question="Will Y happen?", memory="Evidence for Q99", category="sports")
+        amem.save(date(2025, 6, 1))
+
+        # Write interop flat yaml
+        memory_dir = tmp_path / "memory"
+        entries = []
+        for _, row in amem.get_mem_df().iterrows():
+            qid = str(row["qid"])
+            entries.append({
+                "name": f"q{qid}-warmup",
+                "description": f"Q{qid}: {str(row['question'])[:200]}",
+                "content": str(row["memory"])[:1024],
+                "added": "2025-06-01",
+            })
+        (memory_dir / "2025-06-01.yaml").write_text(yaml.safe_dump(entries, default_flow_style=False))
+
+        # Load with StructuredMemory
+        smem = StructuredMemory("agent1", str(tmp_path))
+        smem.set_date(date(2025, 6, 2))
+        assert smem.entry_count == 2
+        index = smem.get_index()
+        assert "Q42" in index
+        assert "Q99" in index
+        # Verify full content is retrievable
+        q42_entry = [e for e in smem._entries if "Q42" in e.name or "Q42" in e.description][0]
+        full = smem.retrieve(q42_entry.name)
+        assert "Evidence for Q42" in full
 
 
 # ── Limits and edge cases ────────────────────────────────────────────────

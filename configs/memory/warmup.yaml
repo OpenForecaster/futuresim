@@ -1,18 +1,25 @@
-# Structured memory run: index-based entries, restarting from shared warmup.
+# Shared warmup run (active memory — most informative format).
+# Run this ONCE, then restart from it with any memory_format config
+# (active.yaml, skills.yaml, plain.yaml).
 #
-# Usage: python aisa_scripts/run_sim/submit_sim_aisa.py --config configs/memory/skills.yaml --runs 1 --gpus 1 --memory 80 --time 2-00:00:00
-
-# --- Restart from shared warmup ---
-restart_from: "logs/current_sim/deepseek_shared_warmup_r00/26-03-22-11-32-28"
-restart_from_day: "2025-04-25"
+# Usage: python aisa_scripts/run_sim/submit_sim_aisa.py --config configs/memory/warmup.yaml --runs 1 --gpus 1 --memory 80 --time 1-00:00:00
+#
+# After warmup completes, restart with a memory-format-specific config:
+#   --set restart_from=/path/to/warmup/output --set restart_from_day=2025-04-25
+#
+# The warmup writes both directory format (for active restart) and flat YAML
+# (for structured restart) via _save_warmup_interop.
 
 # --- Simulation Meta ---
-sim_name: "deepseek_skills_mem"
+sim_name: "deepseek_shared_warmup"
 start_date: "2025-05-01"
-end_date: "2025-08-23"
+end_date: "2025-04-25"       # Minimal loop: warmup day (04-24) + 1 day (04-25)
 lookback_days: 7
 search_cutoff_days: 0
 split: "test"
+
+# Load the FULL question set (resolution_end decoupled from end_date)
+resolution_end: "2025-08-23"
 
 # --- Data Paths ---
 dataset: "openforesight"
@@ -38,10 +45,6 @@ max_model_len: 8192
 rate_limit: 32.0
 parallel: true
 
-# --- Cheat Feedback (privileged directional-correctness before memory update) ---
-# cheat_feedback: true
-# cheat_feedback_detail: "direction"  # "full" (Brier scores) or "direction" (labels only)
-
 # --- Agents Configuration ---
 defaults:
   provider: "openrouter"
@@ -50,7 +53,7 @@ defaults:
   max_tokens: 2048
   max_retries: 3
   enable_memory: true
-  memory_format: "structured"
+  memory_format: "active"
 
   # --- Context-window budgets (replaces action budgets) ---
   max_actions: null                  # No action limit; token budget is the only constraint
@@ -61,7 +64,7 @@ defaults:
   force_submit_threshold_tokens: 8192 # Warmup only
 
   # --- Memory settings ---
-  memory_max_entries: 500            # Max structured memory entries (300+ Qs + meta)
+  memory_max_entries: 500            # Max meta-insight entries (cross-question patterns; mem_df is unlimited)
   memory_update_max_total_tokens: 40960  # Non-warmup: triggers memory phase when this many tokens remain
 
 agents:

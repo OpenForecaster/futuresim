@@ -12,6 +12,7 @@ from agents.utils.memory import (
 )
 from agents.utils.forecast_parser import (
     extract_memory_ops, extract_memory, parse_action, _parse_memory_entry_body,
+    extract_mem_ops, _parse_mem_body,
 )
 
 
@@ -662,3 +663,149 @@ Old style full replacement memory content.
         # But old parser still works
         old = extract_memory(response)
         assert old == "Old style full replacement memory content."
+
+
+# ── Parser tests: mem_df action types (mem_add/update/delete) ──────────────
+
+
+class TestParseMemDfActions:
+    """Test parse_action for mem_add, mem_update, mem_delete action types."""
+
+    def test_mem_add_xml_tags(self):
+        response = '''<action type="mem_add">
+<qid>Q42</qid>
+<question>Will X happen?</question>
+<memory>Key evidence for prediction.</memory>
+<category>politics</category>
+</action>'''
+        parsed = parse_action(response)
+        assert parsed.action_type == "mem_add"
+        assert parsed.error is None
+        assert parsed.mem_data["qid"] == "Q42"
+        assert parsed.mem_data["question"] == "Will X happen?"
+        assert parsed.mem_data["memory"] == "Key evidence for prediction."
+        assert parsed.mem_data["category"] == "politics"
+
+    def test_mem_add_plain_text(self):
+        response = '''<action type="mem_add">
+qid: Q42
+question: Will X happen?
+memory: Key evidence for prediction.
+category: politics
+</action>'''
+        parsed = parse_action(response)
+        assert parsed.action_type == "mem_add"
+        assert parsed.error is None
+        assert parsed.mem_data["qid"] == "Q42"
+
+    def test_mem_update_with_qid_attr(self):
+        response = '''<action type="mem_update" qid="Q42">
+<memory>Updated evidence here.</memory>
+<category>economics</category>
+</action>'''
+        parsed = parse_action(response)
+        assert parsed.action_type == "mem_update"
+        assert parsed.error is None
+        assert parsed.mem_qid == "Q42"
+        assert parsed.mem_data["memory"] == "Updated evidence here."
+        assert parsed.mem_data.get("category") == "economics"
+
+    def test_mem_update_missing_qid(self):
+        response = '<action type="mem_update">\n<memory>No qid</memory>\n</action>'
+        parsed = parse_action(response)
+        assert parsed.action_type == "mem_update"
+        assert parsed.error is not None
+
+    def test_mem_delete(self):
+        response = '<action type="mem_delete">Q42</action>'
+        parsed = parse_action(response)
+        assert parsed.action_type == "mem_delete"
+        assert parsed.error is None
+        assert parsed.mem_qid == "Q42"
+
+    def test_mem_delete_with_qid_attr(self):
+        response = '<action type="mem_delete" qid="Q42"></action>'
+        parsed = parse_action(response)
+        assert parsed.action_type == "mem_delete"
+        assert parsed.error is None
+        assert parsed.mem_qid == "Q42"
+
+    def test_mem_delete_empty(self):
+        response = '<action type="mem_delete"></action>'
+        parsed = parse_action(response)
+        assert parsed.action_type == "mem_delete"
+        assert parsed.error is not None
+
+
+class TestParseMemBody:
+    """Test _parse_mem_body helper."""
+
+    def test_all_fields_xml(self):
+        body = "<qid>Q1</qid>\n<question>Will X?</question>\n<memory>Evidence</memory>\n<category>test</category>"
+        result = _parse_mem_body(body, require_question=True)
+        assert result is not None
+        assert result["qid"] == "Q1"
+        assert result["question"] == "Will X?"
+        assert result["memory"] == "Evidence"
+        assert result["category"] == "test"
+
+    def test_all_fields_plain(self):
+        body = "qid: Q1\nquestion: Will X?\nmemory: Evidence\ncategory: test"
+        result = _parse_mem_body(body, require_question=True)
+        assert result is not None
+        assert result["qid"] == "Q1"
+
+    def test_no_confidence_field(self):
+        body = "qid: Q1\nquestion: Will X?\nmemory: Evidence\nconfidence: 0.75\ncategory: test"
+        result = _parse_mem_body(body, require_question=True)
+        assert result is not None
+        assert "confidence" not in result
+
+    def test_missing_qid_fails(self):
+        body = "<question>Will X?</question>\n<memory>Evidence</memory>"
+        result = _parse_mem_body(body, require_question=True)
+        assert result is None
+
+    def test_require_question_false(self):
+        body = "<memory>Just memory update</memory>"
+        result = _parse_mem_body(body, require_question=False)
+        assert result is not None
+        assert result["memory"] == "Just memory update"
+
+
+class TestExtractMemOps:
+    """Test extract_mem_ops for both <mem_add> and <memo_add> tags."""
+
+    def test_mem_add_tag(self):
+        response = """<mem_add>
+qid: Q42
+question: Will X?
+memory: Evidence.
+category: test
+</mem_add>"""
+        adds, updates, deletes = extract_mem_ops(response)
+        assert len(adds) == 1
+        assert adds[0]["qid"] == "Q42"
+
+    def test_memo_add_backward_compat(self):
+        response = """<memo_add>
+qid: Q42
+question: Will X?
+memory: Old style.
+category: test
+</memo_add>"""
+        adds, updates, deletes = extract_mem_ops(response)
+        assert len(adds) == 1
+        assert adds[0]["qid"] == "Q42"
+
+    def test_no_confidence_in_result(self):
+        response = """<mem_add>
+qid: Q1
+question: Test
+memory: Evidence
+confidence: 0.9
+category: test
+</mem_add>"""
+        adds, _, _ = extract_mem_ops(response)
+        assert len(adds) == 1
+        assert "confidence" not in adds[0]
