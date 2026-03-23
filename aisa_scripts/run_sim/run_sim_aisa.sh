@@ -28,8 +28,6 @@ else
   exit 2
 fi
 
-cd "${REPO_DIR}"
-
 if command -v module >/dev/null 2>&1; then
   module load cuda/12.1 || true
 fi
@@ -61,7 +59,21 @@ if [ -z "${CONFIG_PATH}" ]; then
   echo "Usage: $0 <config_path>"
   exit 1
 fi
+CONFIG_PATH="$(readlink -f "${CONFIG_PATH}")"
+
+setup_core_dump_dir() {
+  local default_core_dump_dir="${REPO_DIR}/logs/core-dumps"
+  if [ -n "${FSIM_SIM_LOG_BASE:-}" ]; then
+    default_core_dump_dir="$(dirname "${FSIM_SIM_LOG_BASE}")/core-dumps"
+  fi
+  export FSIM_CORE_DUMP_DIR="${FSIM_CORE_DUMP_DIR:-${default_core_dump_dir}}"
+  mkdir -p "${FSIM_CORE_DUMP_DIR}"
+  cd "${FSIM_CORE_DUMP_DIR}"
+}
+
+setup_core_dump_dir
 
 echo "Running simulation with config: ${CONFIG_PATH}"
-python -u scripts/test_basic_agent.py --config "${CONFIG_PATH}"
+echo "Core dumps will land in: ${FSIM_CORE_DUMP_DIR}"
+python -u "${REPO_DIR}/scripts/test_basic_agent.py" --config "${CONFIG_PATH}"
 echo "Simulation complete!"

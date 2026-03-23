@@ -1,0 +1,86 @@
+# AllQ full simulation using local Qwen3.5-27B via vLLM.
+#
+# Usage:
+#   python mpi_scripts/run_sim/submit_sim.py --config configs/qwen3.5/allq_sim_qwen3.5_27b.yaml --runs 1
+#
+# Notes:
+# - Uses the plain `allQ` scaffold.
+# - Requests 3 H100-class GPUs: GPU2 for matcher + embedder, GPU0-1 for the agent model.
+# - Runs the dense 27B model with tensor parallelism only (TP=2, no expert parallel).
+
+# --- Run Script (CUDA 12.9 needed for Qwen3.5 FlashInfer GDN kernels) ---
+run_script: "run_sim.sh"
+
+# --- Simulation Meta ---
+sim_name: "allq_sim_qwen3.5-27b"
+start_date: "2025-05-01"
+end_date: "2025-08-23"
+resolution_start: "2025-05-01"
+resolution_end: "2025-08-23"
+lookback_days: 7
+search_cutoff_days: 0
+split: "test"
+
+# --- HTCondor Resources ---
+resources:
+  gpus: 3
+  cpus: 24
+  memory_gb: 256
+  disk_gb: 50
+  bid: 55
+  requirements: "TARGET.CUDACapability >= 9.0 && TARGET.CUDAGlobalMemoryMb > 70000 && TARGET.Machine =!= \"i103.internal.cluster.is.localnet\""
+
+# --- Data Paths ---
+dataset: "openforesight"
+dataset_path: "${FSIM_DATASET_PATH}"
+min_forecasters: 10
+resolved_only: true
+output_base: "${FSIM_OUTPUT_BASE}"
+warmup_parallelism: 64
+
+# --- Search Settings ---
+search_db: "${FSIM_SEARCH_DB}"
+embedding_model: "${FSIM_EMBEDDING_MODEL}"
+embedding_gpu_mem: 0.7
+
+# --- Answer Matching ---
+matching: "openrouter"
+matcher: "deepseek/deepseek-v3.2"
+matcher_gpu_mem: 0.0
+max_model_len: 262144
+agent_max_model_len: 262144
+embedding_max_model_len: 32768
+
+# --- vLLM Agent Runtime ---
+vllm_gpu_mem: 0.85
+vllm_tensor_parallel_size: 2
+vllm_max_num_seqs: 64
+vllm_startup_timeout: 900
+vllm_request_timeout: 300
+vllm_enable_tools: false
+language_model_only: true
+
+# --- Local 3-GPU Pinning ---
+# matcher + embedder on GPU2 (parent process), agent vLLM on GPU0-1 (subprocess override).
+aux_cuda_visible_devices: "2"
+agent_cuda_visible_devices: "0,1"
+
+# --- Inference Defaults ---
+rate_limit: 32.0
+parallel: true
+
+# --- Agents Configuration ---
+defaults:
+  provider: "vllm"
+  scaffold: "allQ"
+  max_actions: 50
+  warmup_max_actions: 10
+  temperature: 0.7
+  top_p: 0.95
+  top_k: 20
+  max_tokens: 4096
+  max_retries: 3
+
+agents:
+  - model: "/fast/sgoel/models/Qwen3.5-27B-text"
+    provider: "vllm"

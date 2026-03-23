@@ -1,0 +1,53 @@
+# Default Simulation Configuration
+# Usage: python mpi_scripts/run_sim/submit_sim.py --config configs/shared/default_sim.yaml --runs 1
+
+# --- Simulation Meta ---
+# sim_name: "gemini_3_flash_preview_nosearch_sim100turns"
+# sim_name: "grok_3_mini_nosearch_sim"
+sim_name: "deepseek_v3.2_high_effort_nosearch_sim100turns"
+start_date: "2025-05-01" # Resolution window start
+end_date: "2025-08-23"   # Resolution window end
+lookback_days: 7         # Days before first resolution to start simulation
+search_cutoff_days: 0    # Cap on search date based on current date in sim
+split: "test"            # Dataset split: train, test, or validation
+
+# --- Data Paths ---
+# --- Data Paths ---
+dataset: "openforesight"  # Options: "openforesight", "metaculus_binary", "metaculus_mcq"
+dataset_path: "${FSIM_DATASET_PATH}"  # For openforesight
+dataset_cache: "${FSIM_DATASET_CACHE}"  # For cached sources
+# Metaculus Filtering
+min_forecasters: 0 # Minimum number of forecasters required
+resolved_only: false # Only load resolved questions
+output_base: "${FSIM_OUTPUT_BASE}"
+
+
+# --- Search Settings ---
+# Leave search_db empty to disable search
+
+# --- Answer Matching ---
+matching: "vllm" # Options: "exact", "openrouter", "vllm"
+matcher: "/fast/rolmedo/models/qwen3-4b-it-2507"
+matcher_gpu_mem: 0.3
+max_model_len: 8192
+
+# --- Inference Defaults ---
+rate_limit: 32.0         # OpenRouter requests/second
+parallel: true
+
+# --- Agents Configuration ---
+defaults:
+  provider: "openrouter"
+  scaffold: "basic"
+  max_actions: 100
+  temperature: 0.7
+  max_tokens: 4096
+  max_retries: 3
+
+agents:
+  - model: "deepseek/deepseek-v3.2"
+  # - model: "google/gemini-3-flash-preview"
+  # - model: "x-ai/grok-3-mini"
+    provider: "openrouter"
+    # You can override defaults here:
+    # temperature: 0.1

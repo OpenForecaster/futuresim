@@ -1,0 +1,131 @@
+# SkyRL day-0 style warmup search training on OpenForesight train split.
+# Uses a custom multi-turn env with LanceDB search + OpenForesight-style Brier reward.
+#
+# Submit with:
+#   python mpi_scripts/skyrl_search/submit_skyrl_search_train.py \
+#     --config configs/skyrl/skyrl_openforesight_search_warmup_qwen3.5_4b.yaml --runs 1
+
+sim_name: "skyrl_of_search_warmup_qwen3.5_4b"
+run_script: "run_skyrl_search_train.sh"
+mode: "train"
+
+resources:
+  gpus: 4
+  cpus: 48
+  memory_gb: 384
+  disk_gb: 200
+  bid: 55
+  requirements: "TARGET.CUDACapability >= 9.0 && TARGET.CUDAGlobalMemoryMb > 70000 && TARGET.Machine =!= \"i103.internal.cluster.is.localnet\""
+
+data:
+  dataset_path: "${FSIM_DATASET_PATH}"
+  # Single shared cache for train.parquet / validation.parquet (not per-run logs; see training.log_path).
+  prepared_data_dir: "${FSIM_SKYRL_PREPARED_DATA_DIR}"
+  train_split: "train"
+  val_split: "test"
+  # Day-0 warmup style: each question is evaluated at (resolution_date - lookback_days)
+  lookback_days: 7
+  # Optional shared cutoff date across all questions. Leave null to use per-question
+  # resolution_date - lookback_days.
+  global_sim_date: null
+  # Keep full train/validation by default; set these for quicker smoke tests.
+  max_train_questions: null
+  max_val_questions: null
+  resolution_start: null
+  resolution_end: null
+  seed: 42
+
+search:
+  search_db: "${FSIM_SEARCH_DB}"
+  embedding_model: "${FSIM_EMBEDDING_MODEL}"
+  embedding_gpu_mem: 0.3
+  aux_cuda_visible_devices: null
+  search_type: "hybrid"
+  search_cutoff_days: 0
+  search_min_days: 0
+  max_snippet_chars: 1200
+  allow_substring_match: true
+
+# Agent-facing warmup semantics. Keep these aligned with the Qwen tokenbudget eval configs.
+agent:
+  max_outcomes_per_question: 5
+  max_search_results: 5
+  warmup_max_actions: null
+  warmup_max_total_tokens: 262144
+  warmup_submit_reserve_tokens: 8192
+  warmup_force_submit_threshold_tokens: 16384
+
+# Keep correctness checks aligned with the main forecast-sim environment.
+matching: "openrouter"
+matcher: "deepseek/deepseek-v3.2"
+
+training:
+  model_path: "${FSIM_SKYRL_MODEL_PATH}"
+  project_name: "skyrl-search-agent"
+  run_name: "skyrl_of_search_warmup_qwen3.5_4b"
+  ckpt_path: "${FSIM_SKYRL_CKPT_BASE}/{run_name}"
+  export_path: "${FSIM_SKYRL_CKPT_BASE}/{run_name}/exports"
+  logger: "wandb"
+
+  strategy: "fsdp2"
+  # Qwen3.5 ref forward is stable here only when the ref model stays on GPU.
+  ref_fsdp_cpu_offload: false
+
+  epochs: 1
+  update_epochs_per_batch: 1
+  train_batch_size: 128
+  policy_mini_batch_size: 64
+  critic_mini_batch_size: 64
+  micro_forward_batch_size_per_gpu: 2
+  micro_train_batch_size_per_gpu: 2
+
+  eval_batch_size: 128
+  eval_before_train: false
+  eval_interval: 50
+  eval_n_samples_per_prompt: 4
+  dump_eval_results: true
+
+  # Initial prompts are short, but the multi-turn search transcript can get long.
+  max_prompt_length: 8192
+  max_input_length: 262144
+  max_generate_length: 4096
+  flash_attn: true
+  use_sample_packing: false
+
+  n_samples_per_prompt: 4
+  # `0` means "do not enforce a turn cap in the warmup env"; token budget becomes the visible limit.
+  max_turns: 0
+  use_conversation_multi_turn: true
+  append_eos_token_after_stop_str_in_multi_turn: true
+
+  temperature: 0.7
+  top_p: 0.95
+  top_k: 20
+  sampling_logprobs: null
+  eval_sampling_logprobs: null
+  stop_tokens:
+    - "</tool_call>"
+
+  learning_rate: 1.0e-6
+  use_kl_loss: true
+  kl_loss_coef: 0.001
+  tis_ratio_type: null
+  token_tis_ratio_clip_high: 2.0
+
+  inference_backend: "vllm"
+  inference_num_engines: 4
+  inference_tensor_parallel_size: 1
+  run_engines_locally: true
+  weight_sync_backend: "nccl"
+  async_engine: true
+  gpu_memory_utilization: 0.6
+  max_env_workers: 16
+
+  ckpt_interval: 20
+  hf_save_interval: 200
+  max_ckpts_to_keep: 5
+
+# Extra Hydra overrides (optional)
+hydra_overrides:
+  - "generator.inference_engine.engine_init_kwargs.language_model_only=true"
+  - "generator.inference_engine.engine_init_kwargs.skip_mm_profiling=true"

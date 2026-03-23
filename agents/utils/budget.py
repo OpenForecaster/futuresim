@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
+import json
+import os
 from typing import Any, Callable, Dict, List, Optional
 
 
@@ -14,6 +17,68 @@ class BudgetSettings:
     max_total_tokens: Optional[int] = None
     submit_reserve_tokens: int = 8192
     force_submit_threshold_tokens: int = 16384
+
+
+@lru_cache(maxsize=16)
+def load_budget_tokenizer(model_name: str):
+    if not model_name or not os.path.exists(model_name):
+        return None
+    try:
+        from transformers import AutoTokenizer
+
+        return AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    except Exception:
+        return None
+
+
+def estimate_budget_tokens(payload: Any, *, model_name: str = "") -> int:
+    if payload is None:
+        return 0
+
+    text = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False)
+    if not text:
+        return 0
+
+    tokenizer = load_budget_tokenizer(str(model_name or ""))
+    if tokenizer is not None:
+        try:
+            return len(tokenizer.encode(text, add_special_tokens=False))
+        except TypeError:
+            return len(tokenizer.encode(text))
+        except Exception:
+            pass
+
+    return max(1, (len(text) + 3) // 4)
+
+
+def build_budget_overview(settings: BudgetSettings, *, per_question: bool = False) -> str:
+    """Render shared human-readable budget instructions."""
+    lines: List[str] = []
+    if settings.max_actions is not None:
+        if per_question:
+            lines.append(f"You have {settings.max_actions} actions to research and forecast this question.")
+        else:
+            lines.append(
+                f"You have {settings.max_actions} actions per day. Each query, search, or submission uses 1 action."
+            )
+    if settings.max_total_tokens is not None:
+        scope = "this question" if per_question else "this session"
+        lines.append(
+            f"You have a context budget of {settings.max_total_tokens} tokens for {scope}. "
+            "This tracks the current prompt length, not cumulative tokens spent."
+        )
+        lines.append(
+            f"Keep at least {settings.submit_reserve_tokens} tokens free for a final submit. "
+            f"Force-submit once the remaining context budget is at or below {settings.force_submit_threshold_tokens}."
+        )
+    if settings.max_actions is not None and settings.max_total_tokens is not None:
+        lines.append("If both budgets are configured, both are enforced and the session ends when either one is exhausted.")
+    return "\n".join(lines)
+
+
+def build_start_budget_status(settings: BudgetSettings) -> str:
+    """Render the initial remaining-budget status for prompt seeds."""
+    return BudgetTracker(settings).status_text()
 
 
 class BudgetTracker:

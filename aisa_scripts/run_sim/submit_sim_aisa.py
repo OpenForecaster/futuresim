@@ -4,10 +4,10 @@ Submit simulation job(s) to SLURM using AISA path conventions.
 
 Usage:
     # Basic:
-    python aisa_scripts/run_sim/submit_sim_aisa.py --config configs/allq_sim_ds_aisa.yaml --runs 1
+    python aisa_scripts/run_sim/submit_sim_aisa.py --config configs/deepseek/allq_sim_ds_aisa.yaml --runs 1
 
     # Override config keys at submit time (repeatable):
-    python aisa_scripts/run_sim/submit_sim_aisa.py --config configs/allq_sim_ds_aisa.yaml \
+    python aisa_scripts/run_sim/submit_sim_aisa.py --config configs/deepseek/allq_sim_ds_aisa.yaml \
         --set sim_name=allq_tmp \
         --set defaults.temperature=0.2 \
         --set resources.cpus=32

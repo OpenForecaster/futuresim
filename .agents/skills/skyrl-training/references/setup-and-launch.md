@@ -34,11 +34,13 @@ export PYTHONPATH="$(pwd):$(pwd)/third_party/SkyRL:$(pwd)/third_party/SkyRL/skyr
 ```bash
 python scripts/prepare_skyrl_openforesight_search_data.py \
   --dataset_path "${FSIM_DATASET_PATH}" \
-  --output_dir /path/to/skyrl/output_dir \
+  --prepared-data-dir "${FSIM_SKYRL_PREPARED_DATA_DIR}" \
   --search_db "${FSIM_SEARCH_DB}"
 ```
 
 `scripts/run_skyrl_openforesight_search.py` can also build the data automatically if it is missing.
+
+Set **`FSIM_SKYRL_PREPARED_DATA_DIR`** (and `data.prepared_data_dir: ${FSIM_SKYRL_PREPARED_DATA_DIR}` in YAML) to **one** directory reused by all runs. To consolidate from older per-experiment folders, copy the latest `train.parquet` / `validation.parquet` into that directory (or run prep once with `--force-rebuild-data`). Per-run SkyRL outputs use **`training.log_path`** / **`FSIM_SKYRL_LOG_BASE`**, not `FSIM_SKYRL_PREPARED_DATA_DIR`.
 
 When the SkyRL config sets `matching: "openrouter"`, the warmup env reuses
 forecast-sim's `AnswerMatcher`, so `OPENROUTER_API_KEY` must be available in

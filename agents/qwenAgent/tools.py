@@ -1,7 +1,7 @@
 import json
 from typing import Any, Dict, List, Optional, Tuple
 
-from agents.gptossAgent.tools import response_to_action
+from agents.basicAgent.agent import BasicAgent
 from agents.utils.forecast_parser import ParsedAction
 
 
@@ -273,9 +273,9 @@ def chat_response_to_action(
 ) -> Tuple[Optional[ParsedAction], str, List[Dict[str, Any]]]:
     assistant_text = extract_assistant_text(chat_response_json)
     tool_calls = extract_tool_calls(chat_response_json)
-    parsed, _, normalized_calls = response_to_action(
-        {"output_text": assistant_text},
-        tool_calls=tool_calls,
+    parsed, _, normalized_calls = BasicAgent.tool_calls_to_parsed_action(
+        tool_calls,
+        assistant_text=assistant_text,
     )
     return parsed, assistant_text, normalized_calls
 

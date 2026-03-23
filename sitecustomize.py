@@ -1,16 +1,38 @@
-"""Runtime compatibility shims loaded automatically by Python.
+"""Runtime compatibility shims loaded automatically by Python (repo `PYTHONPATH`).
 
-SkyRL submodule is pinned to NovaSky ``skyrl-v0.1.0`` (+ fork forecast/OPSD commits). These
-shims remain after that upgrade:
+Targets **NovaSky SkyRL v0.1.0** (`skyrl-v0.1.0`). We do not keep compatibility with older
+SkyRL versions; delete or adjust these shims when bumping the submodule.
 
-- ``init_custom_process_group``: upstream uses ``str(torch.__version__) >= "2.6"`` to pick
-  ``backend_options`` vs ``pg_options``, which mis-classifies torch 2.10.x; we detect the real
-  helper kwarg via ``inspect.signature`` (same idea as before v0.1.0).
-- FSDP wrap policy / Qwen3.5 weight name remaps / tokenizer BatchEncoding: still required for
-  Qwen3.5 + vLLM FSDP training in this repo; v0.1.0 does not fully subsume them.
+What is still needed vs upstream:
 
-The vLLM worker ``load_weights`` retry shim was removed: ``FSDPWeightExtractor`` name remapping
-is sufficient for the NCCL sync path we use.
+- **`init_custom_process_group` / `torch.__version__` string compare** — SkyRL still uses
+  ``str(torch.__version__) >= "2.6"`` to pick ``backend_options`` vs ``pg_options``, which
+  breaks for **2.10+** (lexicographic ``"2.10" < "2.6"``). We patch using
+  ``inspect.signature(_new_process_group_helper)`` instead.
+
+- **FSDP wrap policy for Qwen3.5 text checkpoints** — `get_fsdp_wrap_policy` still raises if
+  `_no_split_modules` lists vision layers that are not present on the loaded text module. We
+  filter to classes that actually exist and keep the FSDP2 apply path aligned.
+
+- **Qwen3.5 HF → vLLM weight names** — Policy FSDP state dicts still expose `model.*` while
+  vLLM’s Qwen3.5 stack expects `language_model.*`. We remap names in `FSDPWeightExtractor.extract_weights`
+  only (v0.1.0 dropped `get_weight_metadata` on this class).
+
+- **`apply_chat_template` tokenize output** — Some Qwen tokenizers return `BatchEncoding` when
+  `tokenize=True` without `return_dict`; `skyrl_gym_generator` still calls it that way. We
+  normalize to raw token-id lists on `PreTrainedTokenizerBase`.
+
+- **`ignore_keys_at_rope_validation` list vs set** — vLLM’s `Qwen3_5TextConfig` passes a
+  **list** into `PretrainedConfig` / `RotaryEmbeddingConfigMixin.convert_rope_params_to_dict`,
+  but current **Transformers** unions with ``{"partial_rotary_factor"}`` using set logic
+  (`|=`). We coerce list/tuple → **set** on that mixin method so vLLM engine init does not
+  require editing site-packages vLLM.
+
+Removed as redundant with v0.1.0 + the tokenizer shim:
+
+- **InferenceEngineClient prompt_token_ids normalization** — v0.1.0 uses `return_dict=True`
+  for the prompts-only path; multi-turn ids come from the same tokenizer `apply_chat_template`
+  calls fixed by the patch above, so monkey-patching the client is unnecessary.
 """
 
 from __future__ import annotations
@@ -36,6 +58,20 @@ def _remap_qwen35_weight_name(name: str) -> str:
     return name
 
 
+def _patch_transformers_rope_ignore_keys_iterable_compat() -> None:
+    """Delegate to ``skyrl_integration.bootstrap_transformers_patches`` (single implementation)."""
+
+    try:
+        from skyrl_integration.bootstrap_transformers_patches import apply_transformers_runtime_patches
+    except Exception:
+        return
+
+    apply_transformers_runtime_patches()
+
+
+_patch_transformers_rope_ignore_keys_iterable_compat()
+
+
 def _extract_input_ids(value):
     if isinstance(value, dict):
         return value.get("input_ids", value)
@@ -48,27 +84,6 @@ def _extract_input_ids(value):
         if maybe_ids is not None:
             return maybe_ids
     return value
-
-
-def _normalize_prompt_token_id_batch(prompt_token_ids):
-    ids = _extract_input_ids(prompt_token_ids)
-    if isinstance(ids, tuple):
-        ids = list(ids)
-    if not isinstance(ids, list):
-        return ids
-    if not ids:
-        return ids
-
-    if isinstance(ids[0], int):
-        return [ids]
-
-    normalized = []
-    for item in ids:
-        item_ids = _extract_input_ids(item)
-        if isinstance(item_ids, tuple):
-            item_ids = list(item_ids)
-        normalized.append(item_ids)
-    return normalized
 
 
 def _patch_skyrl_fsdp_wrap_policy_for_qwen35() -> None:
@@ -187,11 +202,8 @@ _patch_skyrl_fsdp_wrap_policy_for_qwen35()
 
 def _patch_skyrl_custom_process_group_for_new_torch() -> None:
     """
-    Patch SkyRL custom process-group helper for torch versions where
-    `_new_process_group_helper` uses `backend_options` instead of `pg_options`.
-
-    SkyRL currently uses a string comparison on torch version, which fails on
-    versions like 2.10 and can choose the wrong keyword argument.
+    Patch SkyRL custom process-group helper: choose ``backend_options`` vs ``pg_options``
+    from the real ``_new_process_group_helper`` signature, not string torch version compare.
     """
 
     try:
@@ -280,7 +292,6 @@ def _patch_skyrl_qwen35_weight_name_mapping() -> None:
         return
 
     original_extract_weights = fsdp_worker.FSDPWeightExtractor.extract_weights
-    original_get_weight_metadata = fsdp_worker.FSDPWeightExtractor.get_weight_metadata
 
     def _is_qwen35(extractor) -> bool:
         model = getattr(extractor, "model", None)
@@ -299,57 +310,11 @@ def _patch_skyrl_qwen35_weight_name_mapping() -> None:
             chunk.names = [_remap_qwen35_weight_name(name) for name in chunk.names]
             yield chunk
 
-    def _patched_get_weight_metadata(self, dtype):
-        metadata = original_get_weight_metadata(self, dtype)
-        if not _is_qwen35(self):
-            return metadata
-
-        if "names" in metadata:
-            metadata = dict(metadata)
-            metadata["names"] = [_remap_qwen35_weight_name(name) for name in metadata["names"]]
-        return metadata
-
     fsdp_worker.FSDPWeightExtractor.extract_weights = _patched_extract_weights
-    fsdp_worker.FSDPWeightExtractor.get_weight_metadata = _patched_get_weight_metadata
     fsdp_worker._forecast_sim_qwen35_name_patch = True
 
 
 _patch_skyrl_qwen35_weight_name_mapping()
-
-
-def _patch_skyrl_inference_client_prompt_token_ids() -> None:
-    """
-    Normalize prompt_token_ids for tokenizers returning BatchEncoding.
-
-    Some Qwen3.5 tokenizers return BatchEncoding from apply_chat_template()
-    even with tokenize=True, while SkyRL expects List[List[int]].
-    """
-
-    try:
-        from skyrl.backends.skyrl_train.inference_engines import inference_engine_client
-    except Exception:
-        return
-
-    if getattr(inference_engine_client, "_forecast_sim_prompt_token_ids_patch", False):
-        return
-
-    original_generate = inference_engine_client.InferenceEngineClient.generate
-
-    async def _patched_generate(self, input_batch):
-        prompt_token_ids = input_batch.get("prompt_token_ids")
-        if prompt_token_ids is not None:
-            normalized_prompt_token_ids = _normalize_prompt_token_id_batch(prompt_token_ids)
-            if normalized_prompt_token_ids is not prompt_token_ids:
-                patched_input_batch = dict(input_batch)
-                patched_input_batch["prompt_token_ids"] = normalized_prompt_token_ids
-                input_batch = patched_input_batch
-        return await original_generate(self, input_batch)
-
-    inference_engine_client.InferenceEngineClient.generate = _patched_generate
-    inference_engine_client._forecast_sim_prompt_token_ids_patch = True
-
-
-_patch_skyrl_inference_client_prompt_token_ids()
 
 
 def _patch_qwen_chat_template_tokenize_output() -> None:
@@ -357,7 +322,7 @@ def _patch_qwen_chat_template_tokenize_output() -> None:
     Normalize Qwen chat-template tokenize output to token-id lists.
 
     Some tokenizer implementations return BatchEncoding for tokenize=True even
-    when return_dict is not requested; SkyRL assumes plain token-id lists.
+    when return_dict is not requested; SkyRL gym generator assumes plain token-id lists.
     """
 
     try:

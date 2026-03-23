@@ -80,9 +80,12 @@ def main() -> int:
     if served_model_name:
         cmd += ["--served-model-name", str(served_model_name)]
 
-    # Tool calling flags (require newer vLLM).
+    # Only enable vLLM's server-side auto tool parsing when a parser is
+    # explicitly configured. Some scaffolds still pass tools in the request but
+    # parse emitted tool-call text on the client side.
     if enable_tools:
-        cmd += ["--enable-auto-tool-choice", "--tool-call-parser", str(tool_call_parser)]
+        if tool_call_parser:
+            cmd += ["--enable-auto-tool-choice", "--tool-call-parser", str(tool_call_parser)]
     if enable_prefix_caching:
         cmd += ["--enable-prefix-caching"]
 

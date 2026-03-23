@@ -1,0 +1,89 @@
+# AllQ simulation using local Qwen3.5-4B via vLLM, with context-window budgets.
+#
+# Usage:
+#   python mpi_scripts/run_sim/submit_sim.py --config configs/qwen3.5/allq_sim_qwen3.5_4b.yaml --runs 1
+#
+# Notes:
+# - Uses explicit `qwenallq` scaffold for the Qwen native tool-calling agent path.
+# - `max_total_tokens` / `warmup_max_total_tokens` track current prompt occupancy/headroom.
+# - This config uses token budgets only (no action cap).
+# - This config targets the full 262144-token Qwen3.5 context window.
+
+# --- Run Script (CUDA 12.9 needed for Qwen3.5 FlashInfer GDN kernels) ---
+run_script: "run_sim.sh"
+
+# --- Simulation Meta ---
+sim_name: "allq_sim_qwen3.5-4b_tokenbudget"
+start_date: "2025-05-01"
+end_date: "2025-08-23"
+resolution_start: "2025-05-01"
+resolution_end: "2025-08-23"
+lookback_days: 7
+search_cutoff_days: 0
+split: "test"
+
+# --- HTCondor Resources ---
+resources:
+  gpus: 2
+  cpus: 16
+  memory_gb: 128
+  disk_gb: 50
+  bid: 55
+  requirements: "TARGET.CUDACapability >= 9.0 && TARGET.CUDAGlobalMemoryMb > 70000 && TARGET.Machine =!= \"i103.internal.cluster.is.localnet\""
+
+# --- Data Paths ---
+dataset: "openforesight"
+dataset_path: "${FSIM_DATASET_PATH}"
+dataset_cache: null
+min_forecasters: 10
+resolved_only: true
+output_base: "${FSIM_OUTPUT_BASE}"
+warmup_parallelism: 64
+
+# --- Search Settings ---
+search_db: "${FSIM_SEARCH_DB}"
+embedding_model: "${FSIM_EMBEDDING_MODEL}"
+embedding_gpu_mem: 0.7
+
+# --- Answer Matching ---
+matching: "openrouter"
+matcher: "deepseek/deepseek-v3.2"
+matcher_gpu_mem: 0.0
+max_model_len: 262144
+agent_max_model_len: 262144
+embedding_max_model_len: 32768
+
+# --- vLLM Agent Runtime ---
+vllm_gpu_mem: 0.7
+vllm_tensor_parallel_size: 1
+vllm_startup_timeout: 900
+vllm_enable_tools: true
+vllm_tool_call_parser: "qwen3_coder"
+language_model_only: true
+
+# --- Local 2-GPU Pinning ---
+# matcher + embedder on GPU1 (parent process), agent vLLM on GPU0 (subprocess override).
+aux_cuda_visible_devices: "1"
+agent_cuda_visible_devices: "0"
+
+# --- Inference Defaults ---
+rate_limit: 32.0
+parallel: true
+
+# --- Agents Configuration ---
+defaults:
+  provider: "vllm"
+  scaffold: "qwenallq"
+  max_total_tokens: 262144
+  warmup_max_total_tokens: 262144
+  submit_reserve_tokens: 8192
+  force_submit_threshold_tokens: 16384
+  temperature: 0.7
+  top_p: 0.95
+  top_k: 20
+  max_tokens: 4096
+  max_retries: 3
+
+agents:
+  - model: "/fast/sgoel/models/Qwen3.5-4B-text"
+    provider: "vllm"

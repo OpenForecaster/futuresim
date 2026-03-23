@@ -20,7 +20,7 @@ source .venv/bin/activate
 
 # 3. Run a basic simulation
 python scripts/test_basic_agent.py \
-    --config configs/metaculus_sim.yaml \
+    --config configs/shared/metaculus_sim.yaml \
     --start_date 2025-04-01 \
     --end_date 2025-04-05
 ```
@@ -52,11 +52,11 @@ Notes:
 
 ### Run Simulation
 ```bash
-# AllQAgent (warmup on all questions Day 0)
-python scripts/test_basic_agent.py --config configs/allq_sim.yaml
+# Default shared simulation
+python scripts/test_basic_agent.py --config configs/shared/default_sim.yaml
 
-# With news search enabled
-python scripts/test_basic_agent.py --config configs/search_sim.yaml
+# Shared variant without search
+python scripts/test_basic_agent.py --config configs/shared/default_nosearch_sim.yaml
 ```
 
 ### Scaffold Names
@@ -64,19 +64,28 @@ python scripts/test_basic_agent.py --config configs/search_sim.yaml
 Scaffold selection is explicit.
 
 - `basic`, `allQ`, `allqd`, and `og` mean the plain base scaffolds.
-- `qwenbasic` and `qwenallq` select the Qwen-native tool-calling agents.
+- `qwenbasic` and `qwenallq` select **Qwen3.5** vLLM native tool-calling (`agents/qwenAgent`). **Do not use them for Qwen3** — use `basic` / `allQ` / `allqd` with `vllm_enable_tools: false` (see `configs/qwen3/`). Details: `.agents/skills/agent-scaffolds/references/model-specific-notes.md`.
 - `gptossbasic` and `gptossallq` select the GPT-OSS-specific agents.
+- Qwen scaffolds intentionally do not replay historical hidden thinking across turns; only final assistant content and tool calls are fed back into history.
 - A Qwen or GPT-OSS model will not automatically switch scaffolds anymore just because the model name matches.
 
 Example:
 
 ```bash
 python mpi_scripts/run_sim/submit_sim.py \
-  --config configs/warmup_only_qwen3.5_27b.yaml \
+  --config configs/qwen3.5/warmup_only_qwen3.5_27b.yaml \
   --runs 1 \
   --set sim_name=qwenallq_warmup_only_qwen3.5-27b \
   --set defaults.scaffold=qwenallq
 ```
+
+### Token Budgets
+
+- `max_total_tokens` tracks current prompt occupancy/headroom, not cumulative token spend.
+- `force_submit_threshold_tokens` is the soft landing threshold: once remaining context is at or below it, budget-aware loops switch into final-submit mode.
+- `submit_reserve_tokens` is the hard floor for the action loop: once remaining context drops below it, the loop stops taking more forecast actions.
+- Keep `force_submit_threshold_tokens >= submit_reserve_tokens` so there is runway for the final submit turn and its transcript growth.
+- Reserve exhaustion currently stops the forecast/action loop only. End-of-session memory update is still attempted afterward unless the scaffold hit a real provider context-limit error.
 
 ### Resume / Restart
 ```bash
@@ -91,11 +100,11 @@ python scripts/test_basic_agent.py \
 
 ### Submit Cluster Jobs
 ```bash
-python mpi_scripts/run_sim/submit_sim.py --config configs/metaculus_sim.yaml --runs 3
+python mpi_scripts/run_sim/submit_sim.py --config configs/shared/metaculus_sim.yaml --runs 3
 
 # SkyRL warmup-style search GRPO training
 python mpi_scripts/skyrl_search/submit_skyrl_search_train.py \
-  --config configs/skyrl_openforesight_search_warmup_qwen3.5_4b.yaml --runs 1
+  --config configs/skyrl/skyrl_openforesight_search_warmup_qwen3.5_4b.yaml --runs 1
 ```
 
 ## Documentation

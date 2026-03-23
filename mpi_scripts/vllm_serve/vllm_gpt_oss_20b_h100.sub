@@ -7,7 +7,7 @@
 #   http://<node>:8000/v1/models
 
 executable = /usr/bin/env
-arguments = bash -lc "cd /home/sgoel/forecast-sim && python mpi_scripts/vllm_serve/serve_from_config.py --config configs/vllm_gpt_oss_20b_mxfp4.yaml"
+arguments = bash -lc "cd $(SUBMIT_DIR) && python mpi_scripts/vllm_serve/serve_from_config.py --config configs/gpt-oss/vllm_gpt_oss_20b_mxfp4.yaml"
 
 output = /is/cluster/fast/sgoel/logs/forecasting-sim/vllm/gpt_oss_20b_$(Cluster).out
 error  = /is/cluster/fast/sgoel/logs/forecasting-sim/vllm/gpt_oss_20b_$(Cluster).err
@@ -22,4 +22,3 @@ request_gpus   = 1
 requirements = (TARGET.CUDACapability >= 9.0)
 
 queue
-

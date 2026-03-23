@@ -11,14 +11,13 @@ from agents.utils.forecast_parser import ParsedAction
 from environment.interfaces import PredictionSubmission
 
 from .tools import (
+    _extract_output_text,
     build_action_tools,
     build_memory_tools,
-    response_to_action,
     extract_function_calls,
     extract_assistant_messages,
     extract_replay_items_for_tool_turn,
     extract_reasoning_text,
-    extract_reasoning_token_count,
 )
 
 
@@ -338,14 +337,15 @@ class GPTOSSBasicAgent(BasicAgent):
                 raw_tool_calls,
                 allowed_tool_names=allowed_tool_names,
             )
-            parsed, assistant_text, tool_calls = response_to_action(
-                resp_json,
-                tool_calls=tool_calls,
+            assistant_text = _extract_output_text(resp_json) or ""
+            parsed, assistant_text, tool_calls = BasicAgent.tool_calls_to_parsed_action(
+                tool_calls,
+                assistant_text=assistant_text,
             )
             reasoning_text = extract_reasoning_text(resp_json)
             assistant_messages = extract_assistant_messages(resp_json)
             replay_items = extract_replay_items_for_tool_turn(resp_json)
-            reasoning_tokens_turn = extract_reasoning_token_count(resp_json)
+            reasoning_tokens_turn = BasicAgent.extract_reasoning_token_count(resp_json)
             status = resp_json.get("status")
             incomplete_details = resp_json.get("incomplete_details") or {}
             incomplete_reason = incomplete_details.get("reason") if isinstance(incomplete_details, dict) else None
@@ -1057,7 +1057,7 @@ Current memory length: {len(self._memory)} characters"""
             return
 
         reasoning_text = extract_reasoning_text(resp_json)
-        reasoning_tokens_turn = extract_reasoning_token_count(resp_json)
+        reasoning_tokens_turn = BasicAgent.extract_reasoning_token_count(resp_json)
         replay_items = extract_replay_items_for_tool_turn(resp_json)
         status = resp_json.get("status")
         incomplete_details = resp_json.get("incomplete_details") or {}

@@ -1,0 +1,81 @@
+# AllQAgent: Qwen3.5-27B (local vLLM), no-memory restart from shared warmup.
+#
+# Usage:
+#   python mpi_scripts/run_sim/submit_sim.py --config configs/qwen3.5/allq_nomem_restart_qwen3.5_27b.yaml --runs 1
+
+# --- Run Script (CUDA 12.9 needed for Qwen3.5 FlashInfer GDN kernels) ---
+run_script: "run_sim2.sh"
+
+# --- Restart ---
+restart_from: "/fast/sgoel/forecasting/current_sim/allq_warmup_only_qwen3.5-27b_r00/26-03-08-19-19-56"
+restart_from_day: "2025-04-25"
+
+# --- Simulation Meta ---
+sim_name: "allq_mem_qwen3.5-27b_testset-50actions"
+start_date: "2025-05-01"
+end_date: "2025-08-23"
+lookback_days: 7
+search_cutoff_days: 0
+split: "test"
+
+# --- HTCondor Resources ---
+resources:
+  gpus: 3
+  cpus: 24
+  memory_gb: 128
+  disk_gb: 50
+  bid: 25
+  requirements: "TARGET.CUDACapability >= 9.0 && TARGET.CUDAGlobalMemoryMb > 70000 && TARGET.Machine =!= \"i103.internal.cluster.is.localnet\""
+
+# --- Data Paths ---
+dataset: "openforesight"
+dataset_path: "/fast/nchandak/datasets/OpenForesight"
+min_forecasters: 10
+resolved_only: true
+output_base: "/is/cluster/fast/sgoel/forecasting/current_sim"
+warmup_parallelism: 64
+
+# --- Search Settings ---
+search_db: "/is/cluster/fast/sgoel/forecasting/news/deduped_articles/lance/Qwen3-Embedding-8B"
+embedding_model: "/is/cluster/fast/sgoel/models/Qwen3-Embedding-8B"
+embedding_gpu_mem: 0.7
+
+# --- Answer Matching ---
+matching: "openrouter"
+matcher: "deepseek/deepseek-v3.2"
+matcher_gpu_mem: 0.0
+max_model_len: 65536
+agent_max_model_len: 65536
+embedding_max_model_len: 32768
+
+# --- vLLM Agent Runtime ---
+vllm_gpu_mem: 0.85
+vllm_tensor_parallel_size: 2
+vllm_enable_tools: false
+language_model_only: true
+
+# --- Local 3-GPU Pinning ---
+# matcher + embedder on GPU2 (parent process), agent vLLM on GPU0-1 (subprocess override).
+aux_cuda_visible_devices: "2"
+agent_cuda_visible_devices: "0,1"
+
+# --- Inference Defaults ---
+rate_limit: 32.0
+parallel: true
+
+# --- Agents Configuration ---
+defaults:
+  provider: "vllm"
+  scaffold: "allQ"
+  enable_memory: true
+  max_actions: 50
+  warmup_max_actions: 10
+  temperature: 0.7
+  top_p: 0.95
+  top_k: 20
+  max_tokens: 8192
+  max_retries: 3
+
+agents:
+  - model: "/fast/nchandak/models/Qwen3.5-27B-text"
+    provider: "vllm"

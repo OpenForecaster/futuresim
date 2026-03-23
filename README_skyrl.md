@@ -1,17 +1,14 @@
-wget https://github.com/numactl/numactl/releases/download/v2.0.16/numactl-2.0.16.tar.gz
-tar xzf numactl-2.0.16.tar.gz
-cd numactl-2.0.16
-# Build to a local prefix
-./configure --prefix=$HOME/.local
-make
-make install
-# Point compiler and linker to it (add to ~/.bashrc for persistence)
-export CPATH=$HOME/.local/include:$CPATH
-export LIBRARY_PATH=$HOME/.local/lib:$LIBRARY_PATH
-export LD_LIBRARY_PATH=$HOME/.local/lib:$LD_LIBRARY_PATH
+# SkyRL Docs
 
+Operational guidance moved to `.agents/skills/skyrl-training/`.
 
-source .skyrl-venv/bin/activate
-uv sync --active --extra fsdp
+Use that skill for environment setup, OpenForesight warmup-search data prep, local and HTCondor launch, runtime wrapper notes, and SkyRL submodule maintenance.
 
+Boundary rule for the Qwen warmup integration:
+- keep model-facing prompt text and tool schemas on the native `agents/qwenAgent` path
+- keep SkyRL-only adaptation in `skyrl_integration/`
+- env-side, parse raw assistant strings with **`skyrl_integration/vllm_qwen3_coder_text.py`**
+  (same XML shape as vLLM `--tool-call-parser qwen3_coder`), then `BasicAgent.tool_calls_to_parsed_action`
+- message/tool feedback should follow **`QwenBasicAgent._append_tool_output_message`** (see warmup env)
 
+See `.agents/skills/skyrl-training/` for launch, runtime notes, and submodule maintenance.

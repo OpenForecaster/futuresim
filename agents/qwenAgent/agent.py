@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from datetime import date
 from typing import Any, Dict, List, Optional, Tuple
 
 from agents.allQAgent.agent import AllQAgent
 from agents.basicAgent.agent import BasicAgent
+from agents.basicAgent.search import SearchHandler
 from agents.utils.budget import BudgetTracker
-from agents.gptossAgent.tools import extract_reasoning_token_count
 from agents.utils.forecast_parser import ParsedAction
 from environment.interfaces import PredictionSubmission
 
@@ -17,6 +18,40 @@ from .tools import (
     extract_assistant_message,
     extract_finish_reason,
 )
+
+
+def qwen_final_submit_instruction_text(
+    target_qid: str,
+    budget: Optional[BudgetTracker],
+    *,
+    forbid_query_df: bool = True,
+) -> str:
+    """Force-submit user message for Qwen loops (eval) and SkyRL warmup.
+
+    ``budget`` only adds remaining-budget lines (same idea as ``BasicAgent._build_force_submit_preamble``).
+
+    When ``query_df`` is present in the tool schema (full daily eval), set ``forbid_query_df=True``
+    so the model is told not to call it on the force-submit turn. SkyRL warmup builds tools with
+    ``enable_query=False`` — there is no ``query_df`` tool — so use ``forbid_query_df=False`` and
+    only forbid ``search_news`` / ``next_day``.
+    """
+    lines = ["FINAL ACTION: You MUST submit your best guess forecast now."]
+    if budget is not None:
+        status = budget.status_text()
+        if status:
+            lines.append(status)
+    preamble = "\n".join(lines)
+    if forbid_query_df:
+        forbid = "Do NOT call query_df, search_news, or next_day.\n"
+    else:
+        forbid = "Do NOT call search_news or next_day.\n"
+    return (
+        f"{preamble}\n"
+        f"Target question ID: {target_qid}\n"
+        "Call exactly one tool: submit_forecasts.\n"
+        f"{forbid}"
+        "Submit only this question id with concrete outcomes and probabilities (sum <= 1.0)."
+    )
 
 
 class QwenBasicAgent(BasicAgent):
@@ -85,13 +120,7 @@ class QwenBasicAgent(BasicAgent):
         )
 
     def _build_final_submit_tool_instruction(self, target_qid: str, budget: BudgetTracker) -> str:
-        return (
-            f"{self._build_force_submit_preamble(budget)}\n"
-            f"Target question ID: {target_qid}\n"
-            "Call exactly one tool: submit_forecasts.\n"
-            "Do NOT call query_df, search_news, or next_day.\n"
-            "Submit only this question id with concrete outcomes and probabilities (sum <= 1.0)."
-        )
+        return qwen_final_submit_instruction_text(target_qid, budget)
 
     def _run_qwen_action_loop(
         self,
@@ -220,7 +249,7 @@ class QwenBasicAgent(BasicAgent):
             usage = self._normalize_chat_usage(resp_json)
             self._timer.record_tokens(usage)
             budget.record_usage(usage)
-            reasoning_tokens_turn = extract_reasoning_token_count({"usage": usage})
+            reasoning_tokens_turn = BasicAgent.extract_reasoning_token_count({"usage": usage})
 
             parsed, assistant_text, tool_calls = chat_response_to_action(resp_json)
             assistant_message = extract_assistant_message(resp_json)
@@ -473,61 +502,20 @@ class QwenBasicAgent(BasicAgent):
         budget: BudgetTracker,
     ) -> None:
         budget.consume_action()
-        if not self._search_handler.is_available:
-            feedback = "SEARCH ERROR: Search is not available."
-            appended = self._append_tool_output_message(
-                messages,
-                tool_call=tool_call,
-                tool_name="search_news",
-                output=budget.format_feedback(feedback),
-            )
-            budget.record_appended_item(appended)
-            return
-
-        if not parsed.query:
-            feedback = "SEARCH ERROR: Missing query."
-            appended = self._append_tool_output_message(
-                messages,
-                tool_call=tool_call,
-                tool_name="search_news",
-                output=budget.format_feedback(feedback),
-            )
-            budget.record_appended_item(appended)
-            return
-
-        min_date = None
-        max_date = None
-        if parsed.search_from:
-            try:
-                from datetime import datetime as _dt
-
-                min_date = _dt.strptime(parsed.search_from, "%Y-%m-%d").date()
-            except Exception:
-                min_date = None
-        if parsed.search_to:
-            try:
-                from datetime import datetime as _dt
-
-                max_date = _dt.strptime(parsed.search_to, "%Y-%m-%d").date()
-            except Exception:
-                max_date = None
-
+        min_date, max_date = qwen_optional_search_dates_from_parsed(parsed)
         with self._timer.track("search"):
-            result, error = self._search_handler.search(
-                parsed.query,
+            effect = qwen_execute_news_search(
+                parsed,
+                self._search_handler,
                 max_results=self.config.max_search_results,
                 min_date=min_date,
                 max_date=max_date,
             )
-        if error:
-            feedback = f"SEARCH ERROR: {error}"
-        else:
-            feedback = f"SEARCH RESULTS:\n{result}"
         appended = self._append_tool_output_message(
             messages,
             tool_call=tool_call,
             tool_name="search_news",
-            output=budget.format_feedback(feedback),
+            output=budget.format_feedback(effect.feedback),
         )
         budget.record_appended_item(appended)
 
@@ -699,3 +687,113 @@ class QwenAllQAgent(AllQAgent, QwenBasicAgent):
             "constraints, and examples there. Call exactly one tool per turn.\n"
             f"{start_block}\n"
         )
+
+
+@dataclass(frozen=True)
+class QwenNewsSearchStepResult:
+    """search_news tool step: user-facing feedback + env metrics (SkyRL warmup uses phase/hit)."""
+
+    feedback: str
+    phase: str
+    successful_hit: bool
+
+
+def qwen_optional_search_dates_from_parsed(parsed: ParsedAction) -> Tuple[Optional[date], Optional[date]]:
+    """Parse YYYY-MM-DD bounds from ParsedAction (same logic as former _qwen_handle_search)."""
+    min_date: Optional[date] = None
+    max_date: Optional[date] = None
+    if parsed.search_from:
+        try:
+            from datetime import datetime as _dt
+
+            min_date = _dt.strptime(parsed.search_from, "%Y-%m-%d").date()
+        except Exception:
+            min_date = None
+    if parsed.search_to:
+        try:
+            from datetime import datetime as _dt
+
+            max_date = _dt.strptime(parsed.search_to, "%Y-%m-%d").date()
+        except Exception:
+            max_date = None
+    return min_date, max_date
+
+
+def qwen_execute_news_search(
+    parsed: ParsedAction,
+    search_handler: SearchHandler,
+    *,
+    max_results: int,
+    search_type: str = "hybrid",
+    min_date: Optional[date] = None,
+    max_date: Optional[date] = None,
+) -> QwenNewsSearchStepResult:
+    """
+    Core search_news behavior for QwenBasicAgent and SkyRL OpenForesightSearchWarmupEnv.
+
+    Matches QwenBasicAgent._qwen_handle_search (default search_type hybrid when omitted there).
+    """
+    if not search_handler.is_available:
+        return QwenNewsSearchStepResult(
+            feedback="SEARCH ERROR: Search is not available.",
+            phase="search_unavailable",
+            successful_hit=False,
+        )
+    if not parsed.query:
+        return QwenNewsSearchStepResult(
+            feedback="SEARCH ERROR: Missing query.",
+            phase="search_error",
+            successful_hit=False,
+        )
+    result, error = search_handler.search(
+        parsed.query,
+        max_results=max_results,
+        search_type=search_type,
+        min_date=min_date,
+        max_date=max_date,
+    )
+    if error:
+        return QwenNewsSearchStepResult(
+            feedback=f"SEARCH ERROR: {error}",
+            phase="search_error",
+            successful_hit=False,
+        )
+    successful_hit = bool(result and not result.startswith("No articles found"))
+    return QwenNewsSearchStepResult(
+        feedback=f"SEARCH RESULTS:\n{result}",
+        phase="search",
+        successful_hit=successful_hit,
+    )
+
+
+def qwen_parse_warmup_submit_outcomes(
+    parsed: ParsedAction,
+    target_qid: str,
+) -> Tuple[Optional[Dict[str, float]], Optional[str]]:
+    """
+    Select one forecast for target_qid like QwenBasicAgent._qwen_handle_submit.
+
+    Validates with QwenBasicAgent._forecasts_within_probability_bounds (same gate as the
+    eval loop’s force-submit path). Error strings match _qwen_handle_submit when applicable.
+    """
+    forecasts = list(parsed.forecasts or [])
+    forecasts = [f for f in forecasts if f.get("qid") == target_qid]
+    if len(forecasts) > 1:
+        forecasts = forecasts[:1]
+
+    if not forecasts:
+        return None, (parsed.error or "No valid forecasts")
+
+    outcomes_raw = forecasts[0].get("outcomes")
+    if not isinstance(outcomes_raw, dict):
+        return None, "No valid forecasts"
+    try:
+        outcomes = {k: float(v) for k, v in outcomes_raw.items()}
+    except Exception:
+        return None, "No valid forecasts"
+
+    qid = forecasts[0].get("qid", target_qid)
+    if not QwenBasicAgent._forecasts_within_probability_bounds([{"qid": qid, "outcomes": outcomes}]):
+        return None, "Forecast submission failed."
+
+    return outcomes, None
