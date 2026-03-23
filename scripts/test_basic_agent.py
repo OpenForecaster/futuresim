@@ -148,29 +148,36 @@ def prepare_restart_directory(source_dir: str, restart_day: str, output_dir: str
                 dst_memory_dir = os.path.join(dst_agent_dir, "memory")
                 os.makedirs(dst_memory_dir, exist_ok=True)
                 
-                for mem_file in os.listdir(src_memory_dir):
+                for entry in os.listdir(src_memory_dir):
+                    entry_path = os.path.join(src_memory_dir, entry)
                     # Support all memory formats:
                     #   plain:      YYYY-MM-DD.txt
                     #   structured: YYYY-MM-DD.yaml
-                    #   active:     YYYY-MM-DD.yaml + memo_YYYY-MM-DD.csv
-                    if mem_file.endswith(".txt") or mem_file.endswith(".yaml"):
+                    #   active (old): YYYY-MM-DD.yaml + memo_YYYY-MM-DD.csv
+                    #   active (new): YYYY-MM-DD/ directory with mem.csv + meta.yaml
+                    if os.path.isdir(entry_path):
+                        # New directory format: memory/YYYY-MM-DD/
                         try:
-                            file_date = date.fromisoformat(mem_file.rsplit(".", 1)[0])
-                            if file_date < restart_date:
-                                shutil.copy(
-                                    os.path.join(src_memory_dir, mem_file),
-                                    os.path.join(dst_memory_dir, mem_file)
+                            dir_date = date.fromisoformat(entry)
+                            if dir_date < restart_date:
+                                shutil.copytree(
+                                    entry_path,
+                                    os.path.join(dst_memory_dir, entry)
                                 )
                         except ValueError:
                             continue
-                    elif mem_file.startswith("memo_") and mem_file.endswith(".csv"):
+                    elif entry.endswith(".txt") or entry.endswith(".yaml"):
                         try:
-                            file_date = date.fromisoformat(mem_file[len("memo_"):-len(".csv")])
+                            file_date = date.fromisoformat(entry.rsplit(".", 1)[0])
                             if file_date < restart_date:
-                                shutil.copy(
-                                    os.path.join(src_memory_dir, mem_file),
-                                    os.path.join(dst_memory_dir, mem_file)
-                                )
+                                shutil.copy(entry_path, os.path.join(dst_memory_dir, entry))
+                        except ValueError:
+                            continue
+                    elif entry.startswith("memo_") and entry.endswith(".csv"):
+                        try:
+                            file_date = date.fromisoformat(entry[len("memo_"):-len(".csv")])
+                            if file_date < restart_date:
+                                shutil.copy(entry_path, os.path.join(dst_memory_dir, entry))
                         except ValueError:
                             continue
                             
@@ -449,6 +456,10 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
         search_cutoff_days = agent_def.get('search_cutoff_days', defaults.get('search_cutoff_days', getattr(args, 'search_cutoff_days', 0)))
         enable_memory = agent_def.get('enable_memory', defaults.get('enable_memory', True))
         memory_format = agent_def.get('memory_format', defaults.get('memory_format', 'structured'))
+        memory_max_entries = int(agent_def.get('memory_max_entries', defaults.get('memory_max_entries', 500)))
+        memory_update_max_total_tokens = int(
+            agent_def.get('memory_update_max_total_tokens', defaults.get('memory_update_max_total_tokens', 50000))
+        )
         singleans = agent_def.get('singleans', defaults.get('singleans', False))
         tool_result_keep_last = _optional_int(
             agent_def.get(
@@ -508,6 +519,8 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
             memory_dir=agent_dir,  # Per-agent memory directory
             enable_memory=enable_memory,
             memory_format=memory_format,
+            memory_max_entries=memory_max_entries,
+            memory_update_max_total_tokens=memory_update_max_total_tokens,
             singleans=singleans,
             tool_result_keep_last=tool_result_keep_last,
             sampling_params={
@@ -822,7 +835,11 @@ def main():
     # Parse CLI args first to get config path if provided
     args, remaining_argv = parser.parse_known_args()
     config = None
-    
+    # Keys explicitly set by the YAML config file (used during restart to avoid
+    # source-config leakage — e.g. the new YAML intentionally omitting max_actions
+    # should NOT be backfilled from the source run's config).
+    _yaml_config_keys: set = set()
+
     # Load config if provided
     if args.config:
         print(f"Loading configuration from {args.config}")
@@ -830,10 +847,16 @@ def main():
             import yaml
             config = expand_env_tree(yaml.safe_load(f))
         raise_for_unresolved_env_vars(config, f"run config {args.config}")
-            
+        _yaml_config_keys = set(config.keys())
+        # Budget/agent settings live under 'defaults' in the YAML but are flattened
+        # to top-level keys in config.json. Include them so the source config from a
+        # restart doesn't overwrite what the new YAML intentionally sets.
+        if isinstance(config.get('defaults'), dict):
+            _yaml_config_keys |= set(config['defaults'].keys())
+
         # Set defaults from config
         parser.set_defaults(**config)
-        
+
         # Override with any explicitly provided CLI args
         # This requires re-parsing to ensure CLI args take precedence over config defaults
         args = parser.parse_args(args=remaining_argv + sys.argv[1:])
@@ -997,11 +1020,15 @@ def main():
             print(f"Loading configuration from source run: {src_config_path}")
             with open(src_config_path, 'r') as f:
                 src_config = json.load(f)
-            # Update args with source config (preserve restart-specific flags)
+            # Update args with source config (preserve restart-specific flags).
+            # Keys explicitly set by the new YAML config are authoritative and must
+            # NOT be overwritten by the source run's config — even when the YAML
+            # intentionally omits a key (e.g. max_actions) that the source had.
             restart_from = args.restart_from
             restart_from_day = args.restart_from_day
+            _skip_keys = {'restart_from', 'restart_from_day', 'resume', 'timestamp'} | _yaml_config_keys
             for key, val in src_config.items():
-                if key not in ('restart_from', 'restart_from_day', 'resume', 'timestamp'):
+                if key not in _skip_keys:
                     if not hasattr(args, key) or getattr(args, key) is None:
                         setattr(args, key, val)
             args.restart_from = restart_from

@@ -59,16 +59,13 @@ Thumbs.db
 # Agent artifacts (local only)
 .gemini/
 .env
-<<<<<<< HEAD
 .claude 
-=======
 .cache/
 .config/
 .ep_kernels_workspace/
 .nv/
 .pytest_cache/
 .triton/
->>>>>>> main
 
 # API Keys
 configs/openrouter_api_key.py

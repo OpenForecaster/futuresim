@@ -3,7 +3,7 @@ set -euo pipefail
 
 SHARED_ROOT="/mnt/nfs/datasets_ac"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 CREATE_DIRS=0
 if [[ "${1:-}" == "--create" ]]; then
@@ -11,11 +11,12 @@ if [[ "${1:-}" == "--create" ]]; then
 fi
 
 required_paths=(
-  "${SHARED_ROOT}/datasets/openforesight"
   "${SHARED_ROOT}/models/Qwen3-Embedding-8B"
   "${SHARED_ROOT}/models/qwen3-4b-it-2507"
   "${SHARED_ROOT}/models/gpt-oss-20b"
   "${SHARED_ROOT}/news/deduped_articles/lance/Qwen3-Embedding-8B"
+  "${SHARED_ROOT}/cache/huggingface/datasets"
+  "${PROJECT_ROOT}/models/Qwen3-Embedding-8B"
 )
 
 shared_dirs=(

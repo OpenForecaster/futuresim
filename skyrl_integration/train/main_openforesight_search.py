@@ -164,11 +164,19 @@ def _initialize_ray_with_memory(cfg: SkyRLTrainConfig) -> None:
 
     env_vars = prepare_runtime_environment(cfg)
 
-    # SkyRL only exports PYTHONPATH to workers when SKYRL_PYTHONPATH_EXPORT is set; without it,
-    # workers never see repo-root `sitecustomize.py` (Qwen3.5 RoPE list/set shim, FSDP, etc.).
-    driver_pythonpath = os.environ.get("PYTHONPATH", "").strip()
-    if driver_pythonpath:
-        env_vars["PYTHONPATH"] = driver_pythonpath
+    # SkyRL only exports PYTHONPATH when SKYRL_PYTHONPATH_EXPORT is set. HTCondor jobs may also
+    # run with a minimal inherited env. Always push a canonical PYTHONPATH + FSIM_REPO_DIR so Ray
+    # workers and vLLM subprocesses can load `skyrl_integration/bootstrap_transformers_patches.py`
+    # and repo `sitecustomize.py` shims.
+    _repo_root = str(Path(__file__).resolve().parents[2])
+    env_vars.setdefault("FSIM_REPO_DIR", os.environ.get("FSIM_REPO_DIR", "").strip() or _repo_root)
+    _skyrl_root = os.path.join(_repo_root, "third_party", "SkyRL")
+    _gym_root = os.path.join(_skyrl_root, "skyrl-gym")
+    _driver_pp = os.environ.get("PYTHONPATH", "").strip()
+    _pp_parts = [_repo_root, _skyrl_root, _gym_root]
+    if _driver_pp:
+        _pp_parts.append(_driver_pp)
+    env_vars["PYTHONPATH"] = os.pathsep.join([p for p in _pp_parts if p])
 
     if not verbose_logging:
         log_path = Path(cfg.trainer.log_path).resolve()
