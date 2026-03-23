@@ -451,11 +451,11 @@ class TestParseMemoryActions:
 <content>Predicted PSG 0.70 because Sky Bet implied 55% and Inter eliminated.</content>
 </action>'''
         parsed = parse_action(response)
-        assert parsed.action_type == "memory_add"
-        assert parsed.memory_add_data is not None
-        assert parsed.memory_add_data["name"] == "q149-psg-prediction"
-        assert "Q149" in parsed.memory_add_data["description"]
-        assert "Sky Bet" in parsed.memory_add_data["content"]
+        assert parsed.action_type == "memory_new"
+        assert parsed.memory_new_data is not None
+        assert parsed.memory_new_data["name"] == "q149-psg-prediction"
+        assert "Q149" in parsed.memory_new_data["description"]
+        assert "Sky Bet" in parsed.memory_new_data["content"]
         assert parsed.error is None
 
     def test_memory_add_plain_text_format(self):
@@ -466,14 +466,14 @@ description: Reasoning for Q149 PSG 0.70.
 content: Predicted PSG 0.70 because Sky Bet implied 55%.
 </action>'''
         parsed = parse_action(response)
-        assert parsed.action_type == "memory_add"
-        assert parsed.memory_add_data is not None
-        assert "Q149" in parsed.memory_add_data["name"]
+        assert parsed.action_type == "memory_new"
+        assert parsed.memory_new_data is not None
+        assert "Q149" in parsed.memory_new_data["name"]
 
     def test_memory_add_missing_fields(self):
         response = '<action type="memory_add">\n<name>title only</name>\n</action>'
         parsed = parse_action(response)
-        assert parsed.action_type == "memory_add"
+        assert parsed.action_type == "memory_new"
         assert parsed.error is not None  # missing description and content
 
     def test_memory_update(self):

@@ -28,6 +28,8 @@ def build_action_tools(
     max_outcomes_per_question: int,
     max_search_results: int = 5,
     search_chunk_tokens: Optional[int] = None,
+    enable_memory: bool = False,
+    enable_mem_df: bool = False,
 ) -> List[Dict[str, Any]]:
     tools: List[Dict[str, Any]] = []
     if search_chunk_tokens is None:
@@ -166,6 +168,11 @@ def build_action_tools(
         )
     )
 
+    if enable_memory:
+        tools.extend(_build_memory_tool_schemas())
+    if enable_mem_df:
+        tools.extend(_build_mem_df_tool_schemas())
+
     tools.append(
         _as_chat_function_tool(
             name="next_day",
@@ -182,6 +189,201 @@ def build_action_tools(
         )
     )
 
+    return tools
+
+
+def _build_memory_tool_schemas() -> List[Dict[str, Any]]:
+    """Meta-insight memory tools (StructuredMemory / ActiveMemory meta layer)."""
+    return [
+        _as_chat_function_tool(
+            name="memory_retrieve",
+            description=(
+                "Retrieve the full content of a memory entry by name. "
+                "Use this to recall details before updating or re-using an entry."
+            ),
+            parameters={
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "The entry name (lowercase, hyphens, alphanumeric).",
+                    },
+                },
+                "required": ["name"],
+            },
+        ),
+        _as_chat_function_tool(
+            name="memory_new",
+            description=(
+                "Create a new memory entry for cross-question insights, lessons, or patterns. "
+                "Every entry must contain a reusable insight or reasoning chain, not logs."
+            ),
+            parameters={
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": (
+                            "Short, descriptive entry name (lowercase, hyphens, alphanumeric). "
+                            "Example: q247-lesson-ceremony-precedent"
+                        ),
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "One-line summary shown in the index. Include when/why to use this entry.",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Full entry content with the insight, reasoning chain, or pattern.",
+                    },
+                },
+                "required": ["name", "description", "content"],
+            },
+        ),
+        _as_chat_function_tool(
+            name="memory_update",
+            description=(
+                "Update an existing memory entry's description and/or content. "
+                "Provide only the fields you want to change."
+            ),
+            parameters={
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "The entry name to update.",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "New description (optional, omit to keep current).",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "New content (optional, omit to keep current).",
+                    },
+                },
+                "required": ["name"],
+            },
+        ),
+        _as_chat_function_tool(
+            name="memory_delete",
+            description="Delete a memory entry by name. Use for stale or resolved entries.",
+            parameters={
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "The entry name to delete.",
+                    },
+                },
+                "required": ["name"],
+            },
+        ),
+    ]
+
+
+def _build_mem_df_tool_schemas() -> List[Dict[str, Any]]:
+    """Per-question mem_df tools (ActiveMemory only)."""
+    return [
+        _as_chat_function_tool(
+            name="mem_add",
+            description=(
+                "Add or update a per-question memory entry in mem_df. "
+                "If a row for this qid already exists, it will be replaced (upsert). "
+                "Max 1000 characters for the memory field."
+            ),
+            parameters={
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "qid": {
+                        "type": "string",
+                        "description": "Question ID (e.g. 'Q42').",
+                    },
+                    "question": {
+                        "type": "string",
+                        "description": "Short question title for context.",
+                    },
+                    "memory": {
+                        "type": "string",
+                        "description": "Your reasoning, key evidence, or prediction rationale for this question.",
+                    },
+                    "category": {
+                        "type": "string",
+                        "description": "Topic category (e.g. 'politics', 'sports', 'economics').",
+                    },
+                },
+                "required": ["qid", "memory"],
+            },
+        ),
+        _as_chat_function_tool(
+            name="mem_update",
+            description=(
+                "Update the memory (and optionally category) for an existing mem_df entry."
+            ),
+            parameters={
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "qid": {
+                        "type": "string",
+                        "description": "Question ID of the entry to update.",
+                    },
+                    "memory": {
+                        "type": "string",
+                        "description": "Updated reasoning or evidence.",
+                    },
+                    "category": {
+                        "type": "string",
+                        "description": "Updated category (optional, omit to keep current).",
+                    },
+                },
+                "required": ["qid", "memory"],
+            },
+        ),
+        _as_chat_function_tool(
+            name="mem_delete",
+            description="Delete a per-question memory entry from mem_df by question ID.",
+            parameters={
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "qid": {
+                        "type": "string",
+                        "description": "Question ID of the entry to delete.",
+                    },
+                },
+                "required": ["qid"],
+            },
+        ),
+    ]
+
+
+def build_memory_phase_tools(
+    *, enable_memory: bool = True, enable_mem_df: bool = False,
+) -> List[Dict[str, Any]]:
+    """Tools available during memory-only phase: memory tools + next_day."""
+    tools: List[Dict[str, Any]] = []
+    if enable_memory:
+        tools.extend(_build_memory_tool_schemas())
+    if enable_mem_df:
+        tools.extend(_build_mem_df_tool_schemas())
+    tools.append(
+        _as_chat_function_tool(
+            name="next_day",
+            description="End the memory update phase and finish the session.",
+            parameters={
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {},
+                "required": [],
+            },
+        )
+    )
     return tools
 
 
@@ -268,11 +470,130 @@ def extract_finish_reason(chat_response_json: Dict[str, Any]) -> Optional[str]:
     return reason if isinstance(reason, str) else None
 
 
+def _memory_tool_call_to_action(
+    name: str, args: Dict[str, Any],
+) -> Optional[ParsedAction]:
+    """Map memory tool names to ParsedAction. Returns None for non-memory tools."""
+    if name == "memory_retrieve":
+        entry_name = args.get("name")
+        if not isinstance(entry_name, str) or not entry_name.strip():
+            return ParsedAction(action_type="memory_retrieve", code=None, forecasts=None,
+                                query=None, error="Missing 'name' parameter")
+        return ParsedAction(action_type="memory_retrieve", code=None, forecasts=None,
+                            query=None, memory_entry_name=entry_name.strip())
+
+    if name == "memory_new":
+        n = args.get("name")
+        desc = args.get("description")
+        content = args.get("content")
+        if not isinstance(n, str) or not n.strip():
+            return ParsedAction(action_type="memory_new", code=None, forecasts=None,
+                                query=None, error="Missing 'name' parameter")
+        if not isinstance(content, str) or not content.strip():
+            return ParsedAction(action_type="memory_new", code=None, forecasts=None,
+                                query=None, error="Missing 'content' parameter")
+        return ParsedAction(
+            action_type="memory_new", code=None, forecasts=None, query=None,
+            memory_new_data={
+                "name": n.strip(),
+                "description": (desc.strip() if isinstance(desc, str) and desc.strip() else n.strip()),
+                "content": content.strip(),
+            },
+        )
+
+    if name == "memory_update":
+        entry_name = args.get("name")
+        if not isinstance(entry_name, str) or not entry_name.strip():
+            return ParsedAction(action_type="memory_update", code=None, forecasts=None,
+                                query=None, error="Missing 'name' parameter")
+        update_data: Dict[str, str] = {}
+        for field in ("description", "content"):
+            val = args.get(field)
+            if isinstance(val, str) and val.strip():
+                update_data[field] = val.strip()
+        if not update_data:
+            return ParsedAction(action_type="memory_update", code=None, forecasts=None,
+                                query=None, error="No fields to update (need description or content)")
+        return ParsedAction(
+            action_type="memory_update", code=None, forecasts=None, query=None,
+            memory_entry_name=entry_name.strip(), memory_update_data=update_data,
+        )
+
+    if name == "memory_delete":
+        entry_name = args.get("name")
+        if not isinstance(entry_name, str) or not entry_name.strip():
+            return ParsedAction(action_type="memory_delete", code=None, forecasts=None,
+                                query=None, error="Missing 'name' parameter")
+        return ParsedAction(action_type="memory_delete", code=None, forecasts=None,
+                            query=None, memory_entry_name=entry_name.strip())
+
+    if name == "mem_add":
+        qid = args.get("qid")
+        memory = args.get("memory")
+        if not isinstance(qid, str) or not qid.strip():
+            return ParsedAction(action_type="mem_add", code=None, forecasts=None,
+                                query=None, error="Missing 'qid' parameter")
+        if not isinstance(memory, str) or not memory.strip():
+            return ParsedAction(action_type="mem_add", code=None, forecasts=None,
+                                query=None, error="Missing 'memory' parameter")
+        question = args.get("question", "")
+        category = args.get("category", "")
+        return ParsedAction(
+            action_type="mem_add", code=None, forecasts=None, query=None,
+            mem_data={
+                "qid": qid.strip(),
+                "question": question.strip() if isinstance(question, str) else "",
+                "memory": memory.strip(),
+                "category": category.strip() if isinstance(category, str) else "",
+            },
+        )
+
+    if name == "mem_update":
+        qid = args.get("qid")
+        memory = args.get("memory")
+        if not isinstance(qid, str) or not qid.strip():
+            return ParsedAction(action_type="mem_update", code=None, forecasts=None,
+                                query=None, error="Missing 'qid' parameter")
+        if not isinstance(memory, str) or not memory.strip():
+            return ParsedAction(action_type="mem_update", code=None, forecasts=None,
+                                query=None, error="Missing 'memory' parameter")
+        category = args.get("category")
+        return ParsedAction(
+            action_type="mem_update", code=None, forecasts=None, query=None,
+            mem_qid=qid.strip(),
+            mem_data={
+                "qid": qid.strip(),
+                "memory": memory.strip(),
+                "category": category.strip() if isinstance(category, str) and category.strip() else None,
+            },
+        )
+
+    if name == "mem_delete":
+        qid = args.get("qid")
+        if not isinstance(qid, str) or not qid.strip():
+            return ParsedAction(action_type="mem_delete", code=None, forecasts=None,
+                                query=None, error="Missing 'qid' parameter")
+        return ParsedAction(action_type="mem_delete", code=None, forecasts=None,
+                            query=None, mem_qid=qid.strip())
+
+    return None
+
+
 def chat_response_to_action(
     chat_response_json: Dict[str, Any],
 ) -> Tuple[Optional[ParsedAction], str, List[Dict[str, Any]]]:
     assistant_text = extract_assistant_text(chat_response_json)
     tool_calls = extract_tool_calls(chat_response_json)
+
+    # Handle memory tool calls locally (not in shared response_to_action).
+    if tool_calls:
+        call = tool_calls[0]
+        name = call.get("name", "")
+        args = call.get("arguments") or {}
+        mem_parsed = _memory_tool_call_to_action(name, args if isinstance(args, dict) else {})
+        if mem_parsed is not None:
+            return mem_parsed, assistant_text, tool_calls
+
     parsed, _, normalized_calls = response_to_action(
         {"output_text": assistant_text},
         tool_calls=tool_calls,

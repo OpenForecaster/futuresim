@@ -24,7 +24,7 @@ class ParsedAction:
     search_from: Optional[str] = None  # For search: min date (YYYY-MM-DD)
     search_to: Optional[str] = None  # For search: max date (YYYY-MM-DD)
     memory_entry_name: Optional[str] = None  # For memory_retrieve/update/delete: entry name
-    memory_add_data: Optional[Dict] = None  # For memory_add: {name, description, content}
+    memory_new_data: Optional[Dict] = None  # For memory_new: {name, description, content}
     memory_update_data: Optional[Dict] = None  # For memory_update: partial fields
     mem_data: Optional[Dict] = None  # For mem_add/update: {qid, question, memory, category}
     mem_qid: Optional[str] = None  # For mem_update/delete: target qid
@@ -167,13 +167,13 @@ def parse_action(response: str, max_outcomes: int = 5) -> ParsedAction:
         return ParsedAction(action_type="memory_retrieve", code=None, forecasts=None,
                            query=None, error="No entry name provided for memory_retrieve")
 
-    elif action_type == "memory_add":
+    elif action_type in ("memory_new", "memory_add"):
         data = _parse_memory_entry_body(content, require_all=True)
         if data:
-            return ParsedAction(action_type="memory_add", code=None, forecasts=None,
-                               query=None, memory_add_data=data)
-        return ParsedAction(action_type="memory_add", code=None, forecasts=None,
-                           query=None, error="Could not parse memory_add fields (name, description, content required)")
+            return ParsedAction(action_type="memory_new", code=None, forecasts=None,
+                               query=None, memory_new_data=data)
+        return ParsedAction(action_type="memory_new", code=None, forecasts=None,
+                           query=None, error="Could not parse memory_new fields (name, description, content required)")
 
     elif action_type == "memory_update":
         entry_name = _extract_name_attr(extra_attrs)
@@ -232,7 +232,7 @@ def parse_action(response: str, max_outcomes: int = 5) -> ParsedAction:
     else:
         return ParsedAction(action_type=None, code=None, forecasts=None,
                            query=None,
-                           error=f"Unknown action type: '{action_type}'. Valid types: query, submit, search, memory_retrieve, memory_add, memory_update, memory_delete, mem_add, mem_update, mem_delete, next")
+                           error=f"Unknown action type: '{action_type}'. Valid types: query, submit, search, memory_retrieve, memory_new, memory_update, memory_delete, mem_add, mem_update, mem_delete, next")
 
 
 

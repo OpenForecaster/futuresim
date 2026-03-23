@@ -7,7 +7,7 @@ restart_from: "logs/current_sim/deepseek_shared_warmup_r00/26-03-22-11-32-28"
 restart_from_day: "2025-04-25"
 
 # --- Simulation Meta ---
-sim_name: "deepseek_skills_mem"
+sim_name: "ds_skills_mem_final"
 start_date: "2025-05-01"
 end_date: "2025-08-23"
 lookback_days: 7
