@@ -56,6 +56,12 @@ logs/
 .DS_Store
 Thumbs.db
 
+# Core dumps
+core
+core.[0-9]*
+vgcore.*
+*.stackdump
+
 # Agent artifacts (local only)
 .gemini/
 .env
