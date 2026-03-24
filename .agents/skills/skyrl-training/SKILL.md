@@ -11,7 +11,7 @@ Use this skill for `scripts/run_skyrl_openforesight_search.py`, `mpi_scripts/sky
 
 1. If the task touches cluster paths, caches, or wrappers, also use `collaboration-paths`.
 2. Read [references/setup-and-launch.md](references/setup-and-launch.md) for environment setup, data prep, and launch commands.
-3. Read [references/runtime-notes.md](references/runtime-notes.md) when touching wrapper env, compatibility shims, or job logs.
+3. Read [references/runtime-notes.md](references/runtime-notes.md) when touching wrapper env, compatibility shims, or job logs (includes **Ray + HTCondor**: `RAY_TMPDIR`, `ulimit -n`, optional `SKYRL_DUMP_INFRA_LOG_TO_STDOUT`).
 4. Read [references/submodule-maintenance.md](references/submodule-maintenance.md) before bumping or editing `third_party/SkyRL`.
 5. Validate with `--dry-run`, one submitted run, or a local launch using the tracked SkyRL config.
 

@@ -20,9 +20,10 @@
 - The tracked Qwen3.5 warmup config keeps `trainer.ref.fsdp_config.cpu_offload`
   disabled. In the validated smoke, enabling ref CPU offload caused a Qwen3.5
   rotary-embedding device mismatch during the ref forward pass.
-- `scripts/run_skyrl_openforesight_search.py` defaults to the tokenizer’s HF
-  `chat_template` when `training.chat_template_path` is unset (Hermes-style
-  `skyrl_integration/templates/qwen3_tools_without_thinking.jinja2` is opt-in).
+- `scripts/run_skyrl_openforesight_search.py` leaves SkyRL’s default chat template
+  config when `training.chat_template_path` is unset (HF tokenizer template;
+  matches eval_r00 / eval_bs160-style configs). Custom Jinja is opt-in via
+  `training.chat_template_path` only.
   `training.enable_thinking` defaults to **true** (Qwen3.5 HF chat templates use
   thinking blocks by default); set `enable_thinking: false` in YAML to match
   disable-thinking eval runs.
@@ -45,7 +46,16 @@
   - Qwen3.5 FSDP wrap policy when `_no_split_modules` references absent vision layers
   - Qwen3.5 FSDP→vLLM weight-name mapping in `FSDPWeightExtractor.extract_weights`
   - Qwen `apply_chat_template(..., tokenize=True)` → plain token-id lists (SkyRL gym generator)
-  - Transformers `RotaryEmbeddingConfigMixin.convert_rope_params_to_dict`: coerce `ignore_keys_at_rope_validation` list/tuple → set (vLLM Qwen3.5 text config vs Transformers RoPE `|=` merge)
+- **vLLM + Transformers RoPE:** stock vLLM’s `site-packages/vllm/transformers_utils/configs/qwen3_5.py` used to set `ignore_keys_at_rope_validation` as a **list**, which breaks current Transformers (set-style `|=` merge). If you hit `TypeError: unsupported operand type(s) for |: 'list' and 'set'`, change that value to a **set** in your venv (or upgrade vLLM once upstream ships the fix). Re-running `uv sync` can overwrite site-packages, so re-apply after upgrades if needed.
+
+## Ray + HTCondor (cluster jobs)
+
+`mpi_scripts/skyrl_search/run_skyrl_search_train.sh` sets up Ray for MPI/Condor execute nodes:
+
+- **`RAY_TMPDIR` length:** Ray’s plasma/Unix sockets live under `${RAY_TMPDIR}/ray/session_.../sockets/...`. Paths must stay within the **AF_UNIX length limit (~107 bytes)**. Avoid long `mktemp` prefixes under Condor scratch (e.g. `.../ray-sess-XXXXXX/...` plus Ray’s session suffix can overflow) or you get `OSError: validate_socket_filename failed`. The wrapper prefers **`_CONDOR_SCRATCH_DIR` / `CONDOR_SCRATCH_DIR`** (node-local) when present, otherwise falls back to **`TMPDIR`**, and uses a **short** fixed subdir **`${RAY_BASE}/r`** (only set `RAY_TMPDIR` yourself if you know the path stays short).
+- **`ulimit -n`:** Low defaults on some nodes caused `Failed to register worker to Raylet: ... End of file`. The wrapper raises the open-file limit (**65536**, fallback **8192**).
+- **Defaults (override as needed):** `RAY_USE_MULTIPROCESSING_CPU_COUNT=1`, `RAY_DISABLE_DOCKER_CPU_WARNING=1`.
+- **Debug-only Ray in `.out`:** export **`SKYRL_DUMP_INFRA_LOG_TO_STDOUT=1`** before launch (noisy; default is off in SkyRL).
 
 ## Logs
 

@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import copy
 import os
-import re
 import subprocess
 import sys
 import tempfile
@@ -20,74 +19,10 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from pathing import expand_env_tree, load_repo_env, raise_for_unresolved_env_vars
+from skyrl_integration.yaml_overrides import apply_set_overrides
 
 load_repo_env(REPO_ROOT)
 DEFAULT_SKYRL_LOG_BASE = Path(os.getenv("FSIM_SKYRL_LOG_BASE", str(REPO_ROOT / "logs" / "skyrl")))
-
-
-def _parse_set_kv(s: str) -> tuple[str, Any]:
-    if "=" not in s:
-        raise ValueError(f"Invalid --set {s!r}. Expected key=value")
-    key, raw = s.split("=", 1)
-    key = key.strip()
-    if not key:
-        raise ValueError(f"Invalid --set {s!r}. Empty key")
-    return key, yaml.safe_load(raw)
-
-
-def _tokenize_path(path: str) -> list[Any]:
-    tokens: list[Any] = []
-    for part in path.split("."):
-        part = part.strip()
-        if not part:
-            raise ValueError(f"Invalid --set path {path!r}: empty segment")
-        for m in re.finditer(r"([^\[\]]+)|\[(\d+)\]", part):
-            key, idx = m.group(1), m.group(2)
-            if key is not None:
-                tokens.append(key.strip())
-            else:
-                tokens.append(int(idx))
-    return tokens
-
-
-def _ensure_list_len(xs: list, n: int) -> None:
-    while len(xs) <= n:
-        xs.append(None)
-
-
-def _set_in_config(cfg: Any, path: str, value: Any) -> None:
-    tokens = _tokenize_path(path)
-    cur = cfg
-    for i, tok in enumerate(tokens):
-        is_last = i == len(tokens) - 1
-        nxt = None if is_last else tokens[i + 1]
-
-        if is_last:
-            if isinstance(tok, int):
-                if not isinstance(cur, list):
-                    raise ValueError(f"Path {path!r} expects list at final container")
-                _ensure_list_len(cur, tok)
-                cur[tok] = value
-                return
-            if not isinstance(cur, dict):
-                raise ValueError(f"Path {path!r} expects dict at final container")
-            cur[tok] = value
-            return
-
-        if isinstance(tok, int):
-            if not isinstance(cur, list):
-                raise ValueError(f"Path {path!r} expects list container")
-            _ensure_list_len(cur, tok)
-            if cur[tok] is None:
-                cur[tok] = [] if isinstance(nxt, int) else {}
-            cur = cur[tok]
-            continue
-
-        if not isinstance(cur, dict):
-            raise ValueError(f"Path {path!r} expects dict container")
-        if tok not in cur or cur[tok] is None:
-            cur[tok] = [] if isinstance(nxt, int) else {}
-        cur = cur[tok]
 
 
 def _with_run_name(path: str, run_name: str) -> str:
@@ -224,9 +159,7 @@ def main() -> int:
     if not isinstance(base_config, dict):
         raise ValueError("Top-level YAML config must be a mapping")
 
-    for item in args.set_values:
-        key, value = _parse_set_kv(item)
-        _set_in_config(base_config, key, value)
+    apply_set_overrides(base_config, args.set_values)
     base_config = expand_env_tree(base_config)
     raise_for_unresolved_env_vars(base_config, f"submit config {args.config}")
 

@@ -52,6 +52,7 @@ if [ -f "${REPO_ROOT}/.env" ]; then
     set +a
 fi
 
+# Match mpi_scripts/run_sim/run_sim.sh: cores go to cwd; kernel core_pattern "core" ignores FSIM_* unless we chdir here.
 setup_core_dump_dir() {
     local default_core_dump_dir="${REPO_ROOT}/logs/core-dumps"
     if [ -n "${FSIM_SKYRL_LOG_BASE:-}" ]; then
@@ -106,8 +107,34 @@ export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-${HOME}/.cache/huggingface/datase
 export TMPDIR="${TMPDIR:-/fast/sgoel/tmp}"
 mkdir -p "${HF_HUB_CACHE}" "${HF_DATASETS_CACHE}" "${TMPDIR}"
 
+# Ray: use node-local Condor scratch when available (avoids raylet/worker socket EOF seen when
+# plasma/session lived only on shared lustre under /fast on some MPI execute nodes).
+# Pick a base for Ray state. Prefer HTCondor execute scratch (local disk). Avoid long mktemp
+# prefixes: Ray's AF_UNIX socket paths must stay under the OS limit (~107 bytes including session suffix).
+_RAY_BASE=""
+for _cand in "${_CONDOR_SCRATCH_DIR:-}" "${CONDOR_SCRATCH_DIR:-}"; do
+    if [ -n "${_cand}" ] && [ -d "${_cand}" ]; then
+        _RAY_BASE="${_cand}"
+        break
+    fi
+done
+if [ -z "${_RAY_BASE}" ]; then
+    _RAY_BASE="${TMPDIR}"
+fi
+if [ -z "${RAY_TMPDIR:-}" ]; then
+    export RAY_TMPDIR="${_RAY_BASE}/r"
+    mkdir -p "${RAY_TMPDIR}"
+fi
+export RAY_USE_MULTIPROCESSING_CPU_COUNT="${RAY_USE_MULTIPROCESSING_CPU_COUNT:-1}"
+export RAY_DISABLE_DOCKER_CPU_WARNING="${RAY_DISABLE_DOCKER_CPU_WARNING:-1}"
+
 # vLLM v1 path is required in our stack.
 export VLLM_USE_V1=1
+
+# Optional (debugging): SKYRL_DUMP_INFRA_LOG_TO_STDOUT=1 merges Ray/vLLM infra into job .out (noisy).
+
+# Ray opens many fds (object store, workers); low defaults can cause raylet/worker EOF on some nodes.
+ulimit -n 65536 2>/dev/null || ulimit -n 8192 2>/dev/null || true
 
 # Keep full GPU visibility and let SkyRL map LOCAL_RANK from ray.get_gpu_ids().
 # This avoids duplicate-GPU NCCL init failures on some packed H100 nodes.
@@ -116,12 +143,12 @@ export NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
 
 echo "Running SkyRL OpenForesight training with config: ${CONFIG_PATH}"
 echo "Core dumps will land in: ${FSIM_CORE_DUMP_DIR}"
+echo "RAY_TMPDIR=${RAY_TMPDIR} (TMPDIR=${TMPDIR}, _CONDOR_SCRATCH_DIR=${_CONDOR_SCRATCH_DIR:-})"
 
 RUN_LOG_PATH="$(sed -n 's/^  log_path: //p' "${CONFIG_PATH}" | head -n1)"
 if [ -n "${RUN_LOG_PATH}" ]; then
     mkdir -p "${RUN_LOG_PATH}"
     export SIM_OUTPUT_DIR="${SIM_OUTPUT_DIR:-${RUN_LOG_PATH}}"
-    export RAY_TMPDIR="${RAY_TMPDIR:-$(mktemp -d /tmp/sr-XXXXXX)}"
     copy_ray_logs() {
         if [ -d "${RAY_TMPDIR:-}" ]; then
             mkdir -p "${RUN_LOG_PATH}/ray"

@@ -10,6 +10,7 @@
 #   while adopting MiroThinker's recommended context/sampling defaults.
 # - MiroThinker-1.7-mini is a Qwen3-MoE derivative, so we keep the 2-GPU TP+EP
 #   launch shape used for the comparable local Qwen MoE runs.
+# - max_actions / warmup_max_actions cap tool turns per day and per warmup question.
 
 run_script: "run_sim.sh"
 
@@ -38,7 +39,7 @@ dataset_path: "${FSIM_DATASET_PATH}"
 min_forecasters: 10
 resolved_only: true
 output_base: "${FSIM_OUTPUT_BASE}"
-warmup_parallelism: 64
+warmup_parallelism: 32
 
 # --- Search Settings ---
 search_db: "${FSIM_SEARCH_DB}"
@@ -75,6 +76,8 @@ parallel: true
 defaults:
   provider: "vllm"
   scaffold: "miroallq"
+  max_actions: 25
+  warmup_max_actions: 25
   max_total_tokens: 262144
   warmup_max_total_tokens: 262144
   submit_reserve_tokens: 8192

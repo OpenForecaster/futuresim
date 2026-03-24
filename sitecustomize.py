@@ -22,11 +22,9 @@ What is still needed vs upstream:
   `tokenize=True` without `return_dict`; `skyrl_gym_generator` still calls it that way. We
   normalize to raw token-id lists on `PreTrainedTokenizerBase`.
 
-- **`ignore_keys_at_rope_validation` list vs set** — vLLM’s `Qwen3_5TextConfig` passes a
-  **list** into `PretrainedConfig` / `RotaryEmbeddingConfigMixin.convert_rope_params_to_dict`,
-  but current **Transformers** unions with ``{"partial_rotary_factor"}`` using set logic
-  (`|=`). We coerce list/tuple → **set** on that mixin method so vLLM engine init does not
-  require editing site-packages vLLM.
+- **`ignore_keys_at_rope_validation` list vs set** — Qwen3.5 MoE `config.json` can supply a JSON
+  **list**; `RotaryEmbeddingConfigMixin.convert_rope_params_to_dict` uses set union (`|`) and
+  crashes. We coerce non-set iterables to `set(...)` before the original method runs.
 
 Removed as redundant with v0.1.0 + the tokenizer shim:
 
@@ -56,20 +54,6 @@ def _remap_qwen35_weight_name(name: str) -> str:
     if name == "lm_head" or name.startswith("lm_head."):
         return f"language_model.{name}"
     return name
-
-
-def _patch_transformers_rope_ignore_keys_iterable_compat() -> None:
-    """Delegate to ``skyrl_integration.bootstrap_transformers_patches`` (single implementation)."""
-
-    try:
-        from skyrl_integration.bootstrap_transformers_patches import apply_transformers_runtime_patches
-    except Exception:
-        return
-
-    apply_transformers_runtime_patches()
-
-
-_patch_transformers_rope_ignore_keys_iterable_compat()
 
 
 def _extract_input_ids(value):
@@ -352,3 +336,36 @@ def _patch_qwen_chat_template_tokenize_output() -> None:
 
 
 _patch_qwen_chat_template_tokenize_output()
+
+
+def _patch_transformers_rope_ignore_keys_to_set() -> None:
+    """
+    Qwen3.5 MoE HF configs may pass `ignore_keys_at_rope_validation` as a **list**
+    (from JSON). `RotaryEmbeddingConfigMixin.convert_rope_params_to_dict` then does
+    `ignore_keys | {"partial_rotary_factor"}`, which raises **TypeError** (list | set).
+
+    Upstream expects a set; coerce any non-set iterable to `set(...)`.
+    """
+
+    try:
+        from transformers.modeling_rope_utils import RotaryEmbeddingConfigMixin
+    except Exception:
+        return
+
+    if getattr(RotaryEmbeddingConfigMixin, "_forecast_sim_rope_ignore_keys_patch", False):
+        return
+
+    _orig = RotaryEmbeddingConfigMixin.convert_rope_params_to_dict
+
+    def _patched(self, ignore_keys_at_rope_validation=None, **kwargs):
+        if ignore_keys_at_rope_validation is not None and not isinstance(
+            ignore_keys_at_rope_validation, set
+        ):
+            ignore_keys_at_rope_validation = set(ignore_keys_at_rope_validation)
+        return _orig(self, ignore_keys_at_rope_validation=ignore_keys_at_rope_validation, **kwargs)
+
+    RotaryEmbeddingConfigMixin.convert_rope_params_to_dict = _patched
+    RotaryEmbeddingConfigMixin._forecast_sim_rope_ignore_keys_patch = True
+
+
+_patch_transformers_rope_ignore_keys_to_set()

@@ -14,6 +14,7 @@ from .scoring import (
     DEFAULT_SCORER, BinaryBrierScorer
 )
 from .ansmatching import AnswerMatcher
+from . import forecast_metrics as _fm
 
 
 DAILY_METRICS_HEADER = (
@@ -508,9 +509,15 @@ class SimulationEnvironment:
         
         # Compute scores for ACTIVE questions (using hidden truth)
         active_questions = self.q_pool.get_active()
+        # After run(), current_date is end_date + timegap; active-score gating must use the last
+        # simulated day, not the post-loop cursor, or FINAL RESULTS active columns go to zero.
+        last_day = self.end_date if self.end_date is not None else (
+            self.current_date - timedelta(days=self.timegap_days)
+        )
         active_stats = self._compute_daily_active_scores(
             active_questions,
-            evaluation_date=self.end_date,
+            evaluation_date=last_day,
+            metrics_context_date=last_day,
         )
         
         # Table header
@@ -749,7 +756,7 @@ class SimulationEnvironment:
     
     def _normalize_outcome(self, s: str) -> str:
         """Normalize outcome strings for deterministic exact matching."""
-        return s.lower().replace(" ", "").strip()
+        return _fm.normalize_outcome(s)
 
     @staticmethod
     def _get_top_outcome(pred: Optional[DailyPrediction]) -> Tuple[Optional[str], float]:
@@ -784,29 +791,13 @@ class SimulationEnvironment:
         question_title: Optional[str] = None
     ) -> bool:
         """Return True when the highest-probability predicted outcome matches truth."""
-        if not pred or not pred.outcomes:
-            return False
-
-        max_prob = -1.0
-        best_outcome = None
-        for outcome, prob in pred.outcomes.items():
-            if prob > max_prob:
-                max_prob = prob
-                best_outcome = outcome
-
-        if not best_outcome:
-            return False
-
-        if self.matcher:
-            return self.matcher.is_equivalent(
-                best_outcome,
-                ground_truth,
-                question_id=question_id,
-                question_title=question_title,
-                match_type="check_guess"
-            )
-
-        return self._normalize_outcome(best_outcome) == self._normalize_outcome(ground_truth)
+        return _fm.is_top_choice_correct(
+            pred,
+            ground_truth,
+            self.matcher,
+            question_id=question_id,
+            question_title=question_title,
+        )
 
     def _get_truth_probability_mass(
         self,
@@ -819,43 +810,33 @@ class SimulationEnvironment:
         Return total probability assigned to outcomes that match the ground truth.
         Returns 0.0 when no matching outcome is present.
         """
-        if not pred or not pred.outcomes or not ground_truth:
-            return 0.0
-
-        truth_norm = self._normalize_outcome(ground_truth)
-        prob_sum = 0.0
-        for outcome, prob in pred.outcomes.items():
-            is_match = False
-            if outcome == ground_truth:
-                is_match = True
-            elif self.matcher:
-                is_match = self.matcher.is_equivalent(
-                    outcome,
-                    ground_truth,
-                    question_id=question_id,
-                    question_title=question_title,
-                    match_type="check_guess"
-                )
-            else:
-                is_match = self._normalize_outcome(outcome) == truth_norm
-
-            if is_match:
-                prob_sum += prob
-
-        return prob_sum
+        return _fm.truth_probability_mass(
+            pred,
+            ground_truth,
+            self.matcher,
+            question_id=question_id,
+            question_title=question_title,
+        )
 
     def _compute_daily_active_scores(
         self,
         active_questions: List[Question],
         evaluation_date: Optional[date] = None,
+        metrics_context_date: Optional[date] = None,
     ):
         """
         Compute interval-end scores only for the currently active questions.
         Uses FUTURE ground truth to assess current performance.
         Includes Brier score, Peer score, TW-Peer score, Accuracy, and Exp-Accuracy.
+
+        metrics_context_date: simulation "as of" day for gating (defaults to self.current_date).
+        Pass the last simulated day when calling after run() has advanced current_date past end_date.
         """
         active_stats = {}
         interval_end = evaluation_date or self.current_date
+        context_date = (
+            metrics_context_date if metrics_context_date is not None else self.current_date
+        )
 
         from environment.scoring import resolve_question, compute_snapshot_peer_scores
             
@@ -872,7 +853,7 @@ class SimulationEnvironment:
                 interval_end,
                 q.resolution_date - timedelta(days=1),
             )
-            if effective_eval_date < self.current_date:
+            if effective_eval_date < context_date:
                 continue
                 
             # Get the snapshot that remains active through the evaluation horizon.

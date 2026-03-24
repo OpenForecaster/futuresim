@@ -3,6 +3,8 @@
 #
 # Usage:
 #   python mpi_scripts/run_sim/submit_sim.py --config configs/mirothinker/allq_nomem_mirothinker_1.7mini.yaml --runs 1
+#
+# max_actions / warmup_max_actions cap tool turns per day and per warmup question.
 
 run_script: "run_sim.sh"
 
@@ -31,7 +33,7 @@ dataset_path: "${FSIM_DATASET_PATH}"
 min_forecasters: 10
 resolved_only: true
 output_base: "${FSIM_OUTPUT_BASE}"
-warmup_parallelism: 64
+warmup_parallelism: 32
 
 # --- Search Settings ---
 search_db: "${FSIM_SEARCH_DB}"
@@ -69,6 +71,8 @@ defaults:
   provider: "vllm"
   scaffold: "miroallq"
   enable_memory: false
+  max_actions: 25
+  warmup_max_actions: 25
   max_total_tokens: 262144
   warmup_max_total_tokens: 262144
   submit_reserve_tokens: 8192

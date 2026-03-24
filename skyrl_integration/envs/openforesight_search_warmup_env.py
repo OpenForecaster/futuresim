@@ -19,6 +19,12 @@ from agents.qwenAgent.tools import build_action_tools
 from agents.search_tools.lancedb import LanceDBSearchTool
 from agents.utils.budget import BudgetSettings, BudgetTracker, estimate_budget_tokens
 from environment.ansmatching import AnswerMatcher
+from environment.forecast_metrics import (
+    accuracy_rank_bonus,
+    episodes_from_fs_metric_dicts,
+    forecast_scalar_metrics,
+    rollup_openforesight_eval_metrics,
+)
 from environment.scoring import BrierScorer
 from environment.scoring.base import DailyPrediction
 from inference.vllm import VLLMInference
@@ -86,6 +92,14 @@ def _extract_tool_calls_from_text(
     return extract_tool_calls_vllm_qwen3_coder(output_text or "", tools=tools)
 
 
+def _assistant_intended_search_news(text: str) -> bool:
+    """True when assistant text looks like a ``search_news`` tool call (XML), for parse-failure tracking."""
+    s = text or ""
+    if "search_news" not in s:
+        return False
+    return "<tool_call" in s
+
+
 def _get_or_create_search_tool(
     db_path: str,
     model_path: str,
@@ -117,17 +131,25 @@ def _get_or_create_search_tool(
     return tool
 
 
-def _get_or_create_matcher(matching: str, matcher_model: str) -> Optional[AnswerMatcher]:
+def _get_or_create_matcher(
+    matching: str,
+    matcher_model: str,
+    *,
+    cache_path: Optional[str] = None,
+) -> AnswerMatcher:
     if matching != "openrouter":
-        return None
+        raise ValueError("internal: _get_or_create_matcher expects matching='openrouter'")
     if not matcher_model:
         raise ValueError("matcher model is required when matching='openrouter'")
 
-    cache_key = (matching, matcher_model)
+    cache_key = (matching, matcher_model, str(cache_path or ""))
     with _MATCHER_LOCK:
         matcher = _MATCHER_CACHE.get(cache_key)
         if matcher is None:
-            matcher = AnswerMatcher(OpenRouterInference(matcher_model))
+            matcher = AnswerMatcher(
+                OpenRouterInference(matcher_model),
+                cache_path=cache_path,
+            )
             _MATCHER_CACHE[cache_key] = matcher
     return matcher
 
@@ -138,9 +160,13 @@ class OpenForesightSearchWarmupEnv(BaseTextEnv):
     Parity target: Qwen eval message shapes from ``QwenBasicAgent`` (no ``query_df``).
     When ``BudgetTracker`` is configured, remaining budget is surfaced the same way as
     eval (status lines on force-submit and formatted feedback).
-    RL-only concerns stay here: ``BaseTextEnvStepOutput``, Brier reward, and turning raw
+    RL-only concerns stay here: ``BaseTextEnvStepOutput``, reward = Brier skill + ``acc_bonus_coef``
+    × rank-based ``accuracy_rank_bonus``, format/skip penalties, and turning raw
     assistant text into tool calls via vLLM ``qwen3_coder`` XML only (eval uses structured
     ``tool_calls`` on the API).
+
+    Eval rollups use ``environment.forecast_metrics`` (same definitions as
+    ``SimulationEnvironment`` / ``daily_metrics.csv``).
     """
 
     def __init__(self, env_config: Dict[str, Any] = None, extras: Dict[str, Any] = None):
@@ -169,16 +195,19 @@ class OpenForesightSearchWarmupEnv(BaseTextEnv):
         self.search_cutoff_days = int(extras.get("search_cutoff_days", 0))
         self.search_min_days = int(extras.get("search_min_days", 0))
         self.search_max_date = _to_date(extras.get("search_max_date"))
-        self.invalid_format_reward = float(extras.get("invalid_format_reward", -2.0))
-        self.skip_reward = float(extras.get("skip_reward", self.invalid_format_reward))
+        # Single terminal penalty for any failed episode: bad tool/format, max_turns, budget exhausted,
+        # next_day without submit, etc. (default -1).
+        self.invalid_format_reward = float(extras.get("invalid_format_reward", -1.0))
+        self.acc_bonus_coef = float(extras.get("acc_bonus_coef", 1.0))
         self.max_outcomes_per_question = int(_get_config_value(env_config, extras, "max_outcomes_per_question", 5))
         self.max_search_results = int(_get_config_value(env_config, extras, "max_search_results", self.search_topk))
         self.allow_substring_match = _to_str_bool(
             _get_config_value(env_config, extras, "allow_substring_match", True),
             True,
         )
-        self.matching = str(_get_config_value(env_config, extras, "matching", "exact")).strip().lower()
+        self.matching = str(_get_config_value(env_config, extras, "matching", "openrouter")).strip().lower()
         self.matcher_model = str(_get_config_value(env_config, extras, "matcher", "")).strip()
+        self.matcher_cache_path = str(extras.get("matcher_cache_path", "") or "").strip() or None
         self.warmup_max_actions = _get_config_value(env_config, extras, "warmup_max_actions", None)
         self.warmup_max_total_tokens = _get_config_value(env_config, extras, "warmup_max_total_tokens", None)
         self.warmup_submit_reserve_tokens = int(
@@ -209,22 +238,36 @@ class OpenForesightSearchWarmupEnv(BaseTextEnv):
         self.search_handler.set_date(self.current_date)
         self.search_available = self.search_handler.is_available
 
-        if self.matching not in {"exact", "openrouter"}:
-            raise ValueError(f"Unsupported matching mode: {self.matching}")
-        self.matcher = _get_or_create_matcher(self.matching, self.matcher_model)
+        if self.matching != "openrouter":
+            raise ValueError(
+                "OpenForesightSearchWarmupEnv requires matching='openrouter' so Brier / top-1 use the "
+                f"LLM matcher (got matching={self.matching!r}). Set matching: openrouter in the SkyRL YAML."
+            )
+        if not self.matcher_model:
+            raise ValueError("OpenForesightSearchWarmupEnv requires a non-empty matcher model when matching='openrouter'.")
+        self.matcher = _get_or_create_matcher(
+            self.matching,
+            self.matcher_model,
+            cache_path=self.matcher_cache_path,
+        )
         self._matcher_timing_before = self._get_matcher_timing_snapshot()
         self.scorer = BrierScorer()
 
         self.chat_history: ConversationType = []
         self.search_calls = 0
         self.successful_searches = 0
+        self.search_parse_failed_turns: List[int] = []
         self.final_forecast: Optional[Dict[str, float]] = None
         self.final_truth_probability: float = 0.0
         self.final_reward: Optional[float] = None
+        self.last_acc_bonus: float = 0.0
         self.is_correct: Optional[bool] = None
         self.matcher_metrics = self._zero_matcher_metrics()
         self.force_submit_prompt_injected = False
         self.budget: Optional[BudgetTracker] = None
+        # Align SkyRL ``max_turns`` with action budget when ``warmup_max_actions`` is unset.
+        if self.warmup_max_actions is None and self.max_turns is not None:
+            self.warmup_max_actions = int(self.max_turns)
         if self.warmup_max_actions is not None:
             self.warmup_max_actions = int(self.warmup_max_actions)
         if self.warmup_max_total_tokens is not None:
@@ -343,12 +386,13 @@ class OpenForesightSearchWarmupEnv(BaseTextEnv):
     def _finish_budget_exhausted(self, reason: str) -> BaseTextEnvStepOutput:
         self.final_forecast = None
         self.final_truth_probability = 0.0
-        self.final_reward = self.skip_reward
+        self.last_acc_bonus = 0.0
+        self.final_reward = self.invalid_format_reward
         self.is_correct = False
         self._update_matcher_metrics()
         return BaseTextEnvStepOutput(
             observations=[],
-            reward=self.skip_reward,
+            reward=self.invalid_format_reward,
             done=True,
             metadata={
                 **self._terminal_metadata_core(),
@@ -364,6 +408,7 @@ class OpenForesightSearchWarmupEnv(BaseTextEnv):
     def _finish_invalid(self, parse_error: str) -> BaseTextEnvStepOutput:
         self.final_forecast = None
         self.final_truth_probability = 0.0
+        self.last_acc_bonus = 0.0
         self.final_reward = self.invalid_format_reward
         self.is_correct = False
         self._update_matcher_metrics()
@@ -464,30 +509,34 @@ class OpenForesightSearchWarmupEnv(BaseTextEnv):
             day=self.current_date,
             outcomes=outcomes,
         )
-        reward = self.scorer.score_prediction(
+        brier_skill, top1_correct, truth_prob = forecast_scalar_metrics(
+            prediction,
+            self.ground_truth,
+            matcher=self.matcher,
+            scorer=self.scorer,
+            question_id=self.question_id,
+            question_title=self.question_title,
+        )
+        acc_raw = accuracy_rank_bonus(
             prediction,
             self.ground_truth,
             matcher=self.matcher,
             question_id=self.question_id,
             question_title=self.question_title,
         )
-        truth_prob = self.scorer._get_matched_prob(
-            prediction,
-            self.ground_truth,
-            matcher=self.matcher,
-            question_id=self.question_id,
-            question_title=self.question_title,
-        )
+        acc_term = float(self.acc_bonus_coef) * float(acc_raw)
+        total_reward = float(brier_skill) + acc_term
 
         self._update_matcher_metrics()
         self.final_forecast = dict(outcomes)
         self.final_truth_probability = float(truth_prob)
-        self.final_reward = float(reward)
-        self.is_correct = bool(truth_prob > 0.0)
+        self.last_acc_bonus = float(acc_term)
+        self.final_reward = float(total_reward)
+        self.is_correct = bool(top1_correct)
 
         return BaseTextEnvStepOutput(
             observations=[],
-            reward=float(reward),
+            reward=float(total_reward),
             done=True,
             metadata={
                 **self._terminal_metadata_core(),
@@ -495,6 +544,8 @@ class OpenForesightSearchWarmupEnv(BaseTextEnv):
                 "final_forecast": self.final_forecast,
                 "final_truth_probability": self.final_truth_probability,
                 "ground_truth": self.ground_truth,
+                "brier_skill": float(brier_skill),
+                "acc_bonus": float(acc_term),
                 "reward": self.final_reward,
                 "parse_error": None,
             },
@@ -526,6 +577,15 @@ class OpenForesightSearchWarmupEnv(BaseTextEnv):
             tool_calls,
             assistant_text=action or "",
         )
+        intended_search = _assistant_intended_search_news(action or "")
+        search_reached = (
+            len(tool_calls) == 1
+            and parsed is not None
+            and getattr(parsed, "action_type", None) == "search"
+        )
+        if intended_search and not search_reached:
+            self.search_parse_failed_turns.append(self.turns)
+
         if len(tool_calls) > 1:
             return self._continue_with_feedback(
                 content="Only one tool call is allowed per turn.",
@@ -549,12 +609,13 @@ class OpenForesightSearchWarmupEnv(BaseTextEnv):
         if parsed.action_type == "next":
             self.final_forecast = None
             self.final_truth_probability = 0.0
-            self.final_reward = self.skip_reward
+            self.last_acc_bonus = 0.0
+            self.final_reward = self.invalid_format_reward
             self.is_correct = False
             self._update_matcher_metrics()
             return BaseTextEnvStepOutput(
                 observations=[],
-                reward=self.skip_reward,
+                reward=self.invalid_format_reward,
                 done=True,
                 metadata={
                     **self._terminal_metadata_core(),
@@ -575,7 +636,41 @@ class OpenForesightSearchWarmupEnv(BaseTextEnv):
         )
 
     def get_metrics(self) -> Dict[str, Any]:
+        valid_submit = bool(self.final_forecast and len(self.final_forecast) > 0)
+        if valid_submit:
+            prediction = DailyPrediction(
+                agent_id="skyrl_policy",
+                question_id=self.question_id,
+                day=self.current_date,
+                outcomes=dict(self.final_forecast),
+            )
+            brier_f, top1_b, truth_f = forecast_scalar_metrics(
+                prediction,
+                self.ground_truth,
+                matcher=self.matcher,
+                scorer=self.scorer,
+                question_id=self.question_id,
+                question_title=self.question_title,
+            )
+            acc_raw = accuracy_rank_bonus(
+                prediction,
+                self.ground_truth,
+                matcher=self.matcher,
+                question_id=self.question_id,
+                question_title=self.question_title,
+            )
+            acc_term = float(self.acc_bonus_coef) * float(acc_raw)
+            reward_f, top1, truth_f = float(brier_f), 1.0 if top1_b else 0.0, float(truth_f)
+        else:
+            brier_f, acc_term, reward_f, top1, truth_f = 0.0, 0.0, 0.0, 0.0, 0.0
         return {
+            # Consumed by aggregate_metrics (stripped before default matcher aggregation).
+            "fs_valid_submit": 1.0 if valid_submit else 0.0,
+            "fs_brier_skill": float(brier_f) if valid_submit else 0.0,
+            "fs_acc_bonus": float(acc_term) if valid_submit else 0.0,
+            "fs_top1_correct": top1,
+            "fs_truth_prob": truth_f,
+            "search_parse_failed_count": float(len(self.search_parse_failed_turns)),
             "search_calls": self.search_calls,
             "successful_searches": self.successful_searches,
             "turns": self.turns,
@@ -585,4 +680,32 @@ class OpenForesightSearchWarmupEnv(BaseTextEnv):
             "final_reward": self.final_reward,
             **self.matcher_metrics,
             **self._budget_metadata(),
+            "search_parse_failed_turns": list(self.search_parse_failed_turns),
         }
+
+    @staticmethod
+    def aggregate_metrics(metrics: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Roll up via ``environment.forecast_metrics`` plus default matcher averages."""
+        from skyrl_gym.metrics import default_aggregate_metrics
+
+        if not metrics:
+            return {}
+
+        out: Dict[str, Any] = dict(rollup_openforesight_eval_metrics(episodes_from_fs_metric_dicts(metrics)))
+
+        _omit_from_default = {"is_correct", "final_truth_probability", "final_reward", "search_parse_failed_turns"}
+        stripped: List[Dict[str, Any]] = []
+        for m in metrics:
+            stripped.append(
+                {
+                    k: v
+                    for k, v in m.items()
+                    if not str(k).startswith("fs_") and k not in _omit_from_default
+                }
+            )
+
+        dm = default_aggregate_metrics(stripped)
+        out.update(dm)
+        if "search_parse_failed_count" in dm:
+            out["avg_search_parse_failures"] = float(dm["search_parse_failed_count"])
+        return out

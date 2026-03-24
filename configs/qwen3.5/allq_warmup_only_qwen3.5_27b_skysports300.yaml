@@ -29,7 +29,7 @@ dataset_path: "/fast/nchandak/datasets/OpenForesight"
 min_forecasters: 10
 resolved_only: true
 output_base: "/is/cluster/fast/sgoel/forecasting/current_sim"
-warmup_parallelism: 64
+warmup_parallelism: 32
 
 # --- Search Settings ---
 search_db: "/is/cluster/fast/sgoel/forecasting/news/deduped_articles/lance/Qwen3-Embedding-8B"

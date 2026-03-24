@@ -27,8 +27,28 @@ from skyrl_integration.data import (
     read_search_chunk_tokens,
 )
 from skyrl_integration.constants import OPENFORESIGHT_SEARCH_WARMUP_ENV_ID
+from skyrl_integration.matcher_cache import resolve_matcher_cache_path
+from skyrl_integration.yaml_overrides import apply_set_overrides
 
 load_repo_env(REPO_ROOT)
+
+
+def _resolve_matcher_cache_path_str(config: Dict[str, Any]) -> str:
+    """Absolute path for on-disk matcher cache, or empty when disabled / no matcher."""
+    if "matcher_cache" not in config:
+        return ""
+    mc = config.get("matcher_cache") or {}
+    if not bool(mc.get("enabled", True)):
+        return ""
+    if not str(config.get("matcher", "")).strip():
+        return ""
+    raw = mc.get("path")
+    path = resolve_matcher_cache_path(None if raw is None else str(raw))
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    return str(path)
 
 
 def _read_yaml(path: Path) -> Dict[str, Any]:
@@ -94,12 +114,6 @@ def _resolve_prepared_data_dir(data_cfg: Dict[str, Any]) -> Path:
     return Path(str(raw).strip())
 
 
-def _with_run_name(path: str, run_name: str) -> str:
-    if "{run_name}" in path:
-        return path.format(run_name=run_name)
-    return path
-
-
 def _normalize_mode(config: Dict[str, Any]) -> str:
     mode = str(config.get("mode", "train")).strip().lower() or "train"
     if mode not in {"train", "eval"}:
@@ -107,51 +121,45 @@ def _normalize_mode(config: Dict[str, Any]) -> str:
     return mode
 
 
-def _effective_max_turns(raw_value: Any) -> int:
-    if raw_value is None:
-        return 0
-    value = int(raw_value)
-    return 0 if value <= 0 else value
-
-
 def _resolve_training_paths(config: Dict[str, Any]) -> tuple[str, str, str]:
     training = config.get("training", {}) or {}
     run_name = str(_require(training, "run_name"))
-    ckpt_path = _with_run_name(str(_require(training, "ckpt_path")), run_name)
-    export_path = _with_run_name(str(_require(training, "export_path")), run_name)
+    ckpt_raw = str(_require(training, "ckpt_path"))
+    export_raw = str(_require(training, "export_path"))
+    ckpt_path = ckpt_raw.format(run_name=run_name) if "{run_name}" in ckpt_raw else ckpt_raw
+    export_path = export_raw.format(run_name=run_name) if "{run_name}" in export_raw else export_raw
     return run_name, ckpt_path, export_path
+
+
+def _tool_schemas_from_config(config: Dict[str, Any]) -> List[Any]:
+    training = config.get("training", {}) or {}
+    search_cfg = config.get("search", {}) or {}
+    agent_cfg = config.get("agent", {}) or {}
+    search_db = str(_require(search_cfg, "search_db"))
+    max_outcomes = int(
+        agent_cfg.get("max_outcomes_per_question", training.get("max_outcomes_per_question", 5))
+    )
+    max_search = int(
+        agent_cfg.get("max_search_results", search_cfg.get("max_search_results", search_cfg.get("search_topk", 5)))
+    )
+    return build_action_tools(
+        enable_query=False,
+        enable_search=True,
+        max_outcomes_per_question=max_outcomes,
+        max_search_results=max_search,
+        search_chunk_tokens=read_search_chunk_tokens(search_db),
+    )
 
 
 def _build_overrides(config: Dict[str, Any], train_path: str, val_path: str) -> List[str]:
     resources = config.get("resources", {}) or {}
     training = config.get("training", {}) or {}
-    search_cfg = config.get("search", {}) or {}
-    agent_cfg = config.get("agent", {}) or {}
     mode = _normalize_mode(config)
     run_name, ckpt_path, export_path = _resolve_training_paths(config)
+    tool_schemas = _tool_schemas_from_config(config)
 
     gpus = int(resources.get("gpus", 4))
     num_engines = int(training.get("inference_num_engines", gpus))
-    search_db = str(_require(search_cfg, "search_db"))
-    max_outcomes_per_question = int(
-        agent_cfg.get("max_outcomes_per_question", training.get("max_outcomes_per_question", 5))
-    )
-    max_search_results = int(
-        agent_cfg.get("max_search_results", search_cfg.get("max_search_results", search_cfg.get("search_topk", 5)))
-    )
-    search_chunk_tokens = read_search_chunk_tokens(search_db)
-    tool_schemas = build_action_tools(
-        enable_query=False,
-        enable_search=True,
-        max_outcomes_per_question=max_outcomes_per_question,
-        max_search_results=max_search_results,
-        search_chunk_tokens=search_chunk_tokens,
-    )
-    chat_template_path = training.get("chat_template_path")
-    if chat_template_path:
-        template_path = str(Path(chat_template_path).expanduser())
-    else:
-        template_path = None
 
     stop_tokens = training.get("stop_tokens", ["</tool_call>"])
     eval_stop_tokens = training.get("eval_stop_tokens", stop_tokens)
@@ -162,7 +170,8 @@ def _build_overrides(config: Dict[str, Any], train_path: str, val_path: str) -> 
     configured_micro_train_batch_size = int(training.get("micro_train_batch_size_per_gpu", 2))
     configured_eval_batch_size = int(training.get("eval_batch_size", 128))
     n_samples_per_prompt = int(training.get("n_samples_per_prompt", 4))
-    effective_max_turns = _effective_max_turns(training.get("max_turns", 10))
+    _mt = training.get("max_turns", 10)
+    effective_max_turns = 0 if _mt is None else (0 if int(_mt) <= 0 else int(_mt))
     eval_n_samples_per_prompt = int(training.get("eval_n_samples_per_prompt", training.get("n_samples_per_prompt", 1)))
     # Eval runs no policy update; skip ref model + KL (see trainer.build_models use_ref_model gate).
     use_kl_loss = bool(training.get("use_kl_loss", True)) if mode != "eval" else False
@@ -188,6 +197,12 @@ def _build_overrides(config: Dict[str, Any], train_path: str, val_path: str) -> 
         micro_forward_batch_size = 1
         micro_train_batch_size = 1
         eval_batch_size = min(configured_eval_batch_size, val_rows)
+        # SkyRL always runs a *final* save_checkpoints + save_hf_model after the train loop when
+        # these intervals are >0, even if epochs=0 (eval-only). That export hits FSDP Ray actors
+        # after long vLLM eval and often dies (OOM / NCCL / dead worker). Eval has nothing to train
+        # or checkpoint — skip both.
+        ckpt_interval = 0
+        hf_save_interval = 0
     else:
         train_batch_size = configured_train_batch_size
         policy_mini_batch_size = configured_policy_mini_batch_size
@@ -195,6 +210,32 @@ def _build_overrides(config: Dict[str, Any], train_path: str, val_path: str) -> 
         micro_forward_batch_size = configured_micro_forward_batch_size
         micro_train_batch_size = configured_micro_train_batch_size
         eval_batch_size = configured_eval_batch_size
+        ckpt_interval = int(training.get("ckpt_interval", 20))
+        hf_save_interval = int(training.get("hf_save_interval", 200))
+
+    # Rollout (train) sampling — keep eval_* in YAML sync by defaulting eval from these values.
+    rollout_sampling = {
+        "max_generate_length": int(training.get("max_generate_length", 768)),
+        "temperature": training.get("temperature", 1.0),
+        "top_p": training.get("top_p", 1.0),
+        "top_k": training.get("top_k", -1),
+        "logprobs": training.get("sampling_logprobs", 1),
+        "repetition_penalty": training.get("repetition_penalty", 1.0),
+        "min_p": training.get("min_p", 0.0),
+    }
+
+    eval_sampling: Dict[str, Any] = {}
+    for eval_key, roll_key, caster in (
+        ("eval_max_generate_length", "max_generate_length", int),
+        ("eval_temperature", "temperature", None),
+        ("eval_top_p", "top_p", None),
+        ("eval_top_k", "top_k", None),
+        ("eval_sampling_logprobs", "logprobs", None),
+        ("eval_repetition_penalty", "repetition_penalty", None),
+        ("eval_min_p", "min_p", None),
+    ):
+        v = training[eval_key] if eval_key in training and training.get(eval_key) is not None else rollout_sampling[roll_key]
+        eval_sampling[roll_key] = caster(v) if caster else v
 
     overrides: List[str] = [
         f"data.train_data={_hydra_value([train_path])}",
@@ -225,21 +266,25 @@ def _build_overrides(config: Dict[str, Any], train_path: str, val_path: str) -> 
         f"trainer.flash_attn={_hydra_value(training.get('flash_attn', False))}",
         f"trainer.use_sample_packing={_hydra_value(training.get('use_sample_packing', False))}",
         f"generator.max_input_length={int(training.get('max_input_length', 8192))}",
-        f"generator.sampling_params.max_generate_length={int(training.get('max_generate_length', 768))}",
-        f"generator.sampling_params.temperature={_hydra_value(training.get('temperature', 1.0))}",
-        f"generator.sampling_params.top_p={_hydra_value(training.get('top_p', 1.0))}",
-        f"generator.sampling_params.top_k={_hydra_value(training.get('top_k', -1))}",
-        f"generator.sampling_params.logprobs={_hydra_value(training.get('sampling_logprobs', 1))}",
+        f"generator.sampling_params.max_generate_length={rollout_sampling['max_generate_length']}",
+        f"generator.sampling_params.temperature={_hydra_value(rollout_sampling['temperature'])}",
+        f"generator.sampling_params.top_p={_hydra_value(rollout_sampling['top_p'])}",
+        f"generator.sampling_params.top_k={_hydra_value(rollout_sampling['top_k'])}",
+        f"generator.sampling_params.min_p={_hydra_value(rollout_sampling['min_p'])}",
+        f"generator.sampling_params.repetition_penalty={_hydra_value(rollout_sampling['repetition_penalty'])}",
+        f"generator.sampling_params.logprobs={_hydra_value(rollout_sampling['logprobs'])}",
         f"generator.sampling_params.stop={_hydra_value(stop_tokens)}",
         f"trainer.eval_batch_size={eval_batch_size}",
         f"trainer.eval_before_train={_hydra_value(eval_before_train)}",
         f"trainer.eval_interval={eval_interval}",
         f"trainer.dump_eval_results={_hydra_value(training.get('dump_eval_results', True))}",
-        f"generator.eval_sampling_params.temperature={_hydra_value(training.get('eval_temperature', 0.0))}",
-        f"generator.eval_sampling_params.max_generate_length={int(training.get('eval_max_generate_length', training.get('max_generate_length', 768)))}",
-        f"generator.eval_sampling_params.top_p={_hydra_value(training.get('eval_top_p', training.get('top_p', 1.0)))}",
-        f"generator.eval_sampling_params.top_k={_hydra_value(training.get('eval_top_k', training.get('top_k', -1)))}",
-        f"generator.eval_sampling_params.logprobs={_hydra_value(training.get('eval_sampling_logprobs', training.get('sampling_logprobs', 1)))}",
+        f"generator.eval_sampling_params.max_generate_length={eval_sampling['max_generate_length']}",
+        f"generator.eval_sampling_params.temperature={_hydra_value(eval_sampling['temperature'])}",
+        f"generator.eval_sampling_params.top_p={_hydra_value(eval_sampling['top_p'])}",
+        f"generator.eval_sampling_params.top_k={_hydra_value(eval_sampling['top_k'])}",
+        f"generator.eval_sampling_params.min_p={_hydra_value(eval_sampling['min_p'])}",
+        f"generator.eval_sampling_params.repetition_penalty={_hydra_value(eval_sampling['repetition_penalty'])}",
+        f"generator.eval_sampling_params.logprobs={_hydra_value(eval_sampling['logprobs'])}",
         f"generator.eval_sampling_params.stop={_hydra_value(eval_stop_tokens)}",
         f"generator.eval_n_samples_per_prompt={eval_n_samples_per_prompt}",
         f"trainer.policy.optimizer_config.lr={_hydra_value(training.get('learning_rate', 1e-6))}",
@@ -252,8 +297,6 @@ def _build_overrides(config: Dict[str, Any], train_path: str, val_path: str) -> 
         f"generator.append_eos_token_after_stop_str_in_multi_turn={_hydra_value(training.get('append_eos_token_after_stop_str_in_multi_turn', True))}",
         f"generator.n_samples_per_prompt={n_samples_per_prompt}",
         f"generator.max_turns={effective_max_turns}",
-        "generator.chat_template.source=file",
-        f"generator.chat_template.name_or_path={_hydra_value(template_path)}",
         f"generator.chat_template_kwargs.tools={_hydra_value(tool_schemas)}",
         f"generator.chat_template_kwargs.enable_thinking={_hydra_value(training.get('enable_thinking', True))}",
         f"environment.env_class={_hydra_value(OPENFORESIGHT_SEARCH_WARMUP_ENV_ID)}",
@@ -264,10 +307,18 @@ def _build_overrides(config: Dict[str, Any], train_path: str, val_path: str) -> 
         f"trainer.ckpt_path={_hydra_value(ckpt_path)}",
         f"trainer.export_path={_hydra_value(export_path)}",
         f"trainer.log_path={_hydra_value(training.get('log_path', '/tmp/skyrl-logs'))}",
-        f"trainer.ckpt_interval={int(training.get('ckpt_interval', 20))}",
-        f"trainer.hf_save_interval={int(training.get('hf_save_interval', 200))}",
+        f"trainer.ckpt_interval={ckpt_interval}",
+        f"trainer.hf_save_interval={hf_save_interval}",
         f"trainer.max_ckpts_to_keep={int(training.get('max_ckpts_to_keep', 5))}",
     ]
+
+    chat_path = training.get("chat_template_path")
+    if chat_path and str(chat_path).strip():
+        resolved_chat = str(Path(str(chat_path).strip()).expanduser().resolve())
+        overrides += [
+            "generator.chat_template.source=file",
+            f"generator.chat_template.name_or_path={_hydra_value(resolved_chat)}",
+        ]
 
     extra_overrides = config.get("hydra_overrides", []) or []
     for item in extra_overrides:
@@ -300,6 +351,7 @@ def _dataset_matches_runtime_config(
     budget_model_path: str,
     lookback_days: int,
     global_sim_date: str,
+    matcher_cache_path: str,
 ) -> bool:
     if not path.exists():
         return False
@@ -329,6 +381,7 @@ def _dataset_matches_runtime_config(
                 "lookback_days",
                 "global_sim_date",
                 "source_split",
+                "matcher_cache_path",
             ],
         ).head(1)
     except Exception:
@@ -361,6 +414,7 @@ def _dataset_matches_runtime_config(
     row_lookback_days = int(row.get("lookback_days", 7))
     row_global_sim_date = str(row.get("global_sim_date", "") or "").strip()
     row_source_split = str(row.get("source_split", "")).strip()
+    row_matcher_cache_path = str(row.get("matcher_cache_path", "") or "").strip()
     return (
         row_source_split == source_split
         and row_matching == matching
@@ -383,6 +437,7 @@ def _dataset_matches_runtime_config(
         and row_budget_model_path == budget_model_path
         and row_lookback_days == lookback_days
         and row_global_sim_date == global_sim_date
+        and row_matcher_cache_path == str(matcher_cache_path or "").strip()
     )
 
 
@@ -419,6 +474,7 @@ def _prepare_data_if_needed(config: Dict[str, Any], force: bool) -> tuple[str, s
     warmup_submit_reserve_tokens = int(agent_cfg.get("warmup_submit_reserve_tokens", 8192))
     warmup_force_submit_threshold_tokens = int(agent_cfg.get("warmup_force_submit_threshold_tokens", 16384))
     budget_model_path = str(training_cfg.get("model_path", "")).strip()
+    matcher_cache_path = _resolve_matcher_cache_path_str(config)
 
     prepared_root = _resolve_prepared_data_dir(data_cfg)
     train_path = prepared_root / "train.parquet"
@@ -432,57 +488,32 @@ def _prepare_data_if_needed(config: Dict[str, Any], force: bool) -> tuple[str, s
             resolution_end,
         )
     )
-    needs_refresh = (
-        force
-        or subset_requested
-        or not _dataset_matches_runtime_config(
-            train_path,
-            source_split=train_split,
-            matching=matching,
-            matcher=matcher,
-            allow_substring_match=allow_substring_match,
-            embedding_model=embedding_model,
-            embedding_gpu_mem=embedding_gpu_mem,
-            aux_cuda_visible_devices=aux_cuda_visible_devices,
-            search_type=search_type,
-            search_topk=search_topk,
-            search_cutoff_days=search_cutoff_days,
-            search_min_days=search_min_days,
-            search_max_date=search_max_date,
-            search_db=search_db,
-            max_outcomes_per_question=max_outcomes_per_question,
-            warmup_max_actions=warmup_max_actions,
-            warmup_max_total_tokens=warmup_max_total_tokens,
-            warmup_submit_reserve_tokens=warmup_submit_reserve_tokens,
-            warmup_force_submit_threshold_tokens=warmup_force_submit_threshold_tokens,
-            budget_model_path=budget_model_path,
-            lookback_days=lookback_days,
-            global_sim_date=global_sim_date,
-        )
-        or not _dataset_matches_runtime_config(
-            val_path,
-            source_split=val_split,
-            matching=matching,
-            matcher=matcher,
-            allow_substring_match=allow_substring_match,
-            embedding_model=embedding_model,
-            embedding_gpu_mem=embedding_gpu_mem,
-            aux_cuda_visible_devices=aux_cuda_visible_devices,
-            search_type=search_type,
-            search_topk=search_topk,
-            search_cutoff_days=search_cutoff_days,
-            search_min_days=search_min_days,
-            search_max_date=search_max_date,
-            search_db=search_db,
-            max_outcomes_per_question=max_outcomes_per_question,
-            warmup_max_actions=warmup_max_actions,
-            warmup_max_total_tokens=warmup_max_total_tokens,
-            warmup_submit_reserve_tokens=warmup_submit_reserve_tokens,
-            warmup_force_submit_threshold_tokens=warmup_force_submit_threshold_tokens,
-            budget_model_path=budget_model_path,
-            lookback_days=lookback_days,
-            global_sim_date=global_sim_date,
-        )
+    match_kw = dict(
+        matching=matching,
+        matcher=matcher,
+        allow_substring_match=allow_substring_match,
+        embedding_model=embedding_model,
+        embedding_gpu_mem=embedding_gpu_mem,
+        aux_cuda_visible_devices=aux_cuda_visible_devices,
+        search_type=search_type,
+        search_topk=search_topk,
+        search_cutoff_days=search_cutoff_days,
+        search_min_days=search_min_days,
+        search_max_date=search_max_date,
+        search_db=search_db,
+        max_outcomes_per_question=max_outcomes_per_question,
+        warmup_max_actions=warmup_max_actions,
+        warmup_max_total_tokens=warmup_max_total_tokens,
+        warmup_submit_reserve_tokens=warmup_submit_reserve_tokens,
+        warmup_force_submit_threshold_tokens=warmup_force_submit_threshold_tokens,
+        budget_model_path=budget_model_path,
+        lookback_days=lookback_days,
+        global_sim_date=global_sim_date,
+        matcher_cache_path=matcher_cache_path,
+    )
+    needs_refresh = force or subset_requested or any(
+        not _dataset_matches_runtime_config(path, source_split=split, **match_kw)
+        for path, split in ((train_path, train_split), (val_path, val_split))
     )
 
     if needs_refresh:
@@ -517,6 +548,7 @@ def _prepare_data_if_needed(config: Dict[str, Any], force: bool) -> tuple[str, s
             warmup_force_submit_threshold_tokens=warmup_force_submit_threshold_tokens,
             budget_model_path=budget_model_path,
             max_outcomes_per_question=max_outcomes_per_question,
+            matcher_cache_path=matcher_cache_path,
         )
         print(f"Prepared train data: {result.train.rows} rows -> {result.train.path}")
         print(f"Prepared val data:   {result.validation.rows} rows -> {result.validation.path}")
@@ -528,8 +560,6 @@ def _write_eval_prompt_preview(config: Dict[str, Any], val_path: str) -> Path:
     from transformers import AutoTokenizer
 
     training = config.get("training", {}) or {}
-    search_cfg = config.get("search", {}) or {}
-    agent_cfg = config.get("agent", {}) or {}
     _, _, export_path = _resolve_training_paths(config)
     preview_dir = Path(export_path) / "dumped_evals" / "global_step_0_evals"
     preview_dir.mkdir(parents=True, exist_ok=True)
@@ -539,30 +569,19 @@ def _write_eval_prompt_preview(config: Dict[str, Any], val_path: str) -> Path:
         raise ValueError(f"No validation prompts found in {val_path}")
 
     prompt_messages = sample.iloc[0]["prompt"]
-    search_db = str(_require(search_cfg, "search_db"))
-    max_outcomes_per_question = int(
-        agent_cfg.get("max_outcomes_per_question", training.get("max_outcomes_per_question", 5))
-    )
-    max_search_results = int(
-        agent_cfg.get("max_search_results", search_cfg.get("max_search_results", search_cfg.get("search_topk", 5)))
-    )
-    tool_schemas = build_action_tools(
-        enable_query=False,
-        enable_search=True,
-        max_outcomes_per_question=max_outcomes_per_question,
-        max_search_results=max_search_results,
-        search_chunk_tokens=read_search_chunk_tokens(search_db),
-    )
+    tool_schemas = _tool_schemas_from_config(config)
 
-    template_path = REPO_ROOT / "skyrl_integration" / "templates" / "qwen3_tools_without_thinking.jinja2"
+    preview_kw: Dict[str, Any] = {
+        "add_generation_prompt": True,
+        "tokenize": False,
+        "tools": tool_schemas,
+    }
+    chat_path = training.get("chat_template_path")
+    if chat_path and str(chat_path).strip():
+        preview_kw["chat_template"] = Path(str(chat_path).strip()).expanduser().resolve().read_text(encoding="utf-8")
+
     tokenizer = AutoTokenizer.from_pretrained(str(_require(training, "model_path")), trust_remote_code=True)
-    rendered = tokenizer.apply_chat_template(
-        prompt_messages,
-        add_generation_prompt=True,
-        tokenize=False,
-        chat_template=template_path.read_text(),
-        tools=tool_schemas,
-    )
+    rendered = tokenizer.apply_chat_template(prompt_messages, **preview_kw)
 
     preview_path = preview_dir / "initial_prompt_rendered.txt"
     preview_path.write_text(rendered)
@@ -575,25 +594,35 @@ def main() -> int:
     parser.add_argument("--force_rebuild_data", action="store_true")
     parser.add_argument("--skip_data_prep", action="store_true")
     parser.add_argument("--dry_run", action="store_true")
+    parser.add_argument(
+        "--set",
+        dest="set_values",
+        action="append",
+        default=[],
+        help="Override YAML values before env expansion (repeatable). Example: --set training.max_turns=10",
+    )
     args = parser.parse_args()
 
     config_path = Path(args.config).resolve()
-    config = expand_env_tree(_read_yaml(config_path))
+    config = _read_yaml(config_path)
+    apply_set_overrides(config, args.set_values)
+    config = expand_env_tree(config)
     raise_for_unresolved_env_vars(config, f"SkyRL training config {config_path}")
     mode = _normalize_mode(config)
     training = config.get("training", {}) or {}
-    if str(training.get("logger", "console")).strip().lower() == "wandb" and not os.environ.get("WANDB_API_KEY"):
-        try:
-            auth = netrc.netrc().authenticators("api.wandb.ai")
-        except (FileNotFoundError, netrc.NetrcParseError):
-            auth = None
-        if auth and auth[2]:
-            os.environ["WANDB_API_KEY"] = auth[2]
-    if str(training.get("logger", "console")).strip().lower() == "wandb" and not os.environ.get("WANDB_API_KEY"):
-        raise ValueError(
-            "training.logger=wandb requires WANDB_API_KEY in the environment. "
-            "Put it in the repo .env or export it before launching SkyRL."
-        )
+    if str(training.get("logger", "console")).strip().lower() == "wandb":
+        if not os.environ.get("WANDB_API_KEY"):
+            try:
+                auth = netrc.netrc().authenticators("api.wandb.ai")
+            except (FileNotFoundError, netrc.NetrcParseError):
+                auth = None
+            if auth and auth[2]:
+                os.environ["WANDB_API_KEY"] = auth[2]
+        if not os.environ.get("WANDB_API_KEY"):
+            raise ValueError(
+                "training.logger=wandb requires WANDB_API_KEY in the environment. "
+                "Put it in the repo .env or export it before launching SkyRL."
+            )
 
     if args.skip_data_prep:
         prepared_root = _resolve_prepared_data_dir(config.get("data", {}) or {})
@@ -621,7 +650,17 @@ def main() -> int:
         preview_path = _write_eval_prompt_preview(config=config, val_path=val_path)
         print(f"Wrote rendered eval prompt preview: {preview_path}")
 
-    subprocess.run(cmd, check=True, cwd=REPO_ROOT, env=_build_runtime_env())
+    # Merge child stderr into stdout so HTCondor `.out` includes tracebacks (driver stderr is easy to miss).
+    env = _build_runtime_env()
+    result = subprocess.run(cmd, cwd=REPO_ROOT, env=env, stderr=subprocess.STDOUT)
+    if result.returncode != 0:
+        print(
+            "SkyRL subprocess failed. Check the merged job `.out`, `infra/ray/.../logs/worker-*.err`, and any "
+            "`SKYRL_LOG_FILE` under `training.log_path` / infra. Common causes: empty train set after "
+            "PromptDataset length filtering, vLLM/engine init, or Ray worker OOM.",
+            file=sys.stderr,
+        )
+    result.check_returncode()
     return 0
 
 

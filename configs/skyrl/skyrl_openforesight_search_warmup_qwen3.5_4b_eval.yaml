@@ -1,12 +1,25 @@
 # SkyRL eval-only run (epochs=0, eval before train) for OpenForesight warmup search + LanceDB.
 # Prepared parquets live under FSIM_SKYRL_PREPARED_DATA_DIR (shared cache); per-run logs use FSIM_SKYRL_LOG_BASE.
 #
+# Forecast metrics: ``main_openforesight_search.py`` patches SkyRL concat/evaluate so
+# ``eval/all/environment/*`` (avg_brier, accuracy, exp_acc, format_failures, …) merge across
+# eval micro-batches and reach W&B; ``eval/forecast/*`` mirrors those keys.
+#
+# Matcher cache: loaded at worker start, merged to disk at process exit (see ``AnswerMatcher``).
+# Default file is ``FSIM_MATCHER_CACHE_JSON`` or ``/fast/sgoel/forecasting/skyrl/matcher_cache.json``.
+#
+# Eval sampling (temperature, top_p, top_k, max_generate_length, …) mirrors ``training.*`` unless
+# you set ``eval_*`` keys — you do not need duplicate eval blocks for parity.
+#
 # Submit (HTCondor):
 #   python mpi_scripts/skyrl_search/submit_skyrl_search_train.py \
 #     --config configs/skyrl/skyrl_openforesight_search_warmup_qwen3.5_4b_eval.yaml --runs 1
 #
 # Local / login node (after `source .venv/bin/activate` + SkyRL extra deps):
 #   bash mpi_scripts/skyrl_search/run_skyrl_search_train.sh configs/skyrl/skyrl_openforesight_search_warmup_qwen3.5_4b_eval.yaml
+#
+# Override examples (same as submit_skyrl_search_train.py ``--set``):
+#   python scripts/run_skyrl_openforesight_search.py --config ... --set training.max_turns=10
 
 sim_name: "skyrl_of_search_warmup_qwen3.5_4b_eval"
 run_script: "run_skyrl_search_train.sh"
@@ -51,6 +64,7 @@ search:
 agent:
   max_outcomes_per_question: 5
   max_search_results: 5
+  # When null, the env uses ``training.max_turns`` as the action budget (see OpenForesightSearchWarmupEnv).
   warmup_max_actions: null
   warmup_max_total_tokens: 262144
   warmup_submit_reserve_tokens: 8192
@@ -58,6 +72,10 @@ agent:
 
 matching: "openrouter"
 matcher: "deepseek/deepseek-v3.2"
+
+matcher_cache:
+  enabled: true
+  path: null
 
 training:
   model_path: "${FSIM_SKYRL_MODEL_PATH}"
@@ -78,15 +96,15 @@ training:
   micro_forward_batch_size_per_gpu: 2
   micro_train_batch_size_per_gpu: 2
 
-  eval_batch_size: 8
-  eval_before_train: false
+  eval_batch_size: 302
+  eval_before_train: true
   eval_interval: 50
   eval_n_samples_per_prompt: 1
   dump_eval_results: true
 
-  max_prompt_length: 8192
+  # Must cover long prepared prompts: SkyRL PromptDataset drops rows longer than this (8192 can empty the 1-row smoke train set).
+  max_prompt_length: 262144
   max_input_length: 262144
-  max_generate_length: 4096
   flash_attn: true
   use_sample_packing: false
 
@@ -95,9 +113,14 @@ training:
   use_conversation_multi_turn: true
   append_eos_token_after_stop_str_in_multi_turn: true
 
+  # Match Qwen3.5 forecast-sim defaults (see configs/qwen3.5/allq_sim_qwen3.5_4b.yaml ``defaults.*``).
+  # Eval sampling mirrors these unless you set eval_* keys explicitly.
   temperature: 0.7
   top_p: 0.95
   top_k: 20
+  min_p: 0.0
+  repetition_penalty: 1.0
+  max_generate_length: 8192
   sampling_logprobs: null
   eval_sampling_logprobs: null
   stop_tokens:
@@ -119,8 +142,11 @@ training:
   gpu_memory_utilization: 0.6
   max_env_workers: 16
 
-  ckpt_interval: 20
-  hf_save_interval: 200
+  # Overridden to 0 by ``run_skyrl_openforesight_search.py`` in mode=eval (SkyRL otherwise runs a
+  # final HF export after zero training steps and often crashes). Values below apply if Hydra is
+  # invoked without the launcher.
+  ckpt_interval: 0
+  hf_save_interval: 0
   max_ckpts_to_keep: 5
 
 hydra_overrides:

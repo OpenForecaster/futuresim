@@ -22,6 +22,8 @@ data:
   # Single shared cache for train.parquet / validation.parquet (not per-run logs; see training.log_path).
   prepared_data_dir: "${FSIM_SKYRL_PREPARED_DATA_DIR}"
   train_split: "train"
+  # Eval reads ``validation.parquet``, built from this OpenForesight shard name (``test`` vs
+  # ``validation`` depends on your ``FSIM_DATASET_PATH`` layout — use the split you want as holdout).
   val_split: "test"
   # Day-0 warmup style: each question is evaluated at (resolution_date - lookback_days)
   lookback_days: 7
@@ -43,6 +45,8 @@ search:
   search_type: "hybrid"
   search_cutoff_days: 0
   search_min_days: 0
+  # Align with eval: latest article date allowed in search (min(sim_date − cutoff, search_max_date)).
+  search_max_date: "2025-04-23"
   max_snippet_chars: 1200
   allow_substring_match: true
 
@@ -50,7 +54,7 @@ search:
 agent:
   max_outcomes_per_question: 5
   max_search_results: 5
-  warmup_max_actions: null
+  warmup_max_actions: 10
   warmup_max_total_tokens: 262144
   warmup_submit_reserve_tokens: 8192
   warmup_force_submit_threshold_tokens: 16384
@@ -58,6 +62,12 @@ agent:
 # Keep correctness checks aligned with the main forecast-sim environment.
 matching: "openrouter"
 matcher: "deepseek/deepseek-v3.2"
+
+# Persistent OpenRouter matcher cache (shared across runs). Default path: ``FSIM_MATCHER_CACHE_JSON``
+# or ``skyrl_integration/matcher_cache.DEFAULT_MATCHER_CACHE_JSON``.
+matcher_cache:
+  enabled: true
+  path: null
 
 training:
   model_path: "${FSIM_SKYRL_MODEL_PATH}"
@@ -68,7 +78,7 @@ training:
   logger: "wandb"
 
   strategy: "fsdp2"
-  # Qwen3.5 ref forward is stable here only when the ref model stays on GPU.
+  # Only used when ``use_kl_loss`` loads a ref model (see ``run_skyrl_openforesight_search.py``).
   ref_fsdp_cpu_offload: false
 
   epochs: 1
@@ -80,34 +90,41 @@ training:
   micro_train_batch_size_per_gpu: 2
 
   eval_batch_size: 128
-  eval_before_train: false
-  eval_interval: 50
+  eval_before_train: true
+  eval_interval: 20
   eval_n_samples_per_prompt: 4
   dump_eval_results: true
 
-  # Initial prompts are short, but the multi-turn search transcript can get long.
-  max_prompt_length: 8192
+  # Match eval cached-metrics config so PromptDataset does not drop long prepared prompts.
+  max_prompt_length: 262144
   max_input_length: 262144
-  max_generate_length: 4096
   flash_attn: true
   use_sample_packing: false
 
   n_samples_per_prompt: 4
-  # `0` means "do not enforce a turn cap in the warmup env"; token budget becomes the visible limit.
-  max_turns: 0
+  # SkyRL passes this as ``max_turns`` to the env (tool turns per episode). Keep aligned with
+  # ``agent.warmup_max_actions`` so train and eval batches use the same action budget.
+  max_turns: 10
   use_conversation_multi_turn: true
   append_eos_token_after_stop_str_in_multi_turn: true
 
+  # Match Qwen3.5 forecast-sim defaults (see configs/qwen3.5/allq_sim_qwen3.5_4b.yaml ``defaults.*``).
+  # ``scripts/run_skyrl_openforesight_search.py`` mirrors these into ``generator.eval_sampling_params``
+  # unless you set eval_* overrides explicitly.
   temperature: 0.7
   top_p: 0.95
   top_k: 20
+  min_p: 0.0
+  repetition_penalty: 1.0
+  max_generate_length: 8192
   sampling_logprobs: null
   eval_sampling_logprobs: null
   stop_tokens:
     - "</tool_call>"
 
   learning_rate: 1.0e-6
-  use_kl_loss: true
+  # No ref-model KL for now (faster, less VRAM); GRPO still trains from group-normalized advantages.
+  use_kl_loss: false
   kl_loss_coef: 0.001
   tis_ratio_type: null
   token_tis_ratio_clip_high: 2.0

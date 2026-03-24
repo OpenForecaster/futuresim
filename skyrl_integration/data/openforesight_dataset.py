@@ -118,6 +118,7 @@ def _build_row(
     budget_model_path: str,
     max_outcomes_per_question: int,
     split_name: str,
+    matcher_cache_path: str = "",
 ) -> Optional[Dict[str, Any]]:
     resolution_date = _parse_date(row.get("resolution_date"))
     if resolution_date is None:
@@ -202,6 +203,7 @@ def _build_row(
         "warmup_submit_reserve_tokens": int(warmup_submit_reserve_tokens),
         "warmup_force_submit_threshold_tokens": int(warmup_force_submit_threshold_tokens),
         "budget_model_path": str(budget_model_path or ""),
+        "matcher_cache_path": str(matcher_cache_path or ""),
         "extra_info": {
             "split": split_name,
             "answer_type": str(row.get("answer_type") or ""),
@@ -239,6 +241,7 @@ def _build_split_dataset(
     warmup_force_submit_threshold_tokens: int,
     budget_model_path: str,
     max_outcomes_per_question: int,
+    matcher_cache_path: str = "",
 ) -> SplitBuildResult:
     df = _load_split_dataframe(dataset_path=dataset_path, split=split)
     df["_resolution_date"] = df["resolution_date"].apply(_parse_date)
@@ -278,6 +281,7 @@ def _build_split_dataset(
             budget_model_path=budget_model_path,
             max_outcomes_per_question=max_outcomes_per_question,
             split_name=split,
+            matcher_cache_path=matcher_cache_path,
         )
         if built is not None:
             records.append(built)
@@ -324,6 +328,7 @@ def prepare_openforesight_search_dataset(
     warmup_force_submit_threshold_tokens: int = 16384,
     budget_model_path: str = "",
     max_outcomes_per_question: int = 5,
+    matcher_cache_path: str = "",
 ) -> DatasetBuildResult:
     resolution_start_d = _parse_date(resolution_start)
     resolution_end_d = _parse_date(resolution_end)
@@ -363,6 +368,7 @@ def prepare_openforesight_search_dataset(
         warmup_force_submit_threshold_tokens=warmup_force_submit_threshold_tokens,
         budget_model_path=str(budget_model_path or ""),
         max_outcomes_per_question=max_outcomes_per_question,
+        matcher_cache_path=str(matcher_cache_path or ""),
     )
 
     val_result = _build_split_dataset(
@@ -394,6 +400,7 @@ def prepare_openforesight_search_dataset(
         warmup_force_submit_threshold_tokens=warmup_force_submit_threshold_tokens,
         budget_model_path=str(budget_model_path or ""),
         max_outcomes_per_question=max_outcomes_per_question,
+        matcher_cache_path=str(matcher_cache_path or ""),
     )
 
     return DatasetBuildResult(train=train_result, validation=val_result)

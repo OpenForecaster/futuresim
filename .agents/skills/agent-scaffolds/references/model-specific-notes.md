@@ -39,7 +39,7 @@ python mpi_scripts/run_sim/submit_sim.py \
   - `defaults.temperature=0.7` as the repo's forecasting-oriented compromise between Qwen's general "thinking mode" defaults and lower-temperature precise-task settings
   - `defaults.top_p=0.95`
   - `defaults.top_k=20`
-  - `defaults.max_tokens=4096` because it is a per-call output cap, not an input+output cap
+  - `defaults.max_tokens=8192` because it is a per-call output cap, not an input+output cap
 - Historical hidden thinking is intentionally not replayed across turns. The Qwen loop feeds back only the assistant's final visible content and tool calls, not `reasoning_content`, which matches the Qwen3.5 model-card guidance that conversation history should exclude past thinking content.
 - When token budgeting is enabled, `max_total_tokens` tracks current prompt occupancy/headroom, not cumulative token spend.
 - Current token-budget tuning for Qwen full-context runs:

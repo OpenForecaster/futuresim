@@ -9,7 +9,12 @@ Where:
 - y_i = 1 if outcome is truth, 0 otherwise
 
 Properties:
-- Higher is better (range: -1 to +1)
+- Higher is better. **Skill = 1 − Brier** is only guaranteed in **[-1, 1]** for the usual
+  textbook simplex (non‑negative probs, sum ≤ 1, one correct vertex). In that setting the worst
+  calibrated cases often bottom out near **−1** (e.g. 100% on one wrong named outcome when truth
+  is missing from the list gives Brier 2). The implementation **does not renormalize** submits:
+  if the model returns **malformed** masses (e.g. several large probabilities on wrong outcomes,
+  or totals above 1), **Brier can exceed 2** and skill can fall **below −1**.
 - 0 = no information baseline (abstainer)
 - Proper scoring rule
 - No overconfidence incentive

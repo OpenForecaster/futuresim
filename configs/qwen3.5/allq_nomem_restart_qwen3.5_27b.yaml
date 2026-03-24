@@ -33,7 +33,7 @@ dataset_path: "${FSIM_DATASET_PATH}"
 min_forecasters: 10
 resolved_only: true
 output_base: "${FSIM_OUTPUT_BASE}"
-warmup_parallelism: 64
+warmup_parallelism: 32
 
 # --- Search Settings ---
 search_db: "${FSIM_SEARCH_DB}"

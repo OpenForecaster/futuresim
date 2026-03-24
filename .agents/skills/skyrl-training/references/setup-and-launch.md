@@ -66,14 +66,12 @@ The shared config supports:
 Leave `aux_cuda_visible_devices: null` to let vLLM use the process-visible GPUs,
 or set it when you reserve an extra GPU for search embeddings.
 
-**Chat template (training):** `scripts/run_skyrl_openforesight_search.py` sets
-`generator.chat_template.name_or_path` to **null** when `training.chat_template_path`
-is unset, so SkyRL uses the **tokenizer’s default HF `chat_template`** for the
-policy checkpoint (aligns with vLLM eval when the same model is used). To use the
-older Hermes-style Jinja instead, set `training.chat_template_path` to
-`skyrl_integration/templates/qwen3_tools_without_thinking.jinja2` (or an absolute path).
-That file can wrap assistant spans in `{% generation %}` / `{% endgeneration %}`
-when you need `return_assistant_tokens_mask=True` with a **custom** template.
+**Chat template (training):** when `training.chat_template_path` is unset,
+`scripts/run_skyrl_openforesight_search.py` does **not** override SkyRL’s
+`generator.chat_template`, so Hydra keeps defaults (`source=name`, `name_or_path=null`)
+and the run uses the **HF tokenizer’s built-in `chat_template`** (same pattern as
+historical Condor snapshots such as eval_r00 / eval_bs160). Set
+`training.chat_template_path` only if you need a custom Jinja file on disk.
 
 **Thinking:** `training.enable_thinking` is passed into `chat_template_kwargs` and
 defaults to **true** (Qwen3.5 HF templates assume thinking blocks). Set
