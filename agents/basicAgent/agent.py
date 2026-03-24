@@ -5,15 +5,25 @@ Uses chain-of-thought with <reasoning> and <action type="..."> tags.
 """
 
 import json
-import os
 import re
-from functools import lru_cache
 from datetime import date, timedelta
 from typing import List, Dict, Any, Optional, Tuple
 
 from agents.base import BaseAgent
-from agents.utils.forecast_parser import parse_action, extract_memory, extract_memory_ops, extract_mem_ops
-from agents.utils.budget import BudgetSettings, BudgetTracker
+from agents.utils.forecast_parser import (
+    ParsedAction,
+    parse_action,
+    extract_memory,
+    extract_memory_ops,
+    extract_mem_ops,
+)
+from agents.utils.budget import (
+    BudgetSettings,
+    BudgetTracker,
+    build_budget_overview,
+    build_start_budget_status,
+    estimate_budget_tokens,
+)
 from agents.utils.timing import AgentTimer
 from environment.interfaces import PredictionSubmission
 
@@ -23,18 +33,6 @@ from agents.utils.memory import StructuredMemory, ActiveMemory
 from .query import QueryHandler
 from .search import SearchHandler
 from .feedback import FeedbackHandler
-
-
-@lru_cache(maxsize=16)
-def _load_budget_tokenizer(model_name: str):
-    if not model_name or not os.path.exists(model_name):
-        return None
-    try:
-        from transformers import AutoTokenizer
-
-        return AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-    except Exception:
-        return None
 
 
 class BasicAgent(BaseAgent):
@@ -53,7 +51,202 @@ class BasicAgent(BaseAgent):
     
     Uses <reasoning> for chain-of-thought and <action type="..."> for actions.
     """
-    
+
+    @staticmethod
+    def extract_reasoning_token_count(response_json: Dict[str, Any]) -> int:
+        """Extract per-response reasoning token count from usage details when available."""
+        usage = response_json.get("usage") or {}
+        if not isinstance(usage, dict):
+            return 0
+
+        out_details = usage.get("output_tokens_details")
+        if isinstance(out_details, dict):
+            rt = out_details.get("reasoning_tokens")
+            if isinstance(rt, int):
+                return rt
+            try:
+                return int(rt)
+            except Exception:
+                pass
+
+        comp_details = usage.get("completion_tokens_details")
+        if isinstance(comp_details, dict):
+            rt = comp_details.get("reasoning_tokens")
+            if isinstance(rt, int):
+                return rt
+            try:
+                return int(rt)
+            except Exception:
+                pass
+
+        rt = usage.get("reasoning_tokens")
+        if isinstance(rt, int):
+            return rt
+        try:
+            return int(rt)
+        except Exception:
+            return 0
+
+    @staticmethod
+    def tool_calls_to_parsed_action(
+        tool_calls: Optional[List[Dict[str, Any]]],
+        *,
+        assistant_text: str = "",
+    ) -> Tuple[Optional[ParsedAction], str, List[Dict[str, Any]]]:
+        """
+        Map normalized tool calls (name + arguments dict) to ParsedAction.
+
+        Used by Chat Completions, Responses API, and text-derived tool-call extractors.
+        """
+        calls = tool_calls if tool_calls is not None else []
+        if not calls:
+            return None, assistant_text, calls
+
+        call = calls[0]
+        name = call.get("name")
+        args = call.get("arguments")
+        if args is None:
+            args = {}
+
+        if not isinstance(name, str) or not name:
+            return (
+                ParsedAction(
+                    action_type=None,
+                    code=None,
+                    forecasts=None,
+                    query=None,
+                    error=f"Malformed tool call: missing/invalid name ({name!r})",
+                ),
+                assistant_text,
+                calls,
+            )
+
+        if not isinstance(args, dict):
+            return (
+                ParsedAction(
+                    action_type=None,
+                    code=None,
+                    forecasts=None,
+                    query=None,
+                    error=f"Malformed tool call args for {name!r}: expected object, got {type(args).__name__}",
+                ),
+                assistant_text,
+                calls,
+            )
+
+        if name == "next_day":
+            return (
+                ParsedAction(action_type="next", code=None, forecasts=None, query=None, error=None),
+                assistant_text,
+                calls,
+            )
+
+        if name == "query_df":
+            code = args.get("code")
+            if not isinstance(code, str) or not code.strip():
+                return (
+                    ParsedAction(
+                        action_type="query",
+                        code=None,
+                        forecasts=None,
+                        query=None,
+                        error="Missing code",
+                    ),
+                    assistant_text,
+                    calls,
+                )
+            return ParsedAction(action_type="query", code=code, forecasts=None, query=None, error=None), assistant_text, calls
+
+        if name == "search_news":
+            q = args.get("query")
+            if not isinstance(q, str) or not q.strip():
+                return (
+                    ParsedAction(
+                        action_type="search",
+                        code=None,
+                        forecasts=None,
+                        query=None,
+                        error="Missing query",
+                    ),
+                    assistant_text,
+                    calls,
+                )
+            frm = args.get("from_date")
+            to = args.get("to_date")
+            search_from = frm if isinstance(frm, str) and frm.strip() else None
+            search_to = to if isinstance(to, str) and to.strip() else None
+            return (
+                ParsedAction(
+                    action_type="search",
+                    code=None,
+                    forecasts=None,
+                    query=q.strip(),
+                    search_from=search_from,
+                    search_to=search_to,
+                    error=None,
+                ),
+                assistant_text,
+                calls,
+            )
+
+        if name == "submit_forecasts":
+            forecasts = args.get("forecasts")
+            if not isinstance(forecasts, list) or not forecasts:
+                return (
+                    ParsedAction(
+                        action_type="submit",
+                        code=None,
+                        forecasts=None,
+                        query=None,
+                        error="Missing forecasts",
+                    ),
+                    assistant_text,
+                    calls,
+                )
+            out: List[Dict[str, Any]] = []
+            for f in forecasts:
+                if not isinstance(f, dict):
+                    continue
+                qid = f.get("qid")
+                outcomes = f.get("outcomes")
+                if not isinstance(qid, str) or not isinstance(outcomes, dict):
+                    continue
+                clean_outcomes: Dict[str, float] = {}
+                for k, v in outcomes.items():
+                    if not isinstance(k, str):
+                        continue
+                    try:
+                        fv = float(v)
+                    except Exception:
+                        continue
+                    clean_outcomes[k] = fv
+                out.append({"qid": qid, "outcomes": clean_outcomes})
+            if not out:
+                return (
+                    ParsedAction(
+                        action_type="submit",
+                        code=None,
+                        forecasts=None,
+                        query=None,
+                        error="No valid forecasts",
+                    ),
+                    assistant_text,
+                    calls,
+                )
+            return ParsedAction(action_type="submit", code=None, forecasts=out, query=None, error=None), assistant_text, calls
+
+        return (
+            ParsedAction(
+                action_type=None,
+                code=None,
+                forecasts=None,
+                query=None,
+                error=f"Unknown tool call: {name!r}",
+            ),
+            assistant_text,
+            calls,
+        )
+
     def __init__(self, 
                  agent_id: str,
                  inference_provider,
@@ -202,43 +395,14 @@ class BasicAgent(BaseAgent):
                 max_total_tokens=settings.max_total_tokens,
                 submit_reserve_tokens=settings.submit_reserve_tokens,
                 force_submit_threshold_tokens=settings.force_submit_threshold_tokens,
+                memory_phase_threshold_tokens=settings.memory_phase_threshold_tokens,
             )
         return BudgetTracker(settings, token_estimator=self._estimate_budget_tokens)
 
     def _build_budget_overview(self, *, warmup: bool = False, per_question: bool = False) -> str:
         """Human-readable budget instructions for prompts."""
         settings = self._get_budget_settings(warmup=warmup)
-        lines: List[str] = []
-        if settings.max_actions is not None:
-            if per_question:
-                lines.append(f"You have {settings.max_actions} actions to research and forecast this question.")
-            else:
-                lines.append(
-                    f"You have {settings.max_actions} actions per day. Each query, search, or submission uses 1 action."
-                )
-        if settings.max_total_tokens is not None:
-            scope = "this question" if per_question else "this session"
-            lines.append(
-                f"You have a context budget of {settings.max_total_tokens} tokens for {scope}. "
-                "This tracks the current prompt length, not cumulative tokens spent."
-            )
-            if warmup:
-                # Warmup keeps submit_reserve / force_submit semantics
-                lines.append(
-                    f"Keep at least {settings.submit_reserve_tokens} tokens free for a final submit. "
-                    f"Force-submit once the remaining context budget is at or below {settings.force_submit_threshold_tokens}."
-                )
-            elif settings.memory_phase_threshold_tokens is not None:
-                # Non-warmup unified loop: explain memory phase transition
-                action_budget = settings.max_total_tokens - settings.memory_phase_threshold_tokens
-                lines.append(
-                    "When you finish forecasting, call <action type=\"next\"/> to transition to the memory update phase. "
-                    f"The transition also happens automatically when ~{action_budget} tokens have been used. "
-                    f"The remaining ~{settings.memory_phase_threshold_tokens} tokens are reserved for memory updates."
-                )
-        if settings.max_actions is not None and settings.max_total_tokens is not None:
-            lines.append("If both budgets are configured, both are enforced and the session ends when either one is exhausted.")
-        return "\n".join(lines)
+        return build_budget_overview(settings, per_question=per_question)
 
     def _build_start_budget_status(
         self,
@@ -251,7 +415,7 @@ class BasicAgent(BaseAgent):
             warmup=warmup,
             max_actions_override=max_actions_override,
         )
-        return tracker.status_text()
+        return build_start_budget_status(tracker.settings)
 
     def _build_force_submit_preamble(self, budget: BudgetTracker) -> str:
         """Shared force-submit wording for action/token-constrained loops."""
@@ -273,22 +437,7 @@ class BasicAgent(BaseAgent):
         )
 
     def _estimate_budget_tokens(self, payload: Any) -> int:
-        if payload is None:
-            return 0
-        text = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False)
-        if not text:
-            return 0
-
-        tokenizer = _load_budget_tokenizer(str(self.model_name or ""))
-        if tokenizer is not None:
-            try:
-                return len(tokenizer.encode(text, add_special_tokens=False))
-            except TypeError:
-                return len(tokenizer.encode(text))
-            except Exception:
-                pass
-
-        return max(1, (len(text) + 3) // 4)
+        return estimate_budget_tokens(payload, model_name=str(self.model_name or ""))
 
     @staticmethod
     def _append_with_budget(messages: List[Dict[str, Any]], budget: BudgetTracker, message: Dict[str, Any]) -> None:

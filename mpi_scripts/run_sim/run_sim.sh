@@ -7,12 +7,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
 export FSIM_REPO_DIR="${FSIM_REPO_DIR:-${REPO_ROOT}}"
-cd "${REPO_ROOT}"
+CONFIG_PATH="$(readlink -f "${1:?Usage: $0 <config-path>}")"
 
-source .venv/bin/activate
+source "${REPO_ROOT}/.venv/bin/activate"
 module load cuda/12.9
-
-CONFIG_PATH="${1:?Usage: $0 <config-path>}"
 
 fix_home() {
     # HTCondor can launch with HOME unset, "/", or a non-writable location.
@@ -37,6 +35,16 @@ load_runtime_env() {
         # shellcheck disable=SC1090
         source "${HOME}/.bashrc"
     fi
+}
+
+setup_core_dump_dir() {
+    local default_core_dump_dir="${REPO_ROOT}/logs/core-dumps"
+    if [ -n "${FSIM_SIM_LOG_BASE:-}" ]; then
+        default_core_dump_dir="$(dirname "${FSIM_SIM_LOG_BASE}")/core-dumps"
+    fi
+    export FSIM_CORE_DUMP_DIR="${FSIM_CORE_DUMP_DIR:-${default_core_dump_dir}}"
+    mkdir -p "${FSIM_CORE_DUMP_DIR}"
+    cd "${FSIM_CORE_DUMP_DIR}"
 }
 
 prepend_unique_path() {
@@ -96,6 +104,7 @@ PY
 
 fix_home
 load_runtime_env
+setup_core_dump_dir
 
 export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-${HOME}/.cache/huggingface/datasets}"
 mkdir -p "${HF_DATASETS_CACHE}"
@@ -105,7 +114,8 @@ if [ "$(config_uses_local_vllm)" = "1" ]; then
 fi
 
 echo "Running simulation with config: ${CONFIG_PATH}"
+echo "Core dumps will land in: ${FSIM_CORE_DUMP_DIR}"
 
-python -u scripts/test_basic_agent.py --config "${CONFIG_PATH}"
+python -u "${REPO_ROOT}/scripts/test_basic_agent.py" --config "${CONFIG_PATH}"
 
 echo "Simulation complete!"

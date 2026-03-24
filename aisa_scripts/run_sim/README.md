@@ -18,16 +18,16 @@ python scripts/build_lancedb_index.py --build_fts --fts_with_position --force
 
 ```bash
 # Basic run using config:
-python mpi_scripts/run_sim/submit_sim.py --config configs/default_sim.yaml
+python mpi_scripts/run_sim/submit_sim.py --config configs/shared/default_sim.yaml
 
 # Override config keys at submit time (repeatable):
-python mpi_scripts/run_sim/submit_sim.py --config configs/default_sim.yaml --runs 5 \
+python mpi_scripts/run_sim/submit_sim.py --config configs/shared/default_sim.yaml --runs 5 \
   --set sim_name=my_test_run \
   --set resources.cpus=32 \
   --set resources.memory_gb=120
 
 # Dry run to check generated config:
-python mpi_scripts/run_sim/submit_sim.py --config configs/default_sim.yaml --dry-run
+python mpi_scripts/run_sim/submit_sim.py --config configs/shared/default_sim.yaml --dry-run
 ```
 
 ## Resuming / Restarting

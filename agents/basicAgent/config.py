@@ -34,6 +34,9 @@ class AgentConfig:
     article_max_chars: int = 4000
     search_cutoff_days: int = 0
     timegap_days: int = 1
+    # Keep only the K most recent user/tool-result messages when replaying the
+    # conversation to the model. -1 keeps all results.
+    tool_result_keep_last: int = -1
     
     # Single agent mode - adjusts prompt to focus on accuracy only (no peer/market language)
     single_agent_mode: bool = False
@@ -78,6 +81,9 @@ class AgentConfig:
         ):
             if value is not None and value <= 0:
                 raise ValueError(f"{name} must be > 0 when provided")
+
+        if self.tool_result_keep_last < -1:
+            raise ValueError("tool_result_keep_last must be >= -1")
 
         if self.force_submit_threshold_tokens < self.submit_reserve_tokens:
             raise ValueError("force_submit_threshold_tokens must be >= submit_reserve_tokens")

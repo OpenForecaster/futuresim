@@ -20,7 +20,7 @@ Only `random.seed(args.seed)` is called (line 96). Missing:
 ---
 
 ### 1.2 Non-Deterministic Inference Settings
-**File**: `configs/default_sim.yaml`
+**File**: `configs/shared/default_sim.yaml`
 
 Default `temperature: 0.7` makes LLM outputs stochastic.
 

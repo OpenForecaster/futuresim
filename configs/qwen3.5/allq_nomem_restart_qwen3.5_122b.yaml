@@ -1,0 +1,83 @@
+# AllQAgent: Qwen3.5-122B-A10B (local vLLM), no-memory restart from shared warmup.
+#
+# Usage:
+#   python mpi_scripts/run_sim/submit_sim.py --config configs/qwen3.5/allq_nomem_restart_qwen3.5_122b.yaml --runs 1
+
+# --- Run Script (CUDA 12.9 needed for Qwen3.5 FlashInfer GDN kernels) ---
+run_script: "run_sim.sh"
+
+# --- Restart ---
+# Set locally with --set restart_from=/path/to/run
+restart_from_day: "2025-04-25"
+
+# --- Simulation Meta ---
+sim_name: "allq_nomem_qwen3.5-122b_testset-50actions"
+start_date: "2025-05-01"
+end_date: "2025-08-23"
+lookback_days: 7
+search_cutoff_days: 0
+split: "test"
+
+# --- HTCondor Resources ---
+resources:
+  gpus: 8
+  cpus: 40
+  memory_gb: 256
+  disk_gb: 256
+  bid: 50
+  requirements: "TARGET.CUDACapability >= 9.0 && TARGET.CUDAGlobalMemoryMb > 70000 && TARGET.CUDAGlobalMemoryMb < 120000 && TARGET.Machine =!= \"i103.internal.cluster.is.localnet\""
+
+# --- Data Paths ---
+dataset: "openforesight"
+dataset_path: "${FSIM_DATASET_PATH}"
+min_forecasters: 10
+resolved_only: true
+output_base: "${FSIM_OUTPUT_BASE}"
+warmup_parallelism: 64
+
+# --- Search Settings ---
+search_db: "${FSIM_SEARCH_DB}"
+embedding_model: "${FSIM_EMBEDDING_MODEL}"
+embedding_gpu_mem: 0.7
+
+# --- Answer Matching ---
+matching: "openrouter"
+matcher: "deepseek/deepseek-v3.2"
+matcher_gpu_mem: 0.0
+max_model_len: 65536
+agent_max_model_len: 65536
+embedding_max_model_len: 32768
+
+# --- vLLM Agent Runtime ---
+vllm_gpu_mem: 0.85
+vllm_tensor_parallel_size: 4
+vllm_startup_timeout: 1800
+vllm_max_num_seqs: 128
+vllm_enable_tools: false
+language_model_only: true
+
+# --- Local 5-GPU Pinning (requesting 8 GPUs for full-node scheduling) ---
+# matcher + embedder on GPU4 (parent process), agent vLLM on GPU0-3 (subprocess override).
+aux_cuda_visible_devices: "4"
+agent_cuda_visible_devices: "0,1,2,3"
+
+# --- Inference Defaults ---
+rate_limit: 32.0
+parallel: true
+
+# --- Agents Configuration ---
+defaults:
+  provider: "vllm"
+  scaffold: "allQ"
+  enable_memory: false
+  max_actions: 50
+  warmup_max_actions: 20
+  temperature: 0.7
+  top_p: 0.95
+  top_k: 20
+  max_tokens: 8192
+  max_retries: 3
+
+agents:
+  - model: "/fast/nchandak/models/Qwen3.5-122B-A10B-text"
+    provider: "vllm"

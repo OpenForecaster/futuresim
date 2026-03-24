@@ -26,7 +26,7 @@ Usage (No-search baseline):
         --start_date 2024-12-25 --end_date 2024-12-27
 
 Usage (Multi-agent - config file):
-    python scripts/test_basic_agent.py --agents_config configs/agents_example.yaml --sim_name multi_agent_run
+    python scripts/test_basic_agent.py --agents_config configs/shared/agents_example.yaml --sim_name multi_agent_run
 """
 
 import argparse
@@ -47,6 +47,7 @@ from agents.basicAgent import BasicAgent, AgentConfig
 from agents.allQAgent import AllQAgent, AllQDailyAgent
 from agents.ogAgent import OgAgent
 from agents.gptossAgent import GPTOSSBasicAgent, GPTOSSAllQAgent
+from agents.miroAgent import MiroBasicAgent, MiroAllQAgent
 from agents.qwenAgent import QwenBasicAgent, QwenAllQAgent
 
 
@@ -313,6 +314,10 @@ def _is_qwen_model(model: str) -> bool:
     return ("qwen" in model_l) and ("gpt-oss" not in model_l)
 
 
+def _is_miro_model(model: str) -> bool:
+    return "mirothinker" in str(model or "").lower()
+
+
 def _resolve_vllm_tool_call_parser(model: str, args) -> str | None:
     parser = getattr(args, "vllm_tool_call_parser", None)
     if isinstance(parser, str):
@@ -325,6 +330,9 @@ def _resolve_vllm_tool_call_parser(model: str, args) -> str | None:
 
     if _is_qwen_model(model):
         return "qwen3_coder"
+
+    if _is_miro_model(model):
+        return None
 
     return "openai"
 
@@ -437,6 +445,12 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
         warmup_parallelism = agent_def.get('warmup_parallelism', defaults.get('warmup_parallelism', getattr(args, 'warmup_parallelism', 20)))
         max_retries = agent_def.get('max_retries', defaults.get('max_retries', args.max_retries))
         temperature = agent_def.get('temperature', defaults.get('temperature', args.temperature))
+        top_p = agent_def.get('top_p', defaults.get('top_p', getattr(args, 'top_p', None)))
+        top_k = agent_def.get('top_k', defaults.get('top_k', getattr(args, 'top_k', None)))
+        repetition_penalty = agent_def.get(
+            'repetition_penalty',
+            defaults.get('repetition_penalty', getattr(args, 'repetition_penalty', None))
+        )
         max_tokens = agent_def.get('max_tokens', defaults.get('max_tokens', args.max_tokens))
         reasoning = agent_def.get('reasoning', defaults.get('reasoning', None))
         search_cutoff_days = agent_def.get('search_cutoff_days', defaults.get('search_cutoff_days', getattr(args, 'search_cutoff_days', 0)))
@@ -447,6 +461,12 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
             agent_def.get('memory_update_max_total_tokens', defaults.get('memory_update_max_total_tokens', 50000))
         )
         singleans = agent_def.get('singleans', defaults.get('singleans', False))
+        tool_result_keep_last = _optional_int(
+            agent_def.get(
+                'tool_result_keep_last',
+                defaults.get('tool_result_keep_last', getattr(args, 'tool_result_keep_last', -1))
+            )
+        )
         cheat_feedback = agent_def.get('cheat_feedback', defaults.get('cheat_feedback', getattr(args, 'cheat_feedback', False)))
         cheat_feedback_detail = agent_def.get('cheat_feedback_detail', defaults.get('cheat_feedback_detail', getattr(args, 'cheat_feedback_detail', 'full')))
         gptoss_prompt_mode = agent_def.get(
@@ -502,9 +522,13 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
             memory_max_entries=memory_max_entries,
             memory_update_max_total_tokens=memory_update_max_total_tokens,
             singleans=singleans,
+            tool_result_keep_last=tool_result_keep_last,
             sampling_params={
                 'temperature': temperature,
                 'max_tokens': max_tokens,
+                **({'top_p': float(top_p)} if top_p is not None else {}),
+                **({'top_k': int(top_k)} if top_k is not None else {}),
+                **({'repetition_penalty': float(repetition_penalty)} if repetition_penalty is not None else {}),
                 **({'reasoning': reasoning} if reasoning is not None else {}),
             },
             search_cutoff_days=search_cutoff_days,
@@ -557,6 +581,23 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
                 search_tool=search_tool,
                 start_date=args.sim_start_date
             )
+        elif scaffold == 'mirobasic':
+            agent = MiroBasicAgent(
+                agent_id=agent_id,
+                inference_provider=inference_provider,
+                config=agent_config,
+                model_name=model,
+                search_tool=search_tool
+            )
+        elif scaffold == 'miroallq':
+            agent = MiroAllQAgent(
+                agent_id=agent_id,
+                inference_provider=inference_provider,
+                config=agent_config,
+                model_name=model,
+                search_tool=search_tool,
+                start_date=args.sim_start_date
+            )
         elif scaffold == 'gptossbasic':
             agent = GPTOSSBasicAgent(
                 agent_id=agent_id,
@@ -595,7 +636,8 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
         else:
             raise ValueError(
                 f"Unknown scaffold: {scaffold}. Only 'basic', 'allQ', 'allqd', 'og', "
-                "'qwenbasic', 'qwenallq', 'gptossbasic', and 'gptossallq' are supported."
+                "'qwenbasic', 'qwenallq', 'mirobasic', 'miroallq', 'gptossbasic', and "
+                "'gptossallq' are supported."
             )
         
         agents.append(agent)
@@ -662,8 +704,8 @@ def main():
                        help="Cheat feedback detail level: 'full' (Brier scores) or 'direction' (labels only)")
     
     # Single-agent settings (used when no config file)
-    parser.add_argument("--scaffold", choices=["basic", "allQ", "allq", "allqd", "og", "qwenbasic", "qwenallq", "gptossbasic", "gptossallq"], default="basic",
-                       help="Agent scaffold to use (default: basic). Qwen/GPT-OSS variants must be selected explicitly.")
+    parser.add_argument("--scaffold", choices=["basic", "allQ", "allq", "allqd", "og", "qwenbasic", "qwenallq", "mirobasic", "miroallq", "gptossbasic", "gptossallq"], default="basic",
+                       help="Agent scaffold to use (default: basic). Native Qwen/Miro/GPT-OSS variants must be selected explicitly.")
     parser.add_argument("--provider", choices=["vllm", "openrouter"], default="openrouter",
                        help="Inference provider: 'vllm' (local) or 'openrouter' (API)")
     parser.add_argument("--model_path", default=MODEL_PATH,
@@ -742,7 +784,7 @@ def main():
     parser.add_argument("--vllm_request_timeout", type=float, default=120.0,
                        help="vLLM request timeout in seconds for chat/embeddings calls (default 120)")
     parser.add_argument("--vllm_enable_tools", action="store_true", default=False,
-                       help="Start vLLM servers with tool-calling enabled (required for native Qwen tool calls)")
+                       help="Start vLLM servers with tool-calling enabled (required for native Qwen/Miro tool calls)")
     parser.add_argument("--vllm_enable_prefix_caching", action=argparse.BooleanOptionalAction, default=True,
                        help="Enable vLLM automatic prefix caching for chat/matcher servers (default: on)")
     parser.add_argument("--vllm_tool_call_parser", default=None,
@@ -1223,9 +1265,13 @@ def main():
             max_submit_retries=args.max_retries,
             memory_dir=agent_dir,
             enable_memory=True,
+            tool_result_keep_last=int(getattr(args, 'tool_result_keep_last', -1)),
             sampling_params={
                 'temperature': args.temperature,
                 'max_tokens': args.max_tokens,
+                **({'top_p': float(args.top_p)} if getattr(args, 'top_p', None) is not None else {}),
+                **({'top_k': int(args.top_k)} if getattr(args, 'top_k', None) is not None else {}),
+                **({'repetition_penalty': float(args.repetition_penalty)} if getattr(args, 'repetition_penalty', None) is not None else {}),
             },
             search_cutoff_days=args.search_cutoff_days,
             timegap_days=args.timegap_days,
@@ -1275,6 +1321,23 @@ def main():
                 search_tool=search_tool,
                 start_date=sim_start
             )
+        elif args.scaffold == 'mirobasic':
+            agent = MiroBasicAgent(
+                agent_id=agent_id,
+                inference_provider=inference_provider,
+                config=agent_config,
+                model_name=model_name,
+                search_tool=search_tool
+            )
+        elif args.scaffold == 'miroallq':
+            agent = MiroAllQAgent(
+                agent_id=agent_id,
+                inference_provider=inference_provider,
+                config=agent_config,
+                model_name=model_name,
+                search_tool=search_tool,
+                start_date=sim_start
+            )
         elif args.scaffold == 'gptossbasic':
             agent = GPTOSSBasicAgent(
                 agent_id=agent_id,
@@ -1313,7 +1376,8 @@ def main():
         else:
             raise ValueError(
                 f"Unknown scaffold: {args.scaffold}. Only 'basic', 'allQ', 'allqd', 'og', "
-                "'qwenbasic', 'qwenallq', 'gptossbasic', and 'gptossallq' are supported."
+                "'qwenbasic', 'qwenallq', 'mirobasic', 'miroallq', 'gptossbasic', and "
+                "'gptossallq' are supported."
             )
         agents.append(agent)
         print(f"  Created agent: {agent_id}")

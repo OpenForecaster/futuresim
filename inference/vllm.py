@@ -249,14 +249,15 @@ class VLLMInference:
             if self.enable_prefix_caching:
                 cmd += ["--enable-prefix-caching"]
         
-            # Tool calling on vLLM's OpenAI server requires extra flags in newer vLLM.
-            # We keep this behind a toggle because older vLLM versions will error on
-            # unknown flags.
+            # vLLM only needs auto-tool-choice flags when the server itself should
+            # parse model output into tool calls. Some scaffolds, like Miro, still
+            # pass tool schemas in the request but intentionally parse the emitted
+            # text client-side.
             if self.enable_tools:
-                parser_name = self.tool_call_parser or "openai"
-                cmd += ["--enable-auto-tool-choice", "--tool-call-parser", parser_name]
-                if self.tool_parser_plugin:
-                    cmd += ["--tool-parser-plugin", self.tool_parser_plugin]
+                if self.tool_call_parser:
+                    cmd += ["--enable-auto-tool-choice", "--tool-call-parser", self.tool_call_parser]
+                    if self.tool_parser_plugin:
+                        cmd += ["--tool-parser-plugin", self.tool_parser_plugin]
         
             # Log to a proper location - try output_dir from environment, fallback to /tmp
             import os
@@ -657,6 +658,10 @@ class VLLMInference:
         # Add optional params
         if "top_p" in sampling_params:
             payload["top_p"] = sampling_params["top_p"]
+        if "top_k" in sampling_params:
+            payload["top_k"] = sampling_params["top_k"]
+        if "repetition_penalty" in sampling_params:
+            payload["repetition_penalty"] = sampling_params["repetition_penalty"]
         if "stop" in sampling_params:
             payload["stop"] = sampling_params["stop"]
 
@@ -725,6 +730,10 @@ class VLLMInference:
         }
         if "top_p" in sampling_params:
             payload["top_p"] = sampling_params["top_p"]
+        if "top_k" in sampling_params:
+            payload["top_k"] = sampling_params["top_k"]
+        if "repetition_penalty" in sampling_params:
+            payload["repetition_penalty"] = sampling_params["repetition_penalty"]
         if "stop" in sampling_params:
             payload["stop"] = sampling_params["stop"]
         if "tools" in sampling_params:
@@ -782,7 +791,7 @@ class VLLMInference:
             instructions: System/developer instructions string.
             input_messages: Conversation as OpenAI-style message dicts (non-system).
             sampling_params: Supports temperature, max_tokens (mapped to max_output_tokens),
-                tools, tool_choice, top_p, stop.
+                tools, tool_choice, top_p, top_k, stop.
 
         Returns:
             Tuple of (response_text, usage_dict)
@@ -798,6 +807,10 @@ class VLLMInference:
         }
         if "top_p" in sampling_params:
             payload["top_p"] = sampling_params["top_p"]
+        if "top_k" in sampling_params:
+            payload["top_k"] = sampling_params["top_k"]
+        if "repetition_penalty" in sampling_params:
+            payload["repetition_penalty"] = sampling_params["repetition_penalty"]
         if "stop" in sampling_params:
             payload["stop"] = sampling_params["stop"]
         if "tools" in sampling_params:
@@ -872,6 +885,10 @@ class VLLMInference:
         }
         if "top_p" in sampling_params:
             payload["top_p"] = sampling_params["top_p"]
+        if "top_k" in sampling_params:
+            payload["top_k"] = sampling_params["top_k"]
+        if "repetition_penalty" in sampling_params:
+            payload["repetition_penalty"] = sampling_params["repetition_penalty"]
         if "stop" in sampling_params:
             payload["stop"] = sampling_params["stop"]
         if "tools" in sampling_params:

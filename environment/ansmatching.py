@@ -11,6 +11,8 @@ to parallelise OpenRouter calls (up to ``max_concurrency`` at a time).
 
 from typing import List, Dict, Optional, Callable, Tuple
 import asyncio
+import atexit
+import json
 import os
 import re
 import time
@@ -193,13 +195,14 @@ class AnswerMatcher:
         inference_provider,
         logger=None,
         cache_path: str = None,
-        timing_callback: Optional[Callable[[float, float], None]] = None
+        timing_callback: Optional[Callable[[float, float], None]] = None,
     ):
         """
         Args:
             inference_provider: Object with chat(messages, sampling_params) method.
             logger: Optional SimLogger for logging matcher decisions.
-            cache_path: Optional path to save/load persistent cache (JSON).
+            cache_path: Optional path to load/save persistent cache (JSON). Loaded at init;
+                merged writes happen only from :meth:`persist_cache` (e.g. process exit).
             timing_callback: Optional callback(duration_seconds, cost_usd) for matcher latency/cost.
         """
         self.inference = inference_provider
@@ -209,12 +212,14 @@ class AnswerMatcher:
         self._timing_count = 0
         self._timing_total_seconds = 0.0
         self._timing_total_cost = 0.0
-        
-        # Simple cache: (predicted, ground_truth, qid) -> bool
+        self._cache_dirty = False
+
+        # (pred_norm, truth_norm, qid, title_norm) -> bool
         self._cache: Dict[tuple, bool] = {}
-        
+
         if cache_path:
             self.load_cache(cache_path)
+            atexit.register(self._atexit_persist_cache)
 
     def _record_timing(self, duration: float, cost: float = 0) -> None:
         """Record matcher call timing and forward to optional callback."""
@@ -228,41 +233,138 @@ class AnswerMatcher:
                 # Timing callback should never break matcher correctness.
                 pass
     
+    @staticmethod
+    def _key_to_disk(k: tuple) -> str:
+        """Stable JSON key for on-disk cache entries."""
+        if len(k) == 3:
+            k = (k[0], k[1], k[2], "")
+        if len(k) != 4:
+            raise ValueError(f"Invalid matcher cache key tuple: {k!r}")
+        return json.dumps([k[0], k[1], k[2], k[3]], ensure_ascii=False, sort_keys=False)
+
+    @staticmethod
+    def _disk_to_key(s: str) -> tuple:
+        try:
+            parts = json.loads(s)
+            if isinstance(parts, list) and len(parts) == 4:
+                return tuple(str(x) for x in parts)
+        except Exception:
+            pass
+        legacy = s.split("|||")
+        if len(legacy) == 3:
+            return (legacy[0], legacy[1], legacy[2], "")
+        if len(legacy) == 4:
+            return tuple(legacy)
+        raise ValueError(f"Unrecognized matcher cache key: {s!r}")
+
     def load_cache(self, path: str):
-        """Load cache from a JSON file."""
-        import os, json
+        """Load cache from a JSON object mapping string keys -> bool."""
         if os.path.exists(path):
             try:
-                with open(path, 'r') as f:
+                with open(path, "r", encoding="utf-8") as f:
                     raw_cache = json.load(f)
-                    # Keys were strings in JSON, convert back to tuples
-                    for k, v in raw_cache.items():
-                        parts = k.split("|||")
-                        if len(parts) == 3:
-                            self._cache[tuple(parts)] = v
+                for k, v in raw_cache.items():
+                    key = self._disk_to_key(str(k))
+                    self._cache[key] = bool(v)
                 if self.logger:
                     print(f"  Loaded matcher cache: {len(self._cache)} entries from {path}")
             except Exception as e:
                 print(f"  Error loading matcher cache: {e}")
 
-    def save_cache(self):
-        """Save current cache to JSON file."""
+    def persist_cache(self) -> None:
+        """Merge in-memory cache into the JSON file (atomic replace, POSIX file lock)."""
         if not self.cache_path:
             return
-            
-        import json
+        path = str(self.cache_path)
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        lock_path = path + ".lock"
+        tmp_path = path + ".tmp"
+        written = False
+
         try:
-            # Convert tuple keys to strings for JSON
-            raw_cache = {f"{k[0]}|||{k[1]}|||{k[2]}": v for k, v in self._cache.items()}
-            with open(self.cache_path, 'w') as f:
-                json.dump(raw_cache, f)
-        except Exception as e:
-            print(f"  Error saving matcher cache: {e}")
+            import fcntl  # type: ignore
+
+            with open(lock_path, "a+", encoding="utf-8") as lockf:
+                fcntl.flock(lockf.fileno(), fcntl.LOCK_EX)
+                try:
+                    merged: Dict[str, bool] = {}
+                    if os.path.exists(path):
+                        try:
+                            with open(path, "r", encoding="utf-8") as rf:
+                                cur = json.load(rf)
+                            if isinstance(cur, dict):
+                                merged = {str(k): bool(v) for k, v in cur.items()}
+                        except Exception:
+                            merged = {}
+                    for tup, val in self._cache.items():
+                        merged[self._key_to_disk(tup)] = bool(val)
+                    payload = json.dumps(merged, ensure_ascii=False, sort_keys=True)
+                    with open(tmp_path, "w", encoding="utf-8") as wf:
+                        wf.write(payload)
+                    os.replace(tmp_path, path)
+                    written = True
+                finally:
+                    fcntl.flock(lockf.fileno(), fcntl.LOCK_UN)
+        except Exception:
+            # Non-POSIX or lock failure: best-effort single-writer replace.
+            try:
+                merged = {}
+                if os.path.exists(path):
+                    try:
+                        with open(path, "r", encoding="utf-8") as rf:
+                            cur = json.load(rf)
+                        if isinstance(cur, dict):
+                            merged = {str(k): bool(v) for k, v in cur.items()}
+                    except Exception:
+                        merged = {}
+                for tup, val in self._cache.items():
+                    merged[self._key_to_disk(tup)] = bool(val)
+                payload = json.dumps(merged, ensure_ascii=False, sort_keys=True)
+                with open(tmp_path, "w", encoding="utf-8") as wf:
+                    wf.write(payload)
+                os.replace(tmp_path, path)
+                written = True
+            except Exception as exc:
+                print(f"  Error saving matcher cache: {exc}")
+        finally:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+
+        if written:
+            self._cache_dirty = False
+
+    def save_cache(self):
+        """Backward-compatible alias for :meth:`persist_cache`."""
+        self.persist_cache()
+
+    def _atexit_persist_cache(self) -> None:
+        try:
+            if self.cache_path and self._cache_dirty:
+                self.persist_cache()
+        except Exception:
+            pass
 
     def _normalize(self, outcome: str) -> str:
         """Normalize outcome for exact match comparison."""
         return outcome.strip().lower()
-    
+
+    def _make_cache_key(
+        self,
+        pred_norm: str,
+        truth_norm: str,
+        question_id: Optional[str],
+        question_title: Optional[str],
+    ) -> tuple:
+        return (
+            pred_norm,
+            truth_norm,
+            str(question_id) if question_id else "None",
+            self._normalize(question_title or ""),
+        )
+
     def is_equivalent(self, predicted: str, ground_truth: str, 
                       question_id: str = None, question_title: str = None,
                       match_type: str = "is_equivalent") -> bool:
@@ -271,24 +373,27 @@ class AnswerMatcher:
         """
         pred_norm = self._normalize(predicted)
         truth_norm = self._normalize(ground_truth)
-        
+
         # Exact match
         if pred_norm == truth_norm:
             return True
-        
-        # Check cache
-        cache_key = (pred_norm, truth_norm, str(question_id) if question_id else "None")
+
+        cache_key = self._make_cache_key(pred_norm, truth_norm, question_id, question_title)
         if cache_key in self._cache:
             return self._cache[cache_key]
-        
+
+        legacy_key = (pred_norm, truth_norm, str(question_id) if question_id else "None")
+        if legacy_key in self._cache:
+            val = self._cache[legacy_key]
+            self._cache[cache_key] = val
+            return val
+
         # Ask LLM
         result = self._llm_is_equivalent(predicted, ground_truth, question_id, question_title, match_type)
         self._cache[cache_key] = result
-        
-        # Save on update
         if self.cache_path:
-            self.save_cache()
-            
+            self._cache_dirty = True
+
         return result
     
     def _llm_is_equivalent(self, predicted: str, ground_truth: str,
@@ -358,9 +463,14 @@ class AnswerMatcher:
             if pred_norm == truth_norm:
                 results[i] = True
                 continue
-            cache_key = (pred_norm, truth_norm, str(qid) if qid else "None")
+            cache_key = self._make_cache_key(pred_norm, truth_norm, qid, qtitle)
             if cache_key in self._cache:
                 results[i] = self._cache[cache_key]
+                continue
+            legacy_key = (pred_norm, truth_norm, str(qid) if qid else "None")
+            if legacy_key in self._cache:
+                results[i] = self._cache[legacy_key]
+                self._cache[cache_key] = self._cache[legacy_key]
                 continue
             prompt = build_is_equivalent_prompt(predicted, ground_truth, qtitle)
             pending_indices.append(i)
@@ -404,8 +514,8 @@ class AnswerMatcher:
                     metadata={"duration_seconds": round(per_call_duration, 4), "batch": True},
                 )
 
-        if self.cache_path:
-            self.save_cache()
+        if pending_messages and self.cache_path:
+            self._cache_dirty = True
 
         return [r if r is not None else False for r in results]
 
@@ -427,8 +537,9 @@ class AnswerMatcher:
             truth_norm = self._normalize(ground_truth)
             if pred_norm == truth_norm:
                 continue
-            cache_key = (pred_norm, truth_norm, str(qid) if qid else "None")
-            if cache_key not in self._cache:
+            cache_key = self._make_cache_key(pred_norm, truth_norm, qid, qtitle)
+            legacy_key = (pred_norm, truth_norm, str(qid) if qid else "None")
+            if cache_key not in self._cache and legacy_key not in self._cache:
                 uncached.append((predicted, ground_truth, qid, qtitle))
         if not uncached:
             return

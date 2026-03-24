@@ -1,0 +1,66 @@
+# Warmup-only run for memory A/B test.
+# Runs Day 0 warmup + 2 loop days, then stops.
+# Use the output directory as restart_from for the mem/nomem restart configs.
+#
+# Usage: python mpi_scripts/run_sim/submit_sim.py --config configs/shared/allq_warmup_only.yaml --runs 1
+
+# --- Simulation Meta ---
+sim_name: "allq_skysports_300_warmup_only"
+start_date: "2025-05-01"
+end_date: "2025-04-24"       # Minimal loop: warmup day (04-24) + 1 day (04-25)
+lookback_days: 7
+search_cutoff_days: 0
+split: "skysports_300"
+
+# Load the FULL question set (resolution_end decoupled from end_date)
+resolution_end: "2025-12-14"
+# resolution_end: "2025-08-23"
+
+# --- Data Paths ---
+dataset: "openforesight"
+dataset_path: "/fast/nchandak/datasets/OpenForesight"
+min_forecasters: 10
+resolved_only: true
+output_base: "/is/cluster/fast/sgoel/forecasting/current_sim"
+warmup_parallelism: 64
+
+# --- Search Settings ---
+search_db: "/is/cluster/fast/sgoel/forecasting/news/deduped_articles/lance/Qwen3-Embedding-8B"
+embedding_model: "/is/cluster/fast/sgoel/models/Qwen3-Embedding-8B"
+embedding_gpu_mem: 0.7
+
+# --- Answer Matching ---
+matching: "openrouter"
+matcher: "deepseek/deepseek-v3.2"
+matcher_gpu_mem: 0.0
+max_model_len: 8192
+
+# --- Inference Defaults ---
+rate_limit: 32.0
+parallel: true
+
+# --- Agents Configuration ---
+defaults:
+  provider: "openrouter"
+  scaffold: "allQ"
+  max_actions: 50
+  warmup_max_actions: 10
+  temperature: 1.0
+  max_tokens: 32768
+  max_retries: 3
+  reasoning: 
+    effort: "high"
+
+agents:
+  # - model: "deepseek/deepseek-v3.2"
+  # - model: "google/gemini-3.1-flash-lite-preview"
+  # - model: "google/gemini-3-flash-preview"
+  # - model: "qwen/qwen3.5-397b-a17b"
+  # - model: "openai/gpt-5-mini"
+  # - model: "z-ai/glm-4.7-flash"
+  # - model: "google/gemini-3.1-pro-preview"
+  # - model: "x-ai/grok-4.1-fast"
+  - model: "gpt-5.2"
+    provider: "azure"
+  # - model: "google/gemini-3-flash-preview"
+  #   provider: "openrouter"

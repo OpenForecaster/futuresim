@@ -1,0 +1,94 @@
+# AllQ full simulation using local MiroThinker-1.7-mini via vLLM, with
+# token-budgeted native tool prompting.
+#
+# Usage:
+#   python mpi_scripts/run_sim/submit_sim.py --config configs/mirothinker/allq_sim_mirothinker_1.7mini.yaml --runs 1
+#
+# Notes:
+# - Uses explicit `miroallq` scaffold for the native MiroThinker agent path.
+# - Keeps the AllQ/token-budget loop structure from the local Qwen sim configs,
+#   while adopting MiroThinker's recommended context/sampling defaults.
+# - MiroThinker-1.7-mini is a Qwen3-MoE derivative, so we keep the 2-GPU TP+EP
+#   launch shape used for the comparable local Qwen MoE runs.
+# - max_actions / warmup_max_actions cap tool turns per day and per warmup question.
+
+run_script: "run_sim.sh"
+
+# --- Simulation Meta ---
+sim_name: "allq_sim_mirothinker-1.7-mini"
+start_date: "2025-05-01"
+end_date: "2025-08-23"
+resolution_start: "2025-05-01"
+resolution_end: "2025-08-23"
+lookback_days: 7
+search_cutoff_days: 0
+split: "test"
+
+# --- HTCondor Resources ---
+resources:
+  gpus: 3
+  cpus: 24
+  memory_gb: 256
+  disk_gb: 50
+  bid: 55
+  requirements: "TARGET.CUDACapability >= 9.0 && TARGET.CUDAGlobalMemoryMb > 70000 && TARGET.CUDAGlobalMemoryMb < 120000 && TARGET.Machine =!= \"i103.internal.cluster.is.localnet\""
+
+# --- Data Paths ---
+dataset: "openforesight"
+dataset_path: "${FSIM_DATASET_PATH}"
+min_forecasters: 10
+resolved_only: true
+output_base: "${FSIM_OUTPUT_BASE}"
+warmup_parallelism: 32
+
+# --- Search Settings ---
+search_db: "${FSIM_SEARCH_DB}"
+embedding_model: "${FSIM_EMBEDDING_MODEL}"
+embedding_gpu_mem: 0.7
+
+# --- Answer Matching ---
+matching: "openrouter"
+matcher: "deepseek/deepseek-v3.2"
+matcher_gpu_mem: 0.0
+max_model_len: 262144
+agent_max_model_len: 262144
+embedding_max_model_len: 32768
+
+# --- vLLM Agent Runtime ---
+vllm_gpu_mem: 0.85
+vllm_tensor_parallel_size: 2
+vllm_max_num_seqs: 64
+vllm_startup_timeout: 900
+vllm_enable_expert_parallel: true
+vllm_all2all_backend: "deepep_high_throughput"
+vllm_enable_tools: true
+language_model_only: true
+
+# --- Local 3-GPU Pinning ---
+aux_cuda_visible_devices: "2"
+agent_cuda_visible_devices: "0,1"
+
+# --- Inference Defaults ---
+rate_limit: 32.0
+parallel: true
+
+# --- Agents Configuration ---
+defaults:
+  provider: "vllm"
+  scaffold: "miroallq"
+  max_actions: 25
+  warmup_max_actions: 25
+  max_total_tokens: 262144
+  warmup_max_total_tokens: 262144
+  submit_reserve_tokens: 8192
+  force_submit_threshold_tokens: 16384
+  tool_result_keep_last: 5
+  temperature: 1.0
+  top_p: 0.95
+  repetition_penalty: 1.05
+  max_tokens: 16384
+  max_retries: 3
+
+agents:
+  - model: "${FSIM_MIROTHINKER_17_MINI_MODEL_PATH}"
+    provider: "vllm"

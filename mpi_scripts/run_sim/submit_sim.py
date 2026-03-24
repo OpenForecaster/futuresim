@@ -4,10 +4,10 @@ Submit simulation job(s) to HTCondor.
 
 Usage:
     # Basic:
-    python submit_sim.py --config configs/allq_sim_ds.yaml --runs 1
+    python submit_sim.py --config configs/deepseek/allq_sim_ds.yaml --runs 1
 
     # Override config keys at submit time (repeatable):
-    python submit_sim.py --config configs/allq_sim_ds.yaml \\
+    python submit_sim.py --config configs/deepseek/allq_sim_ds.yaml \\
         --set sim_name=allq_tmp \\
         --set defaults.temperature=0.2 \\
         --set resources.cpus=32
@@ -138,10 +138,10 @@ def submit_sim_job(
     # 2. Setup directories
     resume_path = config.get("resume")
     if resume_path:
-        run_dir = Path(resume_path)
+        run_dir = Path(resume_path).expanduser().resolve()
     else:
-        log_base = Path(str(config.get("log_base", DEFAULT_SIM_LOG_BASE)))
-        run_dir = log_base / base_sim_name / unique_name
+        log_base = Path(str(config.get("log_base", DEFAULT_SIM_LOG_BASE))).expanduser()
+        run_dir = (log_base / base_sim_name / unique_name).resolve()
         run_dir.mkdir(parents=True, exist_ok=True)
     
     # 3. Prepare run specific config
@@ -150,7 +150,7 @@ def submit_sim_job(
         run_config["sim_name"] = unique_name
     
     # Save run config
-    config_path = run_dir / "config.yaml"
+    config_path = (run_dir / "config.yaml").resolve()
     import yaml
     with open(config_path, "w") as f:
         yaml.dump(run_config, f)

@@ -1,0 +1,58 @@
+# Active memory full run: mem_df + meta-insights.
+#
+# Usage: python aisa_scripts/run_sim/submit_sim_aisa.py --config configs/shared/allq_mem_restart_aisa.yaml --runs 1 --gpus 1 --memory 80 --time 2-00:00:00
+
+# --- Restart ---
+# Pass at submit time: --set restart_from=/path/to/run --set restart_from_day=2025-04-25
+
+# --- Simulation Meta ---
+sim_name: "allq_active_mem_deepseek_aisa"
+start_date: "2025-05-01"
+end_date: "2025-08-23"
+lookback_days: 7
+search_cutoff_days: 0
+split: "test"
+
+# --- Data Paths ---
+dataset: "openforesight"
+dataset_path: "${FSIM_DATASET_PATH}"
+dataset_cache: "${FSIM_DATASET_CACHE}"
+min_forecasters: 10
+resolved_only: true
+output_base: "${FSIM_OUTPUT_BASE}"
+warmup_parallelism: 64
+
+# --- Search Settings ---
+search_db: "${FSIM_SEARCH_DB}"
+embedding_model: "${FSIM_EMBEDDING_MODEL}"
+embedding_gpu_mem: 0.7
+
+# --- Answer Matching ---
+matching: "openrouter"
+matcher: "deepseek/deepseek-v3.2"
+matcher_gpu_mem: 0.0
+max_model_len: 8192
+
+# --- Inference Defaults ---
+rate_limit: 32.0
+parallel: true
+
+# --- Cheat Feedback (privileged directional-correctness before memory update) ---
+# cheat_feedback: true
+# cheat_feedback_detail: "direction"  # "full" (Brier scores) or "direction" (labels only)
+
+# --- Agents Configuration ---
+defaults:
+  provider: "openrouter"
+  scaffold: "allQ"
+  max_actions: 20
+  warmup_max_actions: 10
+  temperature: 0.7
+  max_tokens: 2048
+  max_retries: 3
+  enable_memory: true
+  memory_format: "active"
+
+agents:
+  - model: "deepseek/deepseek-v3.2"
+    provider: "openrouter"
