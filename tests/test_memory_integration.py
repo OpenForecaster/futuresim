@@ -90,9 +90,9 @@ class TestParseAndExecuteAdd:
 </action>'''
         parsed = parse_action(response)
 
-        assert parsed.action_type == "memory_add"
+        assert parsed.action_type == "memory_new"
         assert parsed.error is None
-        data = parsed.memory_add_data
+        data = parsed.memory_new_data
         assert data["name"] == "q99-climate-prediction"
         assert "Q99" in data["description"]
 
@@ -119,7 +119,7 @@ class TestParseAndExecuteAdd:
 <content>{"c" * 3000}</content>
 </action>'''
         parsed = parse_action(response)
-        data = parsed.memory_add_data
+        data = parsed.memory_new_data
         name = mem.add_entry(data["name"], data["description"], data["content"])
         entry = mem._entries[0]
         assert len(entry.name) <= FIELD_LIMITS["name"]
@@ -133,7 +133,7 @@ class TestParseAndExecuteAdd:
 <content>Content with <tags> stripped.</content>
 </action>'''
         parsed = parse_action(response)
-        data = parsed.memory_add_data
+        data = parsed.memory_new_data
         mem.add_entry(data["name"], data["description"], data["content"])
         entry = mem._entries[0]
         assert "<i>" not in entry.description
@@ -221,9 +221,9 @@ class TestMultiStepScenarios:
 </action>'''
         parsed = parse_action(add_resp)
         name = mem.add_entry(
-            parsed.memory_add_data["name"],
-            parsed.memory_add_data["description"],
-            parsed.memory_add_data["content"],
+            parsed.memory_new_data["name"],
+            parsed.memory_new_data["description"],
+            parsed.memory_new_data["content"],
         )
         assert mem.entry_count == 1
 
@@ -258,9 +258,9 @@ class TestMultiStepScenarios:
             resp = f'<action type="memory_add">\n<name>{name}</name>\n<description>{desc}</description>\n<content>{content}</content>\n</action>'
             parsed = parse_action(resp)
             n = mem.add_entry(
-                parsed.memory_add_data["name"],
-                parsed.memory_add_data["description"],
-                parsed.memory_add_data["content"],
+                parsed.memory_new_data["name"],
+                parsed.memory_new_data["description"],
+                parsed.memory_new_data["content"],
             )
             names.append(n)
 
@@ -942,7 +942,7 @@ class TestLimitsAndEdgeCases:
 </action>'''
         parsed = parse_action(response)
         assert parsed.error is None
-        assert "3:1" in parsed.memory_add_data["content"]
+        assert "3:1" in parsed.memory_new_data["content"]
 
     def test_retrieve_with_whitespace_name(self, populated_mem):
         """Names with leading/trailing whitespace should be trimmed."""

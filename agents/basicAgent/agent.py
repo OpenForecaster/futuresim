@@ -583,7 +583,7 @@ class BasicAgent(BaseAgent):
                     category=upd.get("category"),
                 )
 
-        if parsed.action_type in ("memory_retrieve", "memory_add", "memory_update", "memory_delete"):
+        if parsed.action_type in ("memory_retrieve", "memory_new", "memory_update", "memory_delete"):
             self._handle_memory_action(messages, forecast_interface, response, parsed, budget, reasoning=reasoning)
         elif parsed.action_type in ("mem_add", "mem_update", "mem_delete"):
             self._handle_mem_action(messages, forecast_interface, response, parsed, budget, reasoning=reasoning)
@@ -606,7 +606,7 @@ class BasicAgent(BaseAgent):
                 feedback = f"MEMORY: Applied {len(adds)} adds, {len(deletes)} deletes. Total entries: {self._memory.entry_count}."
                 self._append_with_budget(messages, budget, {"role": "user", "content": budget.format_feedback(feedback)})
             else:
-                feedback = "No recognized memory action. Use memory_add/update/delete or <action type=\"next\"/> to finish."
+                feedback = "No recognized memory action. Use memory_new/update/delete or <action type=\"next\"/> to finish."
                 self._append_with_budget(messages, budget, {"role": "user", "content": budget.format_feedback(feedback)})
 
     # =========================================================================
@@ -727,7 +727,7 @@ class BasicAgent(BaseAgent):
                 self._handle_search(
                     messages, forecast_interface, response, parsed, budget, reasoning=reasoning
                 )
-            elif parsed.action_type in ("memory_retrieve", "memory_add", "memory_update", "memory_delete"):
+            elif parsed.action_type in ("memory_retrieve", "memory_new", "memory_update", "memory_delete"):
                 self._handle_memory_action(
                     messages, forecast_interface, response, parsed, budget, reasoning=reasoning
                 )
@@ -841,16 +841,17 @@ class BasicAgent(BaseAgent):
             else:
                 feedback = f"MEMORY ENTRY:\n{entry}"
             self._log_action(forecast_interface, messages, response, "memory_retrieve", budget, reasoning=reasoning)
-        elif parsed.action_type == "memory_add":
-            data = parsed.memory_add_data
+        elif parsed.action_type == "memory_new":
+            data = parsed.memory_new_data
             try:
                 entry_name = self._memory.add_entry(data["name"], data["description"], data["content"])
                 feedback = f"MEMORY: Added entry [{entry_name}]. Total entries: {self._memory.entry_count}/{self._memory._max_entries if hasattr(self._memory, '_max_entries') else '?'}."
             except ValueError as exc:
                 feedback = f"MEMORY ERROR: {exc}"
-            self._log_action(forecast_interface, messages, response, "memory_add", budget, reasoning=reasoning)
+            self._log_action(forecast_interface, messages, response, "memory_new", budget, reasoning=reasoning)
         elif parsed.action_type == "memory_update":
-            ok = self._memory.update_entry(parsed.memory_entry_name, **parsed.memory_update_data)
+            update_data = {k: v for k, v in parsed.memory_update_data.items() if k != "name"}
+            ok = self._memory.update_entry(parsed.memory_entry_name, **update_data)
             if ok:
                 feedback = f"MEMORY: Updated [{parsed.memory_entry_name}]."
             else:
@@ -1254,21 +1255,21 @@ You have access to a news article database. {self._search_results_description()}
 <action type="memory_retrieve">ENTRY_NAME</action>
 Retrieves the full content of a meta-insight entry by its name from the index above.
 
-### {next_num + 1}. Add Memory Entry
-<action type="memory_add">
+### {next_num + 1}. Add a new Memory Entry
+<action type="memory_new">
 <name>lowercase-hyphenated-name-with-qid (max 64 chars, a-z 0-9 hyphens only)</name>
 <description>What it stores + when to use it + QIDs (max 256 chars)</description>
 <content>Full content (max {self._memory._meta._field_limits['content'] if isinstance(self._memory, ActiveMemory) else 1024} chars)</content>
 </action>
 
-### {next_num + 2}. Update Memory Entry
+### {next_num + 2}. Update an existing Memory Entry
 <action type="memory_update" name="ENTRY_NAME">
 <description>Updated description</description>
 <content>Updated content</content>
 </action>
 Only include the fields you want to change.
 
-### {next_num + 3}. Delete Memory Entry
+### {next_num + 3}. Delete an existing Memory Entry
 <action type="memory_delete">ENTRY_NAME</action>
 """
             next_num += 4
@@ -1509,7 +1510,7 @@ When ready to move on, use <action type="next"/> to end this session.
                         category=upd.get("category"),
                     )
 
-            if parsed.action_type in ("memory_retrieve", "memory_add", "memory_update", "memory_delete"):
+            if parsed.action_type in ("memory_retrieve", "memory_new", "memory_update", "memory_delete"):
                 self._handle_memory_action(messages, forecast_interface, response, parsed, mem_budget, reasoning=reasoning)
             elif parsed.action_type in ("mem_add", "mem_update", "mem_delete"):
                 self._handle_mem_action(messages, forecast_interface, response, parsed, mem_budget, reasoning=reasoning)
@@ -1589,22 +1590,23 @@ Delete stale entries (resolved questions with no useful lesson, outdated facts).
 
 ### Memory tools (use one per turn):
 
-Retrieve: <action type="memory_retrieve">ENTRY_NAME</action>
+Retrieve an existing entry: <action type="memory_retrieve">ENTRY_NAME</action>
 
-Add:
-<action type="memory_add">
+Add a new entry:
+<action type="memory_new">
 <name>lowercase-hyphenated-name-with-qid (max 64 chars, a-z 0-9 hyphens only)</name>
 <description>What it stores + when to use it (max 256 chars, include QIDs)</description>
 <content>Full content (max 1024 chars). Include specific numbers, sources, reasoning.</content>
 </action>
 
-Update:
+Update an existing entry:
 <action type="memory_update" name="ENTRY_NAME">
 <description>Updated description</description>
 <content>Updated content</content>
 </action>
+Only include the fields you want to change.
 
-Delete: <action type="memory_delete">ENTRY_NAME</action>
+Delete an existing entry: <action type="memory_delete">ENTRY_NAME</action>
 
 Done: <action type="next"/>
 
@@ -1748,22 +1750,23 @@ Delete: <action type="mem_delete">Q123</action>
 
 ### Meta-insight tools (use one per turn):
 
-Retrieve: <action type="memory_retrieve">ENTRY_NAME</action>
+Retrieve an existing entry: <action type="memory_retrieve">ENTRY_NAME</action>
 
-Add:
-<action type="memory_add">
+Add a new entry:
+<action type="memory_new">
 <name>lowercase-hyphenated-name (max 64 chars, a-z 0-9 hyphens only)</name>
 <description>What it stores + when to use it (max 256 chars, include QIDs)</description>
 <content>Full content (max 400 chars). Cross-question patterns only.</content>
 </action>
 
-Update:
+Update an existing entry:
 <action type="memory_update" name="ENTRY_NAME">
 <description>Updated description</description>
 <content>Updated content</content>
 </action>
+Only include the fields you want to change.
 
-Delete: <action type="memory_delete">ENTRY_NAME</action>
+Delete an existing entry: <action type="memory_delete">ENTRY_NAME</action>
 
 Done: <action type="next"/>
 

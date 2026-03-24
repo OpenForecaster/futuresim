@@ -10,10 +10,12 @@ from agents.basicAgent.agent import BasicAgent
 from agents.basicAgent.search import SearchHandler
 from agents.utils.budget import BudgetTracker
 from agents.utils.forecast_parser import ParsedAction
+from agents.utils.memory import ActiveMemory, StructuredMemory
 from environment.interfaces import PredictionSubmission
 
 from .tools import (
     build_action_tools,
+    build_memory_phase_tools,
     chat_response_to_action,
     extract_assistant_message,
     extract_finish_reason,
@@ -66,6 +68,7 @@ class QwenBasicAgent(BasicAgent):
     def act(self, doc_interface, forecast_interface, current_date: date) -> List[Dict[str, Any]]:
         self._timer.reset()
         self._timer.start_day()
+        self._day_qids = set()
 
         if self._memory is not None:
             self._memory.set_date(current_date)
@@ -76,15 +79,19 @@ class QwenBasicAgent(BasicAgent):
         all_forecasts, context_limit_hit = self._run_qwen_action_loop(
             messages=messages,
             forecast_interface=forecast_interface,
+            current_date=current_date,
         )
 
-        if self._memory is not None and not context_limit_hit:
+        # Separate memory update only for BasicMemory (plain text, single-shot).
+        # StructuredMemory/ActiveMemory are handled inside _run_qwen_action_loop
+        # via the next-triggered or token-threshold-triggered memory phase.
+        if (
+            self._memory is not None
+            and not context_limit_hit
+            and not getattr(self, '_memory_phase_completed', False)
+            and not isinstance(self._memory, (StructuredMemory, ActiveMemory))
+        ):
             self._prompt_memory_update(messages, forecast_interface, current_date)
-        elif self._memory is not None:
-            print(
-                f"[{self.agent_id}] Skipping memory update because the session hit the model context limit.",
-                flush=True,
-            )
 
         self._timer.end_day()
         if self.config.memory_dir:
@@ -132,6 +139,7 @@ class QwenBasicAgent(BasicAgent):
         enable_search: Optional[bool] = None,
         warmup_budget: bool = False,
         max_actions: Optional[int] = None,
+        current_date: Optional[date] = None,
     ) -> Tuple[List[Dict[str, Any]], bool]:
         budget = self._create_budget_tracker(
             warmup=warmup_budget,
@@ -142,14 +150,29 @@ class QwenBasicAgent(BasicAgent):
 
         if enable_search is None:
             enable_search = bool(self._search_handler.is_available)
+
+        has_structured_memory = isinstance(getattr(self, '_memory', None), (StructuredMemory, ActiveMemory))
+        has_active_memory = isinstance(getattr(self, '_memory', None), ActiveMemory)
+
         tools = build_action_tools(
             enable_query=enable_query,
             enable_search=enable_search,
             max_outcomes_per_question=self.config.max_outcomes_per_question,
             max_search_results=self.config.max_search_results,
             search_chunk_tokens=self._search_handler.chunk_tokens,
+            enable_memory=has_structured_memory,
+            enable_mem_df=has_active_memory,
         )
         budget.bootstrap_context({"messages": messages, "tools": tools})
+
+        # Memory phase state
+        memory_phase = False
+        memory_phase_eligible = (
+            current_date is not None
+            and has_structured_memory
+            and budget.settings.memory_phase_threshold_tokens is not None
+        )
+        memory_tools = None  # lazy-built on first transition
 
         raw_stream = "warmup" if warmup_budget else "daily"
         final_submit_prompt_injected = False
@@ -158,7 +181,20 @@ class QwenBasicAgent(BasicAgent):
         pending_input_delta: List[Any] = list(messages)
 
         while not budget.is_exhausted():
-            force_final_submit_turn = target_qid is not None and budget.should_force_submit()
+            # --- Memory phase auto-transition on token threshold ---
+            if not memory_phase and memory_phase_eligible and budget.should_enter_memory_phase():
+                memory_phase = True
+                budget.memory_phase = True
+                if memory_tools is None:
+                    memory_tools = build_memory_phase_tools(
+                        enable_memory=has_structured_memory, enable_mem_df=has_active_memory,
+                    )
+                memory_prompt = self._build_memory_phase_prompt(current_date)
+                msg = {"role": "user", "content": memory_prompt}
+                self._append_with_budget(messages, budget, msg)
+                pending_input_delta.append(msg)
+
+            force_final_submit_turn = target_qid is not None and budget.should_force_submit() and not memory_phase
             if force_final_submit_turn and not final_submit_prompt_injected:
                 message = {
                     "role": "user",
@@ -168,11 +204,19 @@ class QwenBasicAgent(BasicAgent):
                 pending_input_delta.append(message)
                 final_submit_prompt_injected = True
 
-            effective_tools = tools
-            if force_final_submit_turn:
+            # Select tools for this turn
+            if memory_phase:
+                if memory_tools is None:
+                    memory_tools = build_memory_phase_tools(
+                        enable_memory=has_structured_memory, enable_mem_df=has_active_memory,
+                    )
+                effective_tools = memory_tools
+            elif force_final_submit_turn:
                 submit_only = [t for t in tools if t.get("function", {}).get("name") == "submit_forecasts"]
-                if submit_only:
-                    effective_tools = submit_only
+                effective_tools = submit_only if submit_only else tools
+            else:
+                effective_tools = tools
+
             model_input_delta = list(pending_input_delta)
             pending_input_delta = []
 
@@ -279,7 +323,7 @@ class QwenBasicAgent(BasicAgent):
                 forecast_interface=forecast_interface,
                 messages=messages,
                 rendered_response=rendered,
-                phase="llm",
+                phase="llm" if not memory_phase else "memory_update",
                 budget=budget,
                 qid=target_qid,
                 finish_reason=finish_reason,
@@ -300,7 +344,63 @@ class QwenBasicAgent(BasicAgent):
                 continue
 
             if parsed.action_type == "next":
-                break
+                if not memory_phase and memory_phase_eligible:
+                    # Transition to memory phase instead of ending the day
+                    memory_phase = True
+                    budget.memory_phase = True
+                    if memory_tools is None:
+                        memory_tools = build_memory_phase_tools(
+                            enable_memory=has_structured_memory, enable_mem_df=has_active_memory,
+                        )
+                    self._log_qwen_action(
+                        forecast_interface=forecast_interface,
+                        messages=messages,
+                        rendered_response=rendered,
+                        phase="next_entering_memory",
+                        budget=budget,
+                        qid=target_qid,
+                        raw_stream=raw_stream,
+                    )
+                    memory_prompt = self._build_memory_phase_prompt(current_date)
+                    msg = {"role": "user", "content": memory_prompt}
+                    self._append_with_budget(messages, budget, msg)
+                    pending_input_delta.append(msg)
+                    continue
+                else:
+                    phase_label = "memory_update_done" if memory_phase else "next_day"
+                    self._log_qwen_action(
+                        forecast_interface=forecast_interface,
+                        messages=messages,
+                        rendered_response=rendered,
+                        phase=phase_label,
+                        budget=budget,
+                        qid=target_qid,
+                        raw_stream=raw_stream,
+                    )
+                    break
+
+            # --- Memory action routing ---
+            if parsed.action_type in ("memory_retrieve", "memory_new", "memory_update", "memory_delete"):
+                before_len = len(messages)
+                self._qwen_handle_memory_action(
+                    messages=messages,
+                    parsed=parsed,
+                    tool_call=tool_calls[0] if tool_calls else None,
+                    budget=budget,
+                )
+                pending_input_delta.extend(messages[before_len:])
+                continue
+
+            if parsed.action_type in ("mem_add", "mem_update", "mem_delete"):
+                before_len = len(messages)
+                self._qwen_handle_mem_action(
+                    messages=messages,
+                    parsed=parsed,
+                    tool_call=tool_calls[0] if tool_calls else None,
+                    budget=budget,
+                )
+                pending_input_delta.extend(messages[before_len:])
+                continue
 
             if parsed.action_type == "query":
                 before_len = len(messages)
@@ -346,6 +446,13 @@ class QwenBasicAgent(BasicAgent):
             self._append_with_budget(messages, budget, message)
             pending_input_delta.append(message)
 
+        # Post-loop: persist memory if memory phase was entered
+        if memory_phase and self._memory is not None:
+            self._memory._save(current_date)
+        elif memory_phase_eligible and not memory_phase:
+            print(f"  [{self.agent_id}] Budget exhausted before memory phase. Memory not updated in-loop.")
+
+        self._memory_phase_completed = memory_phase
         return all_forecasts, context_limit_hit
 
     def _call_chat_json(
@@ -578,6 +685,115 @@ class QwenBasicAgent(BasicAgent):
         )
         budget.record_appended_item(appended)
         return submitted
+
+    def _qwen_handle_memory_action(
+        self,
+        *,
+        messages: List[Dict[str, Any]],
+        parsed: ParsedAction,
+        tool_call: Optional[Dict[str, Any]],
+        budget: BudgetTracker,
+    ) -> None:
+        """Handle memory tool calls (retrieve/new/update/delete) via Qwen tool output."""
+        budget.consume_action()
+        tool_name = {
+            "memory_retrieve": "memory_retrieve",
+            "memory_new": "memory_new",
+            "memory_update": "memory_update",
+            "memory_delete": "memory_delete",
+        }.get(parsed.action_type, "memory_retrieve")
+
+        if not isinstance(self._memory, (StructuredMemory, ActiveMemory)):
+            feedback = "MEMORY ERROR: Structured memory is not enabled."
+        elif parsed.error:
+            feedback = f"MEMORY ERROR: {parsed.error}"
+        elif parsed.action_type == "memory_retrieve":
+            entry = self._memory.retrieve(parsed.memory_entry_name)
+            if entry is None:
+                feedback = f"MEMORY ERROR: No entry with name '{parsed.memory_entry_name}'."
+            else:
+                feedback = f"MEMORY ENTRY:\n{entry}"
+        elif parsed.action_type == "memory_new":
+            data = parsed.memory_new_data
+            try:
+                entry_name = self._memory.add_entry(data["name"], data["description"], data["content"])
+                max_ent = self._memory._max_entries if hasattr(self._memory, '_max_entries') else '?'
+                feedback = f"MEMORY: Added entry [{entry_name}]. Total entries: {self._memory.entry_count}/{max_ent}."
+            except ValueError as exc:
+                feedback = f"MEMORY ERROR: {exc}"
+        elif parsed.action_type == "memory_update":
+            update_data = {k: v for k, v in parsed.memory_update_data.items() if k != "name"}
+            ok = self._memory.update_entry(parsed.memory_entry_name, **update_data)
+            if ok:
+                feedback = f"MEMORY: Updated [{parsed.memory_entry_name}]."
+            else:
+                feedback = f"MEMORY ERROR: No entry with name '{parsed.memory_entry_name}'."
+        elif parsed.action_type == "memory_delete":
+            ok = self._memory.delete_entry(parsed.memory_entry_name)
+            if ok:
+                feedback = f"MEMORY: Deleted [{parsed.memory_entry_name}]. Remaining: {self._memory.entry_count}."
+            else:
+                feedback = f"MEMORY ERROR: No entry with name '{parsed.memory_entry_name}'."
+        else:
+            feedback = f"MEMORY ERROR: Unknown memory action '{parsed.action_type}'."
+
+        appended = self._append_tool_output_message(
+            messages,
+            tool_call=tool_call,
+            tool_name=tool_name,
+            output=budget.format_feedback(feedback),
+        )
+        budget.record_appended_item(appended)
+
+    def _qwen_handle_mem_action(
+        self,
+        *,
+        messages: List[Dict[str, Any]],
+        parsed: ParsedAction,
+        tool_call: Optional[Dict[str, Any]],
+        budget: BudgetTracker,
+    ) -> None:
+        """Handle mem_df tool calls (mem_add/update/delete) for ActiveMemory via Qwen tool output."""
+        budget.consume_action()
+        tool_name = {
+            "mem_add": "mem_add",
+            "mem_update": "mem_update",
+            "mem_delete": "mem_delete",
+        }.get(parsed.action_type, "mem_add")
+
+        if not isinstance(self._memory, ActiveMemory):
+            feedback = "MEM ERROR: Active memory is not enabled."
+        elif parsed.error:
+            feedback = f"MEM ERROR: {parsed.error}"
+        elif parsed.action_type == "mem_add":
+            data = parsed.mem_data
+            self._memory.mem_add(
+                qid=data["qid"], question=data.get("question", ""),
+                memory=data["memory"], category=data.get("category", ""),
+            )
+            feedback = f"MEM: Added entry for Q{data['qid']}. Total: {self._memory.mem_count} entries."
+        elif parsed.action_type == "mem_update":
+            self._memory.mem_update(
+                qid=parsed.mem_qid, memory=parsed.mem_data["memory"],
+                category=parsed.mem_data.get("category"),
+            )
+            feedback = f"MEM: Updated entry for Q{parsed.mem_qid}."
+        elif parsed.action_type == "mem_delete":
+            ok = self._memory.mem_delete(parsed.mem_qid)
+            if ok:
+                feedback = f"MEM: Deleted Q{parsed.mem_qid}. Remaining: {self._memory.mem_count}."
+            else:
+                feedback = f"MEM ERROR: No entry for Q{parsed.mem_qid}."
+        else:
+            feedback = f"MEM ERROR: Unknown mem action '{parsed.action_type}'."
+
+        appended = self._append_tool_output_message(
+            messages,
+            tool_call=tool_call,
+            tool_name=tool_name,
+            output=budget.format_feedback(feedback),
+        )
+        budget.record_appended_item(appended)
 
     @staticmethod
     def _render_turn_for_logging(assistant_text: str, tool_calls: List[Dict[str, Any]]) -> str:

@@ -376,7 +376,7 @@ Guidelines:
 
 
 Memory tool call to add the entry:
-<action type="memory_add">
+<action type="memory_new">
 <name>q{qid}-lowercase-hyphenated-topic (max 64 chars, a-z 0-9 hyphens only)</name>
 <description>What this stores and when to use it (max 256 chars, include Question ID)</description>
 <content>Your key reasoning, evidence, confidence, and triggers for updating (max 1024 chars)</content>
@@ -394,13 +394,13 @@ Output only the action block above. No other text needed."""
             return None
 
         parsed = parse_action(response, self.config.max_outcomes_per_question)
-        if parsed.action_type == "memory_add" and parsed.memory_add_data:
-            return parsed.memory_add_data  # dict with {name, description, content}
+        if parsed.action_type == "memory_new" and parsed.memory_new_data:
+            return parsed.memory_new_data  # dict with {name, description, content}
 
         # Retry up to 3 times with the same context (strip failed attempt each time)
         print(
             f"[{self.agent_id}] Warmup structured memory parse failed for qid {qid}, retrying: "
-            f"action_type={parsed.action_type}, has_data={parsed.memory_add_data is not None}, "
+            f"action_type={parsed.action_type}, has_data={parsed.memory_new_data is not None}, "
             f"response_preview={response[:200]!r}"
         )
         for attempt in range(3):
@@ -413,8 +413,8 @@ Output only the action block above. No other text needed."""
                 continue
 
             parsed = parse_action(response, self.config.max_outcomes_per_question)
-            if parsed.action_type == "memory_add" and parsed.memory_add_data:
-                return parsed.memory_add_data
+            if parsed.action_type == "memory_new" and parsed.memory_new_data:
+                return parsed.memory_new_data
             print(
                 f"[{self.agent_id}] Warmup structured memory retry {attempt+1} failed for qid {qid}: "
                 f"response_preview={response[:200]!r}"

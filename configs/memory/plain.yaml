@@ -6,7 +6,7 @@
 # Pass at submit time: --set restart_from=/path/to/run --set restart_from_day=2025-04-25
 
 # --- Simulation Meta ---
-sim_name: "deepseek_plain_mem"
+sim_name: "ds_plain_mem_final"
 start_date: "2025-05-01"
 end_date: "2025-08-23"
 lookback_days: 7
