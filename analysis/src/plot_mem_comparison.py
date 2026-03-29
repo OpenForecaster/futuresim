@@ -65,7 +65,7 @@ def main():
         ax.set_title(f"{title}{subtitle}", fontsize=12, fontweight='bold', loc='left')
         ax.set_ylabel(col.replace('_', ' ').title(), fontsize=10)
         ax.grid(True, linestyle='--', alpha=0.4)
-        ax.legend(loc='upper right', fontsize=9)
+        ax.legend(loc='lower right', fontsize=9)
 
         # Add final-value annotations
         for df, label, color in [(df_mem, args.mem_label, colors['mem']),

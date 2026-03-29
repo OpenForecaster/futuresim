@@ -7,12 +7,13 @@ and budget integration.
 
 import json
 from datetime import date
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
 import pytest
 
 from agents.basicAgent import AgentConfig
-from agents.qwenAgent import QwenBasicAgent
+from agents.qwenAgent import QwenAllQAgent, QwenBasicAgent
 from agents.qwenAgent.tools import (
     build_action_tools,
     build_memory_phase_tools,
@@ -22,6 +23,7 @@ from agents.qwenAgent.tools import (
 from agents.utils.budget import BudgetSettings, BudgetTracker
 from agents.utils.forecast_parser import ParsedAction
 from agents.utils.memory import ActiveMemory, StructuredMemory
+from inference.vllm import VLLMInference
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────
@@ -64,6 +66,30 @@ def make_tool_call_response(
     }
 
 
+def make_no_tool_response(
+    *,
+    content: str = "No tool call",
+    prompt_tokens: int = 100,
+    completion_tokens: int = 50,
+) -> Dict[str, Any]:
+    return {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": content,
+                },
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+        },
+    }
+
+
 class DummyForecastInterface:
     """Minimal forecast interface for tests."""
 
@@ -91,7 +117,7 @@ class DummyForecastInterface:
 class ScriptedQwenAgent(QwenBasicAgent):
     """Agent that returns scripted Chat Completions responses."""
 
-    def __init__(self, responses: List[Dict], config: Optional[AgentConfig] = None, **kwargs):
+    def __init__(self, responses: List[Any], config: Optional[AgentConfig] = None, **kwargs):
         cfg = config or AgentConfig(
             enable_memory=True,
             memory_format="active",
@@ -107,6 +133,8 @@ class ScriptedQwenAgent(QwenBasicAgent):
         self._scripted_responses = list(responses)
         self._call_index = 0
         self._tools_per_call: List[List[Dict]] = []
+        self._messages_per_call: List[List[Dict[str, Any]]] = []
+        self._sampling_params_per_call: List[Dict[str, Any]] = []
 
     def _setup_day(self, forecast_interface, current_date):
         self._forecast_interface = forecast_interface
@@ -116,10 +144,14 @@ class ScriptedQwenAgent(QwenBasicAgent):
 
     def _call_chat_json_with_retries(self, *, messages, tools, sampling_params):
         self._tools_per_call.append(tools)
+        self._messages_per_call.append(list(messages))
+        self._sampling_params_per_call.append(dict(sampling_params))
         if self._call_index >= len(self._scripted_responses):
             raise RuntimeError("No more scripted responses")
         resp = self._scripted_responses[self._call_index]
         self._call_index += 1
+        if isinstance(resp, Exception):
+            raise resp
         return resp
 
     def _build_memory_phase_prompt(self, current_date):
@@ -128,8 +160,80 @@ class ScriptedQwenAgent(QwenBasicAgent):
     def _build_start_budget_status(self, *, warmup=False, max_actions_override=None):
         return ""
 
-    def _build_budget_overview(self):
+    def _build_budget_overview(self, *args, **kwargs):
         return ""
+
+
+class ScriptedQwenAllQAgent(QwenAllQAgent):
+    def __init__(self, responses: List[Any], config: Optional[AgentConfig] = None, **kwargs):
+        cfg = config or AgentConfig(
+            enable_memory=True,
+            memory_format="active",
+            warmup_max_actions=4,
+            warmup_max_total_tokens=40000,
+            warmup_submit_reserve_tokens=1024,
+            warmup_force_submit_threshold_tokens=2048,
+        )
+        super().__init__(
+            agent_id="test_qwen_warmup",
+            inference_provider=None,
+            config=cfg,
+            start_date=date(2025, 1, 1),
+            **kwargs,
+        )
+        self._scripted_responses = list(responses)
+        self._call_index = 0
+        self._tools_per_call: List[List[Dict]] = []
+        self._messages_per_call: List[List[Dict[str, Any]]] = []
+        self._sampling_params_per_call: List[Dict[str, Any]] = []
+
+    def _setup_warmup_day(self, forecast_interface, current_date):
+        self._forecast_interface = forecast_interface
+
+    def _call_chat_json_with_retries(self, *, messages, tools, sampling_params):
+        self._tools_per_call.append(tools)
+        self._messages_per_call.append(list(messages))
+        self._sampling_params_per_call.append(dict(sampling_params))
+        if self._call_index >= len(self._scripted_responses):
+            raise RuntimeError("No more scripted responses")
+        resp = self._scripted_responses[self._call_index]
+        self._call_index += 1
+        if isinstance(resp, Exception):
+            raise resp
+        return resp
+
+    def _build_start_budget_status(self, *, warmup=False, max_actions_override=None):
+        return ""
+
+    def _build_budget_overview(self, *args, **kwargs):
+        return ""
+
+
+class RecordingInference(VLLMInference):
+    def __init__(self, response: Optional[Dict[str, Any]] = None):
+        self.model_path = "/tmp/fake"
+        self.model_name = "fake"
+        self.response = response or make_tool_call_response("next_day", {}, call_id="call_default")
+        self.calls: List[Dict[str, Any]] = []
+
+    def chat_json(self, messages, sampling_params):
+        self.calls.append({"messages": list(messages), "sampling_params": dict(sampling_params)})
+        return self.response
+
+
+class XMLWarmupInference:
+    def __init__(self, responses: List[Any]):
+        self._responses = list(responses)
+        self.calls: List[Dict[str, Any]] = []
+
+    def chat(self, messages, sampling_params):
+        self.calls.append({"messages": list(messages), "sampling_params": dict(sampling_params)})
+        if not self._responses:
+            raise RuntimeError("No more scripted XML warmup responses")
+        resp = self._responses.pop(0)
+        if isinstance(resp, Exception):
+            raise resp
+        return resp
 
 
 # ── A. Tool Schema Tests ─────────────────────────────────────────────────
@@ -777,6 +881,38 @@ class TestQwenMemoryPhaseTransition:
         )
         assert agent._memory_phase_completed is False
 
+    def test_qwen_call_chat_json_preserves_explicit_tool_choice(self):
+        inference = RecordingInference()
+        agent = QwenBasicAgent(
+            agent_id="tool_choice_test",
+            inference_provider=inference,
+            config=AgentConfig(),
+        )
+
+        agent._call_chat_json(
+            messages=[{"role": "user", "content": "test"}],
+            tools=[{"function": {"name": "mem_add"}}],
+            sampling_params={"tool_choice": "required", "max_tokens": 111},
+        )
+
+        assert inference.calls[0]["sampling_params"]["tool_choice"] == "required"
+
+    def test_qwen_call_chat_json_defaults_to_auto_tool_choice(self):
+        inference = RecordingInference()
+        agent = QwenBasicAgent(
+            agent_id="tool_choice_test",
+            inference_provider=inference,
+            config=AgentConfig(),
+        )
+
+        agent._call_chat_json(
+            messages=[{"role": "user", "content": "test"}],
+            tools=[{"function": {"name": "mem_add"}}],
+            sampling_params={"max_tokens": 111},
+        )
+
+        assert inference.calls[0]["sampling_params"]["tool_choice"] == "auto"
+
     def test_next_ends_day_in_memory_phase(self, tmp_path):
         """Second next_day in memory phase should actually end the loop."""
         responses = [
@@ -848,7 +984,7 @@ class TestQwenMemoryPhaseTransition:
         assert agent._memory_phase_completed is True
 
     def test_no_memory_phase_for_warmup(self, tmp_path):
-        """Warmup loops should not transition to memory phase (no current_date passed)."""
+        """Warmup loops still skip the normal daily memory-phase transition."""
         responses = [
             make_tool_call_response("next_day", {}, call_id="call_1"),
         ]
@@ -865,7 +1001,234 @@ class TestQwenMemoryPhaseTransition:
         assert agent._memory_phase_completed is False
 
 
-# ── E. End-to-End Memory Workflow Tests ──────────────────────────────────
+# ── E. Warmup Memory Finalization Tests ──────────────────────────────────
+
+
+class TestQwenWarmupMemoryFinalization:
+    def _make_question(self, qid: str = "Q123"):
+        return SimpleNamespace(
+            qid=qid,
+            title="Who wins the election?",
+            background="Background",
+            resolution_criteria="Criteria",
+            answer_type="discrete",
+        )
+
+    def test_active_warmup_submit_followed_by_same_context_mem_add(self, tmp_path):
+        responses = [
+            make_tool_call_response(
+                "submit_forecasts",
+                {"forecasts": [{"qid": "Q123", "outcomes": {"Alice": 0.7, "Bob": 0.3}}]},
+                call_id="submit_call",
+            ),
+            make_tool_call_response(
+                "mem_add",
+                {
+                    "qid": "Q123",
+                    "question": "Who wins the election?",
+                    "memory": "Predicted Alice 0.70 after reviewing recent polling and coalition math.",
+                    "category": "politics",
+                },
+                call_id="mem_call",
+            ),
+        ]
+        cfg = AgentConfig(
+            enable_memory=True,
+            memory_format="active",
+            memory_dir=str(tmp_path),
+            warmup_max_actions=4,
+            warmup_max_total_tokens=40000,
+            warmup_submit_reserve_tokens=1024,
+            warmup_force_submit_threshold_tokens=2048,
+        )
+        agent = ScriptedQwenAllQAgent(responses, config=cfg)
+        agent._memory = ActiveMemory("warmup", str(tmp_path))
+        agent._memory.set_date(date(2025, 1, 1))
+        agent._warmup_mem_entries = []
+
+        fi = DummyForecastInterface()
+        agent._process_single_question(self._make_question(), date(2025, 1, 1), fi)
+
+        assert len(fi.submitted) == 1
+        assert len(agent._warmup_mem_entries) == 1
+        entry = agent._warmup_mem_entries[0]
+        assert entry["qid"] == "Q123"
+        assert entry["category"] == "politics"
+        assert "Alice 0.70" in entry["memory"]
+
+        assert len(agent._messages_per_call) == 2
+        second_call_messages = agent._messages_per_call[1]
+        assert any(msg["role"] == "assistant" for msg in second_call_messages)
+        assert any(msg["role"] == "tool" and msg.get("name") == "submit_forecasts" for msg in second_call_messages)
+        second_tool_names = {tool["function"]["name"] for tool in agent._tools_per_call[1]}
+        assert second_tool_names == {"mem_add"}
+        assert agent._sampling_params_per_call[1]["max_tokens"] == agent.WARMUP_MEMORY_MAX_OUTPUT_TOKENS
+        assert agent._sampling_params_per_call[1]["tool_choice"] == "required"
+        assert "Call exactly one tool now: `mem_add`." in second_call_messages[-1]["content"]
+
+    def test_structured_warmup_submit_followed_by_memory_new(self, tmp_path):
+        responses = [
+            make_tool_call_response(
+                "submit_forecasts",
+                {"forecasts": [{"qid": "Q123", "outcomes": {"Alice": 0.8}}]},
+                call_id="submit_call",
+            ),
+            make_tool_call_response(
+                "memory_new",
+                {
+                    "name": "q123-election-read",
+                    "description": "Question Q123: polling and coalition evidence",
+                    "content": "Alice leads on both polling and coalition formation paths.",
+                },
+                call_id="memory_call",
+            ),
+        ]
+        cfg = AgentConfig(
+            enable_memory=True,
+            memory_format="structured",
+            memory_dir=str(tmp_path),
+            warmup_max_actions=4,
+            warmup_max_total_tokens=40000,
+        )
+        agent = ScriptedQwenAllQAgent(responses, config=cfg)
+        agent._memory = StructuredMemory("warmup", str(tmp_path))
+        agent._memory.set_date(date(2025, 1, 1))
+        agent._warmup_structured_entries = []
+
+        fi = DummyForecastInterface()
+        agent._process_single_question(self._make_question(), date(2025, 1, 1), fi)
+
+        assert len(agent._warmup_structured_entries) == 1
+        entry = agent._warmup_structured_entries[0]
+        assert entry["name"] == "q123-election-read"
+        assert "Q123" in entry["description"]
+        assert "Alice leads" in entry["content"]
+        second_tool_names = {tool["function"]["name"] for tool in agent._tools_per_call[1]}
+        assert second_tool_names == {"memory_new"}
+        assert agent._sampling_params_per_call[1]["tool_choice"] == "required"
+        assert "Call exactly one tool now: `memory_new`." in agent._messages_per_call[1][-1]["content"]
+
+    def test_warmup_without_memory_does_not_add_finalization_call(self):
+        responses = [
+            make_tool_call_response(
+                "submit_forecasts",
+                {"forecasts": [{"qid": "Q123", "outcomes": {"Alice": 1.0}}]},
+                call_id="submit_call",
+            ),
+        ]
+        cfg = AgentConfig(enable_memory=False, warmup_max_actions=4)
+        agent = ScriptedQwenAllQAgent(responses, config=cfg)
+
+        fi = DummyForecastInterface()
+        agent._process_single_question(self._make_question(), date(2025, 1, 1), fi)
+
+        assert len(fi.submitted) == 1
+        assert agent._call_index == 1
+
+    def test_warmup_memory_invalid_tool_retries_once_then_placeholder(self, tmp_path):
+        responses = [
+            make_tool_call_response(
+                "submit_forecasts",
+                {"forecasts": [{"qid": "Q123", "outcomes": {"Alice": 0.6}}]},
+                call_id="submit_call",
+            ),
+            make_no_tool_response(content="I think Alice is ahead."),
+            make_no_tool_response(content="Still no tool."),
+        ]
+        agent = ScriptedQwenAllQAgent(responses)
+        agent._memory = ActiveMemory("warmup", str(tmp_path))
+        agent._memory.set_date(date(2025, 1, 1))
+        agent._warmup_mem_entries = []
+
+        fi = DummyForecastInterface()
+        agent._process_single_question(self._make_question(), date(2025, 1, 1), fi)
+
+        assert agent._call_index == 3
+        assert len(agent._warmup_mem_entries) == 1
+        assert "warmup placeholder" in agent._warmup_mem_entries[0]["memory"].lower()
+        assert "Alice=0.60" in agent._warmup_mem_entries[0]["memory"]
+
+    def test_warmup_memory_invalid_tool_falls_back_to_xml_parser(self, tmp_path):
+        responses = [
+            make_tool_call_response(
+                "submit_forecasts",
+                {"forecasts": [{"qid": "Q123", "outcomes": {"Alice": 0.6}}]},
+                call_id="submit_call",
+            ),
+            make_no_tool_response(content="I think Alice is ahead."),
+            make_no_tool_response(content="Still no tool."),
+        ]
+        agent = ScriptedQwenAllQAgent(responses)
+        agent.inference = XMLWarmupInference([
+            (
+                "<mem_add>\n"
+                "qid: Q123\n"
+                "question: Who wins the election?\n"
+                "memory: Alice leads after recent polling and coalition math.\n"
+                "category: politics\n"
+                "</mem_add>",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+        ])
+        agent._memory = ActiveMemory("warmup", str(tmp_path))
+        agent._memory.set_date(date(2025, 1, 1))
+        agent._warmup_mem_entries = []
+
+        fi = DummyForecastInterface()
+        agent._process_single_question(self._make_question(), date(2025, 1, 1), fi)
+
+        assert agent._call_index == 3
+        assert len(agent._warmup_mem_entries) == 1
+        entry = agent._warmup_mem_entries[0]
+        assert entry["qid"] == "Q123"
+        assert entry["category"] == "politics"
+        assert "coalition math" in entry["memory"]
+        assert len(agent.inference.calls) == 1
+        assert "write exactly one question-specific memory entry" in agent.inference.calls[0]["messages"][-1]["content"].lower()
+
+    def test_warmup_memory_transport_timeout_retries_once_then_placeholder(self, tmp_path):
+        responses = [
+            make_tool_call_response(
+                "submit_forecasts",
+                {"forecasts": [{"qid": "Q123", "outcomes": {"Alice": 0.6}}]},
+                call_id="submit_call",
+            ),
+            RuntimeError("vLLM chat/completions timeout after 300s"),
+            RuntimeError("vLLM chat/completions timeout after 300s"),
+        ]
+        agent = ScriptedQwenAllQAgent(responses)
+        agent._memory = ActiveMemory("warmup", str(tmp_path))
+        agent._memory.set_date(date(2025, 1, 1))
+        agent._warmup_mem_entries = []
+
+        fi = DummyForecastInterface()
+        agent._process_single_question(self._make_question(), date(2025, 1, 1), fi)
+
+        assert agent._call_index == 3
+        assert len(agent._warmup_mem_entries) == 1
+        assert "warmup placeholder" in agent._warmup_mem_entries[0]["memory"].lower()
+        assert "Alice=0.60" in agent._warmup_mem_entries[0]["memory"]
+
+    def test_warmup_budget_reserve_includes_memory_headroom(self, tmp_path):
+        cfg = AgentConfig(
+            enable_memory=True,
+            memory_format="active",
+            memory_dir=str(tmp_path),
+            warmup_max_total_tokens=12000,
+            warmup_submit_reserve_tokens=1024,
+            warmup_force_submit_threshold_tokens=2048,
+        )
+        agent = ScriptedQwenAllQAgent([], config=cfg)
+        agent._memory = ActiveMemory("warmup", str(tmp_path))
+        agent._memory.set_date(date(2025, 1, 1))
+
+        budget = agent._create_warmup_budget_tracker()
+
+        assert budget.settings.submit_reserve_tokens == 1024 + agent.WARMUP_MEMORY_TOKEN_RESERVE
+        assert budget.settings.force_submit_threshold_tokens == 2048 + agent.WARMUP_MEMORY_TOKEN_RESERVE
+
+
+# ── F. End-to-End Memory Workflow Tests ──────────────────────────────────
 
 
 class TestQwenMemoryEndToEnd:
@@ -998,7 +1361,7 @@ class TestQwenMemoryEndToEnd:
         assert agent._memory_phase_completed is False
 
 
-# ── F. Budget Integration Tests ──────────────────────────────────────────
+# ── G. Budget Integration Tests ──────────────────────────────────────────
 
 
 class TestQwenMemoryBudget:
@@ -1104,7 +1467,7 @@ class TestQwenMemoryBudget:
         assert agent._memory.entry_count == 1
 
 
-# ── G. _memory_tool_call_to_action unit tests ────────────────────────────
+# ── H. _memory_tool_call_to_action unit tests ────────────────────────────
 
 
 class TestMemoryToolCallToAction:

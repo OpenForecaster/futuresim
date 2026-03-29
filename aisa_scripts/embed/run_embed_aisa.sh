@@ -29,7 +29,16 @@ elif [[ -n "${SLURM_SUBMIT_DIR:-}" && -f "${SLURM_SUBMIT_DIR}/scripts/embed_arti
 else
   REPO_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 fi
+
+if [[ -f "${REPO_DIR}/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "${REPO_DIR}/.env"
+  set +a
+fi
+
 SHARED_DATA_ROOT="/mnt/nfs/datasets_ac"
+VENV_PATH="${FSIM_EMBED_VENV_PATH:-${FSIM_VENV_PATH:-${REPO_DIR}/.venv}}"
 
 if [[ ! -f "${REPO_DIR}/scripts/embed_articles.py" ]]; then
   echo "ERROR: Could not locate repo root. REPO_DIR=${REPO_DIR}" >&2
@@ -74,16 +83,17 @@ if command -v module >/dev/null 2>&1; then
 fi
 
 # Activate environment
-if [ -f "${REPO_DIR}/.venv/bin/activate" ]; then
+if [ -f "${VENV_PATH}/bin/activate" ]; then
   # shellcheck disable=SC1091
-  source "${REPO_DIR}/.venv/bin/activate"
+  source "${VENV_PATH}/bin/activate"
 else
-  echo "ERROR: Missing virtualenv at ${REPO_DIR}/.venv/bin/activate"
+  echo "ERROR: Missing virtualenv at ${VENV_PATH}/bin/activate"
   exit 2
 fi
 cd "${REPO_DIR}"
 
 echo "Starting embedding job..."
+echo "Using virtualenv: ${VENV_PATH}"
 echo "Worker: ${WORKER_ID} / ${NUM_WORKERS}"
 echo "Model: ${MODEL_PATH}"
 echo "Date range: ${START_DATE} to ${END_DATE}"
