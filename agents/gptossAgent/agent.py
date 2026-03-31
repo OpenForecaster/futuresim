@@ -593,27 +593,6 @@ class GPTOSSBasicAgent(BasicAgent):
             parts.append("TOOL_CALLS:\n" + json.dumps(tool_calls[:3], indent=2, sort_keys=True))
         return "\n\n".join(parts).strip()
 
-    @staticmethod
-    def _forecasts_within_probability_bounds(forecasts: List[Dict[str, Any]]) -> bool:
-        if not forecasts:
-            return False
-        for forecast in forecasts:
-            outcomes = forecast.get("outcomes")
-            if not isinstance(outcomes, dict) or not outcomes:
-                return False
-            total = 0.0
-            for prob in outcomes.values():
-                try:
-                    value = float(prob)
-                except Exception:
-                    return False
-                if value < 0.0 or value > 1.0:
-                    return False
-                total += value
-            if total > 1.0 + 1e-6:
-                return False
-        return True
-
     def _log_harmony_action(
         self,
         *,
@@ -635,7 +614,7 @@ class GPTOSSBasicAgent(BasicAgent):
         metadata = {"phase": phase, "qid": qid, **extra}
         if budget is not None:
             metadata.update(budget.metadata())
-        forecast_interface.log_model_output(input_delta, rendered_response, metadata)
+        self._log_model_output(input_delta, rendered_response, metadata)
 
     @staticmethod
     def _extract_tool_name_candidates(raw_name: Any, allowed_tool_names: Set[str]) -> List[str]:
@@ -1158,21 +1137,30 @@ class GPTOSSAllQAgent(AllQAgent, GPTOSSBasicAgent):
         print(f"[{self.agent_id}] Parallelizing warmup with {max_workers} threads...")
 
         def _run_one(q):
-            instructions = self._build_harmony_warmup_instructions(current_date, q, forecast_interface=forecast_interface)
-            instructions_for_api, convo = self._seed_harmony_conversation(
-                instructions,
-                current_date,
-                budget_status_text=self._build_start_budget_status(warmup=True),
-            )
-            self._run_harmony_action_loop(
-                instructions=instructions_for_api,
-                conversation=convo,
-                forecast_interface=forecast_interface,
-                target_qid=q.qid,
-                enable_query=False,  # warmup has no df query handler setup
-                warmup_budget=True,
-                max_actions=self.config.warmup_max_actions,
-            )
+            effective_current_date = self._get_warmup_current_date(current_date, q)
+            self._set_warmup_search_context(current_date, q)
+            try:
+                instructions = self._build_harmony_warmup_instructions(
+                    effective_current_date,
+                    q,
+                    forecast_interface=forecast_interface,
+                )
+                instructions_for_api, convo = self._seed_harmony_conversation(
+                    instructions,
+                    effective_current_date,
+                    budget_status_text=self._build_start_budget_status(warmup=True),
+                )
+                self._run_harmony_action_loop(
+                    instructions=instructions_for_api,
+                    conversation=convo,
+                    forecast_interface=forecast_interface,
+                    target_qid=q.qid,
+                    enable_query=False,  # warmup has no df query handler setup
+                    warmup_budget=True,
+                    max_actions=self.config.warmup_max_actions,
+                )
+            finally:
+                self._clear_warmup_search_context()
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futs = {executor.submit(_run_one, q): q.qid for q in questions}
@@ -1197,7 +1185,7 @@ class GPTOSSAllQAgent(AllQAgent, GPTOSSBasicAgent):
                         ) from e
 
         self.warmed_up = True
-        forecast_interface.flush_warmup_raw_logs()
+        self._flush_warmup_raw_logs()
         self._timer.end_day()
         if self.config.memory_dir:
             self._timer.save_day_stats(self.config.memory_dir, current_date)

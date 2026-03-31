@@ -107,6 +107,10 @@ export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-${HOME}/.cache/huggingface/datase
 export TMPDIR="${TMPDIR:-/fast/sgoel/tmp}"
 mkdir -p "${HF_HUB_CACHE}" "${HF_DATASETS_CACHE}" "${TMPDIR}"
 
+# Reduce CUDA allocator fragmentation when FSDP + vLLM share a GPU (OOM with large free+reserved gaps).
+# Using `-` rather than `:-` lets an explicitly empty value disable this for ablations.
+export PYTORCH_ALLOC_CONF="${PYTORCH_ALLOC_CONF-expandable_segments:True}"
+
 # Ray: use node-local Condor scratch when available (avoids raylet/worker socket EOF seen when
 # plasma/session lived only on shared lustre under /fast on some MPI execute nodes).
 # Pick a base for Ray state. Prefer HTCondor execute scratch (local disk). Avoid long mktemp
@@ -125,8 +129,21 @@ if [ -z "${RAY_TMPDIR:-}" ]; then
     export RAY_TMPDIR="${_RAY_BASE}/r"
     mkdir -p "${RAY_TMPDIR}"
 fi
+# HTCondor: default `=1` matches known-good eval runs (Ray logs "Detected RAY_USE_MULTIPROCESSING_CPU_COUNT=1").
+# Without it, some nodes abort during ray.init() right after "Started a local Ray instance" (exit 1, no Python traceback).
+# Set RAY_USE_MULTIPROCESSING_CPU_COUNT=0 to opt into Ray's default CPU detection.
 export RAY_USE_MULTIPROCESSING_CPU_COUNT="${RAY_USE_MULTIPROCESSING_CPU_COUNT:-1}"
 export RAY_DISABLE_DOCKER_CPU_WARNING="${RAY_DISABLE_DOCKER_CPU_WARNING:-1}"
+# Some 8-GPU HTCondor nodes intermittently lose the local raylet during bootstrap before any
+# SkyRL actors or placement groups exist. Give Ray's internal health checks a gentler startup
+# window by default; callers can still override these env vars explicitly when debugging.
+export RAY_health_check_initial_delay_ms="${RAY_health_check_initial_delay_ms:-60000}"
+export RAY_health_check_failure_threshold="${RAY_health_check_failure_threshold:-10}"
+
+# Defaults match known-good eval runs (see skyrl_integration/train/main_openforesight_search.py).
+# Override with FSIM_RAY_* env if you need larger sync_registries payloads.
+export FSIM_RAY_HEAP_MEMORY_BYTES="${FSIM_RAY_HEAP_MEMORY_BYTES:-$((4 * 1024 * 1024 * 1024))}"
+export FSIM_RAY_OBJECT_STORE_BYTES="${FSIM_RAY_OBJECT_STORE_BYTES:-$((2 * 1024 * 1024 * 1024))}"
 
 # vLLM v1 path is required in our stack.
 export VLLM_USE_V1=1

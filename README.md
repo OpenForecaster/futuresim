@@ -59,6 +59,14 @@ python scripts/test_basic_agent.py --config configs/shared/default_sim.yaml
 python scripts/test_basic_agent.py --config configs/shared/default_nosearch_sim.yaml
 ```
 
+Shared answer-matching cache:
+- Sim runs still fall back to a per-run `matcher_cache.json`.
+- If `FSIM_SIM_MATCHER_CACHE_DIR` is set, `split: "test"` runs automatically reuse `<cache_dir>/<matcher_slug>.json` and merge new entries back only when the run exits.
+- For non-`test` runs, opt in with top-level YAML:
+  `matcher_cache: {enabled: true, path: null}`
+- Set `matcher_cache.path` to pin a specific JSON file, or `matcher_cache.enabled: false` to force the old per-run cache.
+- On MPI, `FSIM_SIM_MATCHER_CACHE_DIR=/fast/sgoel/forecasting/sim_matcher_cache` is a usable shared root for collaborators on the same cluster, including `nchandak` if permissions already allow it.
+
 ### Scaffold Names
 
 Scaffold selection is explicit.
@@ -122,13 +130,13 @@ Simulation results are saved to `FSIM_OUTPUT_BASE/<sim_name>/<timestamp>/`:
 - `actions.jsonl` — All predictions and resolutions
 - `daily_metrics.csv` — One cumulative metrics row per wakeup session, including daily submission count and average TV shift vs the previous submission
 - `test_daily_metrics.csv` — Same metrics, filtered to questions whose `source_split` is `test`
-- `agents/<agent_id>/model_raw_warmup.jsonl` — Warmup raw logs, grouped by question id and logging only per-turn input deltas
-- `agents/<agent_id>/model_raw_daily.jsonl` — Post-warmup raw logs, logging only per-turn input deltas
+- `agents/<agent_id>/model_raw_warmup.jsonl` — Warmup raw logs written by the agent scaffold, grouped by question id and logging only per-turn input deltas
+- `agents/<agent_id>/model_raw_daily.jsonl` — Post-warmup raw logs written by the agent scaffold, logging only per-turn input deltas
 - `agents/<agent_id>/` — Per-agent logs and memory
 
 ## OpenForesight Notes
 
-- `timegap_days` changes the simulator from daily wakeups to one session every `N` days. Prompts mention the last and next wakeup dates during normal sessions, and metrics for active questions are evaluated through the end of that wakeup interval.
+- `timegap_days` changes the simulator from daily wakeups to one session every `N` days. BasicAgent-style prompts mention the last and next wakeup dates during normal sessions, and metrics for active questions are evaluated through the end of that wakeup interval.
 - OpenForesight configs can prepend a window from the `train` split ahead of the main `split` with:
   - `prepend_train_resolution_start`
   - `prepend_train_resolution_end`

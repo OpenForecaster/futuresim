@@ -1,15 +1,7 @@
-# SkyRL eval-only run (epochs=0, eval before train) for OpenForesight warmup search + LanceDB.
-# Prepared parquets live under FSIM_SKYRL_PREPARED_DATA_DIR (shared cache); per-run logs use FSIM_SKYRL_LOG_BASE.
-#
-# Forecast metrics: ``main_openforesight_search.py`` patches SkyRL concat/evaluate so
-# ``eval/all/environment/*`` (avg_brier, accuracy, exp_acc, format_failures, …) merge across
-# eval micro-batches and reach W&B; ``eval/forecast/*`` mirrors those keys.
-#
-# Matcher cache: loaded at worker start, merged to disk at process exit (see ``AnswerMatcher``).
-# Default file is ``FSIM_MATCHER_CACHE_JSON`` or ``/fast/sgoel/forecasting/skyrl/matcher_cache.json``.
-#
-# Eval sampling (temperature, top_p, top_k, max_generate_length, …) mirrors ``training.*`` unless
-# you set ``eval_*`` keys — you do not need duplicate eval blocks for parity.
+# SkyRL eval-only: with top-level `mode: eval`, `scripts/run_skyrl_openforesight_search.py` overrides
+# Hydra to `trainer.epochs=0`, `eval_before_train=true`, `use_kl_loss=false`, and zero ckpt/HF save intervals.
+# The `training.epochs` / `training.eval_before_train` fields below are ignored for those keys (keep for reference).
+# Each launch rebuilds parquets under ``training.log_path`` (``.../prepared_parquet/``) and removes them after the job.
 #
 # Submit (HTCondor):
 #   python mpi_scripts/skyrl_search/submit_skyrl_search_train.py \
@@ -17,9 +9,6 @@
 #
 # Local / login node (after `source .venv/bin/activate` + SkyRL extra deps):
 #   bash mpi_scripts/skyrl_search/run_skyrl_search_train.sh configs/skyrl/skyrl_openforesight_search_warmup_qwen3.5_4b_eval.yaml
-#
-# Override examples (same as submit_skyrl_search_train.py ``--set``):
-#   python scripts/run_skyrl_openforesight_search.py --config ... --set training.max_turns=10
 
 sim_name: "skyrl_of_search_warmup_qwen3.5_4b_eval"
 run_script: "run_skyrl_search_train.sh"
@@ -35,13 +24,11 @@ resources:
 
 data:
   dataset_path: "${FSIM_DATASET_PATH}"
-  prepared_data_dir: "${FSIM_SKYRL_PREPARED_DATA_DIR}"
   train_split: "train"
   val_split: "test"
   lookback_days: 7
   global_sim_date: null
-  # Smoke-style eval: one train prompt (matches old testeval7c). Note: any non-null max_* or
-  # resolution_* forces a data rebuild each launch; set to null to reuse prepared parquets.
+  # Smoke-style eval: one train prompt (matches old testeval7c).
   max_train_questions: 1
   max_val_questions: null
   resolution_start: null
@@ -64,7 +51,7 @@ search:
 agent:
   max_outcomes_per_question: 5
   max_search_results: 5
-  # When null, the env uses ``training.max_turns`` as the action budget (see OpenForesightSearchWarmupEnv).
+  # When null, ``scripts/run_skyrl_openforesight_search.py`` env uses ``training.max_turns`` as action budget (BudgetTracker).
   warmup_max_actions: null
   warmup_max_total_tokens: 262144
   warmup_submit_reserve_tokens: 8192
@@ -73,16 +60,13 @@ agent:
 matching: "openrouter"
 matcher: "deepseek/deepseek-v3.2"
 
-matcher_cache:
-  enabled: true
-  path: null
-
 training:
   model_path: "${FSIM_SKYRL_MODEL_PATH}"
   project_name: "skyrl-search-agent"
   run_name: "skyrl_of_search_warmup_qwen3.5_4b_eval"
   ckpt_path: "${FSIM_SKYRL_CKPT_BASE}/{run_name}"
   export_path: "${FSIM_SKYRL_CKPT_BASE}/{run_name}/exports"
+  log_path: "${FSIM_SKYRL_LOG_BASE}/{run_name}/infra"
   logger: "wandb"
 
   strategy: "fsdp2"
@@ -98,7 +82,7 @@ training:
 
   eval_batch_size: 302
   eval_before_train: true
-  eval_interval: 50
+  eval_interval: 20
   eval_n_samples_per_prompt: 1
   dump_eval_results: true
 

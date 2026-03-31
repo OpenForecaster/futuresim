@@ -1,5 +1,6 @@
 # SkyRL day-0 style warmup search training on OpenForesight train split.
 # Uses a custom multi-turn env with LanceDB search + OpenForesight-style Brier reward.
+# Parquets are rebuilt every launch next to ``training.log_path`` and deleted when the driver exits.
 #
 # Submit with:
 #   python mpi_scripts/skyrl_search/submit_skyrl_search_train.py \
@@ -10,20 +11,22 @@ run_script: "run_skyrl_search_train.sh"
 mode: "train"
 
 resources:
-  gpus: 4
-  cpus: 48
-  memory_gb: 384
-  disk_gb: 200
+  gpus: 8
+  # On MPI, the HTCondor `FullNode` template is A100-specific. Use root-slot mode so our
+  # H100/B200 CUDA-capability requirement is preserved while still asking for an empty 8-GPU node.
+  full_node: true
+  full_node_mode: "root_slot"
+  # The submitter forwards this to ``FSIM_RAY_NUM_CPUS`` so Ray sees a small, stable CPU budget
+  # even when the cluster grants us an otherwise-empty 8-GPU node.
+  cpus: 16
+  memory_gb: 256
+  disk_gb: 50
   bid: 55
   requirements: "TARGET.CUDACapability >= 9.0 && TARGET.CUDAGlobalMemoryMb > 70000 && TARGET.Machine =!= \"i103.internal.cluster.is.localnet\""
 
 data:
   dataset_path: "${FSIM_DATASET_PATH}"
-  # Single shared cache for train.parquet / validation.parquet (not per-run logs; see training.log_path).
-  prepared_data_dir: "${FSIM_SKYRL_PREPARED_DATA_DIR}"
   train_split: "train"
-  # Eval reads ``validation.parquet``, built from this OpenForesight shard name (``test`` vs
-  # ``validation`` depends on your ``FSIM_DATASET_PATH`` layout — use the split you want as holdout).
   val_split: "test"
   # Day-0 warmup style: each question is evaluated at (resolution_date - lookback_days)
   lookback_days: 7
@@ -40,13 +43,14 @@ data:
 search:
   search_db: "${FSIM_SEARCH_DB}"
   embedding_model: "${FSIM_EMBEDDING_MODEL}"
-  embedding_gpu_mem: 0.3
+  embedding_gpu_mem: 0.22
+  # Warmup rollouts can hit the embedding server from many env workers at once.
+  # Matching the server scheduler to env concurrency reduces query queueing without changing policy behavior.
+  embedding_max_num_seqs: 16
   aux_cuda_visible_devices: null
   search_type: "hybrid"
   search_cutoff_days: 0
   search_min_days: 0
-  # Align with eval: latest article date allowed in search (min(sim_date − cutoff, search_max_date)).
-  search_max_date: "2025-04-23"
   max_snippet_chars: 1200
   allow_substring_match: true
 
@@ -54,8 +58,9 @@ search:
 agent:
   max_outcomes_per_question: 5
   max_search_results: 5
-  warmup_max_actions: 10
-  warmup_max_total_tokens: 262144
+  warmup_max_actions: null
+  # Keep aligned with ``training.max_input_length`` (vLLM rollout cap + env token budget).
+  warmup_max_total_tokens: 65536
   warmup_submit_reserve_tokens: 8192
   warmup_force_submit_threshold_tokens: 16384
 
@@ -63,8 +68,7 @@ agent:
 matching: "openrouter"
 matcher: "deepseek/deepseek-v3.2"
 
-# Persistent OpenRouter matcher cache (shared across runs). Default path: ``FSIM_MATCHER_CACHE_JSON``
-# or ``skyrl_integration/matcher_cache.DEFAULT_MATCHER_CACHE_JSON``.
+# OpenRouter matcher cache: ``FSIM_SKYRL_MATCHER_CACHE_DIR`` (default ``${FSIM_SKYRL_LOG_BASE}/matcher_cache``); ``<matcher_slug>.json`` when path is null.
 matcher_cache:
   enabled: true
   path: null
@@ -75,36 +79,43 @@ training:
   run_name: "skyrl_of_search_warmup_qwen3.5_4b"
   ckpt_path: "${FSIM_SKYRL_CKPT_BASE}/{run_name}"
   export_path: "${FSIM_SKYRL_CKPT_BASE}/{run_name}/exports"
+  log_path: "${FSIM_SKYRL_LOG_BASE}/{run_name}/infra"
   logger: "wandb"
 
   strategy: "fsdp2"
-  # Only used when ``use_kl_loss`` loads a ref model (see ``run_skyrl_openforesight_search.py``).
+  # Qwen3.5 ref forward is stable here only when the ref model stays on GPU.
   ref_fsdp_cpu_offload: false
 
   epochs: 1
   update_epochs_per_batch: 1
-  train_batch_size: 128
-  policy_mini_batch_size: 64
-  critic_mini_batch_size: 64
+  train_batch_size: 64
+  # Small mini-batches keep padded length closer to the longest sequence in the chunk (backward VRAM).
+  policy_mini_batch_size: 4
+  critic_mini_batch_size: 4
+  # On 1x8 H100, ``2/1`` was the fastest non-SP shape that survived multiple full steps.
   micro_forward_batch_size_per_gpu: 2
-  micro_train_batch_size_per_gpu: 2
+  micro_train_batch_size_per_gpu: 1
+  gradient_checkpointing: true
+  gradient_checkpointing_use_reentrant: false
 
-  eval_batch_size: 128
+  eval_batch_size: 160
   eval_before_train: true
   eval_interval: 20
-  eval_n_samples_per_prompt: 4
+  eval_n_samples_per_prompt: 1
   dump_eval_results: true
 
-  # Match eval cached-metrics config so PromptDataset does not drop long prepared prompts.
-  max_prompt_length: 262144
-  max_input_length: 262144
+  # Initial prompts are short, but the multi-turn search transcript can get long.
+  # Shorter cap reduces FSDP logprob forward peak memory after long search rollouts.
+  max_prompt_length: 32768
+  # Rollout + env budget cap; keeps multi-turn transcripts bounded for FSDP backward with colocated vLLM.
+  max_input_length: 65536
   flash_attn: true
   use_sample_packing: false
 
+  # Fewer rollouts per prompt cuts trajectory count (64×n_samples) and stabilizes colocated VRAM.
   n_samples_per_prompt: 4
-  # SkyRL passes this as ``max_turns`` to the env (tool turns per episode). Keep aligned with
-  # ``agent.warmup_max_actions`` so train and eval batches use the same action budget.
-  max_turns: 10
+  # `0` means "do not enforce a turn cap in the warmup env"; token budget becomes the visible limit.
+  max_turns: 0
   use_conversation_multi_turn: true
   append_eos_token_after_stop_str_in_multi_turn: true
 
@@ -123,19 +134,24 @@ training:
     - "</tool_call>"
 
   learning_rate: 1.0e-6
-  # No ref-model KL for now (faster, less VRAM); GRPO still trains from group-normalized advantages.
   use_kl_loss: false
   kl_loss_coef: 0.001
-  tis_ratio_type: null
+  grpo_norm_by_std: false
+  tis_ratio_type: token
   token_tis_ratio_clip_high: 2.0
 
   inference_backend: "vllm"
-  inference_num_engines: 4
+  inference_num_engines: 8
   inference_tensor_parallel_size: 1
   run_engines_locally: true
   weight_sync_backend: "nccl"
   async_engine: true
-  gpu_memory_utilization: 0.6
+  # ``0.22`` was the best proven non-SP H100 setting that avoided the first-step OOM path.
+  gpu_memory_utilization: 0.22
+  # Larger prefill chunks reduce scheduler overhead for long multi-turn prompts without changing tokens seen.
+  inference_max_num_batched_tokens: 16384
+  # Launcher derives vLLM max_model_len from max_input_length + max_generate_length unless overridden here.
+  inference_max_model_len: null
   max_env_workers: 16
 
   ckpt_interval: 20

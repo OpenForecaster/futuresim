@@ -43,6 +43,8 @@ parallel: true
 defaults:
   provider: "openrouter"
   scaffold: "allQ"
+  max_total_tokens: 8192
+  warmup_max_total_tokens: 8192
   enable_memory: true
   max_actions: 50
   warmup_max_actions: 10

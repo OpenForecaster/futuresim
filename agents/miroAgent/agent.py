@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from agents.allQAgent.agent import AllQAgent
 from agents.basicAgent.agent import BasicAgent
+from agents.basicAgent.tools import final_submit_tool_instruction_text
 from agents.utils.budget import BudgetTracker
 from agents.utils.forecast_parser import ParsedAction
 from environment.interfaces import PredictionSubmission
@@ -15,14 +16,15 @@ from .tools import (
     chat_response_to_action,
     extract_assistant_message,
     extract_finish_reason,
-    render_tool_schema_prompt,
+    render_mcp_tool_instructions,
 )
 
 
 class MiroBasicAgent(BasicAgent):
     """
-    BasicAgent-compatible behavior, but obtains actions via MiroThinker's native
-    Chat Completions tool format.
+    BasicAgent-compatible behavior with MiroThinker-style MCP text (`<use_mcp_tool>`).
+    OpenAI `tools` are passed to vLLM for schema hints; the model is instructed to reply
+    in MCP format only, and the client parses that first.
     """
 
     _OMITTED_TOOL_RESULT_TEXT = "Tool result is omitted to save tokens."
@@ -71,8 +73,10 @@ class MiroBasicAgent(BasicAgent):
         return (
             f"{prefix}\n\n"
             "## RESPONSE FORMAT\n"
-            "Use function tools as defined in the tool schema, following the signatures, "
-            "constraints, and examples there. Call exactly one tool per turn.\n\n"
+            "Follow **MCP TOOL INVOCATION** and **Tool definitions (JSON Schema)** in your "
+            "instructions (tool names, parameters, constraints, examples). Each turn, end your "
+            "reply with **exactly one** `<use_mcp_tool>...</use_mcp_tool>` block as specified "
+            "there.\n\n"
             "## INTERACTION FLOW\n"
             f"{self._build_budget_overview()}\n"
             "When ready to move on, call `next_day()` to end this session.\n\n"
@@ -84,12 +88,21 @@ class MiroBasicAgent(BasicAgent):
         )
 
     def _build_final_submit_tool_instruction(self, target_qid: str, budget: BudgetTracker) -> str:
+        # Reuse shared force-submit wording; MCP example is additive.
+        base = final_submit_tool_instruction_text(target_qid, budget)
+        arg_example = json.dumps(
+            {"forecasts": [{"qid": target_qid, "outcomes": {"<concrete outcome>": 0.6}}]},
+            ensure_ascii=False,
+        )
         return (
-            f"{self._build_force_submit_preamble(budget)}\n"
-            f"Target question ID: {target_qid}\n"
-            "Call exactly one tool: submit_forecasts.\n"
-            "Do NOT call query_df, search_news, or next_day.\n"
-            "Submit only this question id with concrete outcomes and probabilities (sum <= 1.0)."
+            f"{base}\n\n"
+            "You MUST end your reply with exactly this MCP block (replace the placeholder outcome "
+            "with a concrete label and probability):\n"
+            "<use_mcp_tool>\n"
+            "<server_name>forecast_sim</server_name>\n"
+            "<tool_name>submit_forecasts</tool_name>\n"
+            f"<arguments>{arg_example}</arguments>\n"
+            "</use_mcp_tool>\n"
         )
 
     def _run_miro_action_loop(
@@ -236,6 +249,23 @@ class MiroBasicAgent(BasicAgent):
                     valid_final_forecasts
                 )
             if force_final_submit_turn and not has_valid_final_submit:
+                # Still log to model_outputs / model_raw (warmup buffer) even though we
+                # discard this assistant turn from the live transcript (retry or exit).
+                rendered_force = self._render_turn_for_logging(assistant_text, tool_calls)
+                self._log_miro_action(
+                    forecast_interface=forecast_interface,
+                    messages=messages,
+                    rendered_response=rendered_force,
+                    phase="llm_force_submit_invalid",
+                    budget=budget,
+                    qid=target_qid,
+                    finish_reason=finish_reason,
+                    usage=usage,
+                    reasoning_tokens=reasoning_tokens_turn,
+                    raw_stream=raw_stream,
+                    prompt_override=model_input_delta,
+                    force_submit_attempt=2 if final_submit_retry_used else 1,
+                )
                 if not final_submit_retry_used:
                     final_submit_retry_used = True
                     continue
@@ -264,7 +294,10 @@ class MiroBasicAgent(BasicAgent):
                 budget.consume_action()
                 message = {
                     "role": "user",
-                    "content": budget.format_feedback("No tool call detected. You MUST call exactly one tool each turn."),
+                    "content": budget.format_feedback(
+                        "No valid `<use_mcp_tool>` block detected. End your reply with exactly "
+                        "one MCP tool call as under MCP TOOL INVOCATION."
+                    ),
                 }
                 self._append_with_budget(messages, budget, message)
                 pending_input_delta.append(message)
@@ -332,6 +365,8 @@ class MiroBasicAgent(BasicAgent):
             raise TypeError("MiroBasicAgent currently requires provider=vllm (VLLMInference).")
 
         sp = dict(sampling_params or {})
+        sp["tools"] = tools
+        sp["tool_choice"] = sp.get("tool_choice", "auto")
         return self.inference.chat_json(self._apply_tool_result_retention(messages), sp)
 
     @staticmethod
@@ -342,9 +377,9 @@ class MiroBasicAgent(BasicAgent):
         if not isinstance(first, dict) or first.get("role") != "user":
             return
         content = first.get("content")
-        if not isinstance(content, str) or "## TOOL SCHEMA" in content:
+        if not isinstance(content, str) or "## MCP TOOL INVOCATION" in content:
             return
-        first["content"] = f"{content}\n\n{render_tool_schema_prompt(tools)}"
+        first["content"] = f"{content}\n\n{render_mcp_tool_instructions(tools)}"
 
     @staticmethod
     def _is_fatal_inference_failure(error: Exception) -> bool:
@@ -646,27 +681,6 @@ class MiroBasicAgent(BasicAgent):
             parts.append("TOOL_CALLS:\n" + json.dumps(tool_calls[:3], indent=2, sort_keys=True))
         return "\n\n".join(parts).strip()
 
-    @staticmethod
-    def _forecasts_within_probability_bounds(forecasts: List[Dict[str, Any]]) -> bool:
-        if not forecasts:
-            return False
-        for forecast in forecasts:
-            outcomes = forecast.get("outcomes")
-            if not isinstance(outcomes, dict) or not outcomes:
-                return False
-            total = 0.0
-            for prob in outcomes.values():
-                try:
-                    value = float(prob)
-                except Exception:
-                    return False
-                if value < 0.0 or value > 1.0:
-                    return False
-                total += value
-            if total > 1.0 + 1e-6:
-                return False
-        return True
-
     def _log_miro_action(
         self,
         *,
@@ -688,13 +702,12 @@ class MiroBasicAgent(BasicAgent):
         metadata = {"phase": phase, "qid": qid, **extra}
         if budget is not None:
             metadata.update(budget.metadata())
-        forecast_interface.log_model_output(input_delta, rendered_response, metadata)
+        self._log_model_output(input_delta, rendered_response, metadata)
 
 
 class MiroAllQAgent(AllQAgent, MiroBasicAgent):
     """
-    AllQ warmup + subsequent daily loop, but actions are obtained via MiroThinker
-    native tool calling.
+    AllQ warmup + daily loop with MiroThinker-oriented MCP + OpenAI tool I/O.
     """
 
     def _build_warmup_system_prompt(self, current_date: date, q, forecast_interface=None) -> str:
@@ -707,17 +720,26 @@ class MiroAllQAgent(AllQAgent, MiroBasicAgent):
         return self._rewrite_allq_warmup_prompt_for_miro(base_prompt)
 
     def _process_single_question(self, q, current_date, forecast_interface):
-        system_prompt = self._build_warmup_system_prompt(current_date, q, forecast_interface=forecast_interface)
-        messages = [{"role": "user", "content": system_prompt}]
+        effective_current_date = self._get_warmup_current_date(current_date, q)
+        self._set_warmup_search_context(current_date, q)
+        try:
+            system_prompt = self._build_warmup_system_prompt(
+                effective_current_date,
+                q,
+                forecast_interface=forecast_interface,
+            )
+            messages = [{"role": "user", "content": system_prompt}]
 
-        context_limit_hit = self._run_warmup_loop(messages, forecast_interface, q.qid)
-        if context_limit_hit:
-            return
+            context_limit_hit = self._run_warmup_loop(messages, forecast_interface, q.qid)
+            if context_limit_hit:
+                return
 
-        if hasattr(self, "_warmup_memo_entries"):
-            memo_entry = self._request_warmup_memo(messages, q.qid, q.title)
-            if memo_entry:
-                self._warmup_memo_entries.append(memo_entry)
+            if hasattr(self, "_warmup_memo_entries"):
+                memo_entry = self._request_warmup_memo(messages, q.qid, q.title)
+                if memo_entry:
+                    self._warmup_memo_entries.append(memo_entry)
+        finally:
+            self._clear_warmup_search_context()
 
     def _run_warmup_loop(self, messages: List[Dict], forecast_interface, target_qid: str) -> bool:
         _, context_limit_hit = self._run_miro_action_loop(
@@ -739,7 +761,8 @@ class MiroAllQAgent(AllQAgent, MiroBasicAgent):
         return (
             f"{prefix}\n\n"
             "## RESPONSE FORMAT\n"
-            "Use function tools as defined in the tool schema, following the signatures, "
-            "constraints, and examples there. Call exactly one tool per turn.\n"
+            "Follow **MCP TOOL INVOCATION** and **Tool definitions (JSON Schema)** for this "
+            "warmup question. Each turn, end your reply with exactly one `<use_mcp_tool>...</use_mcp_tool>` "
+            "block as specified there.\n"
             f"{start_block}\n"
         )

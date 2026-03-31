@@ -10,6 +10,7 @@ start_date: "2025-05-01"
 end_date: "2025-04-25"       # Minimal loop: warmup day (04-24) + 1 day (04-25)
 lookback_days: 7
 search_cutoff_days: 0
+resolution_guard: null       # Warmup-only extra search cap: resolution_date - resolution_guard days
 split: "skysports2025"
 
 # Load the FULL question set (resolution_end decoupled from end_date)

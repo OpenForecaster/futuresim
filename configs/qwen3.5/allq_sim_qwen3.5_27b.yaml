@@ -57,7 +57,8 @@ vllm_tensor_parallel_size: 2
 vllm_max_num_seqs: 64
 vllm_startup_timeout: 900
 vllm_request_timeout: 300
-vllm_enable_tools: false
+vllm_enable_tools: true
+vllm_tool_call_parser: "qwen3_coder"
 language_model_only: true
 
 # --- Local 3-GPU Pinning ---
@@ -73,6 +74,8 @@ parallel: true
 defaults:
   provider: "vllm"
   scaffold: "allQ"
+  max_total_tokens: 262144
+  warmup_max_total_tokens: 262144
   max_actions: 50
   warmup_max_actions: 10
   temperature: 0.7

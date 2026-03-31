@@ -177,26 +177,20 @@ class AzureOpenAIInference:
     # Public interface
     # ------------------------------------------------------------------
 
-    def chat(
-        self,
-        messages: List[Dict[str, str]],
-        sampling_params: Dict[str, Any],
-    ) -> Tuple[str, Dict]:
-        """
-        Chat completion.
-
-        Args:
-            messages:        List of {"role": ..., "content": ...} dicts.
-            sampling_params: Supported keys: temperature, max_tokens, top_p,
-                             frequency_penalty, presence_penalty, stop, reasoning.
-
-        Returns:
-            (response_text, usage_dict)
-        """
+    def _build_request_kwargs(self, sampling_params: Dict[str, Any]) -> Dict[str, Any]:
         kwargs: Dict[str, Any] = {}
 
-        for key in ("temperature", "max_tokens", "top_p",
+        for key in ("temperature", "top_p",
                     "frequency_penalty", "presence_penalty", "stop"):
+            if key in sampling_params:
+                kwargs[key] = sampling_params[key]
+
+        if "max_tokens" in sampling_params:
+            kwargs["max_completion_tokens"] = sampling_params["max_tokens"]
+        elif "max_completion_tokens" in sampling_params:
+            kwargs["max_completion_tokens"] = sampling_params["max_completion_tokens"]
+
+        for key in ("tools", "tool_choice", "parallel_tool_calls"):
             if key in sampling_params:
                 kwargs[key] = sampling_params[key]
 
@@ -214,17 +208,104 @@ class AzureOpenAIInference:
         for k, v in self.default_kwargs.items():
             kwargs.setdefault(k, v)
 
-        return self._request_with_retry(messages, kwargs)
+        kwargs.setdefault("max_completion_tokens", 16384)
+        return kwargs
+
+    def chat(
+        self,
+        messages: List[Dict[str, Any]],
+        sampling_params: Dict[str, Any],
+    ) -> Tuple[str, Dict]:
+        data = self.chat_json(messages, sampling_params)
+        return self._extract_chat_text_and_usage(data)
+
+    def chat_json(
+        self,
+        messages: List[Dict[str, Any]],
+        sampling_params: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        kwargs = self._build_request_kwargs(sampling_params)
+        return self._request_json_with_retry(messages, kwargs)
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _request_with_retry(
+    @staticmethod
+    def _completion_to_dict(completion: Any) -> Dict[str, Any]:
+        if hasattr(completion, "model_dump"):
+            return completion.model_dump(mode="json")
+        if hasattr(completion, "to_dict"):
+            return completion.to_dict()
+
+        choices = []
+        for choice in getattr(completion, "choices", []) or []:
+            message = getattr(choice, "message", None)
+            tool_calls = []
+            for tool_call in getattr(message, "tool_calls", []) or []:
+                function = getattr(tool_call, "function", None)
+                tool_calls.append(
+                    {
+                        "id": getattr(tool_call, "id", None),
+                        "type": getattr(tool_call, "type", "function"),
+                        "function": {
+                            "name": getattr(function, "name", None),
+                            "arguments": getattr(function, "arguments", None),
+                        },
+                    }
+                )
+            choices.append(
+                {
+                    "message": {
+                        "content": getattr(message, "content", None) if message is not None else None,
+                        "tool_calls": tool_calls or None,
+                        "reasoning_content": getattr(message, "reasoning_content", None) if message is not None else None,
+                    },
+                    "finish_reason": getattr(choice, "finish_reason", None),
+                }
+            )
+
+        usage_obj = getattr(completion, "usage", None)
+        usage: Dict[str, Any] = {}
+        if usage_obj is not None:
+            usage = {
+                "prompt_tokens": getattr(usage_obj, "prompt_tokens", 0),
+                "completion_tokens": getattr(usage_obj, "completion_tokens", 0),
+                "total_tokens": getattr(usage_obj, "total_tokens", 0),
+            }
+
+        return {"choices": choices, "usage": usage}
+
+    @staticmethod
+    def _extract_chat_text_and_usage(data: Dict[str, Any]) -> Tuple[str, Dict]:
+        choices = data.get("choices")
+        if not isinstance(choices, list) or not choices:
+            return "", {}
+
+        first = choices[0] or {}
+        message = first.get("message") or {}
+        content = message.get("content")
+        usage = dict(data.get("usage") or {})
+
+        reasoning = message.get("reasoning_content") or message.get("reasoning")
+        if reasoning:
+            usage["_reasoning_content"] = reasoning
+
+        finish_reason = first.get("finish_reason")
+        if finish_reason:
+            usage["_finish_reason"] = finish_reason
+
+        if isinstance(content, str):
+            return content, usage
+        if content is None:
+            return "", usage
+        return str(content), usage
+
+    def _request_json_with_retry(
         self,
-        messages: List[Dict[str, str]],
+        messages: List[Dict[str, Any]],
         kwargs: Dict[str, Any],
-    ) -> Tuple[str, Dict]:
+    ) -> Dict[str, Any]:
         RETRYABLE_STATUS = {429, 500, 502, 503, 504, 524}
         last_error: Optional[BaseException] = None
         rate_limiter = GlobalRateLimiter()
@@ -236,29 +317,13 @@ class AzureOpenAIInference:
                 completion = self._client.chat.completions.create(
                     model=self.model,
                     messages=messages,
-                    # timeout=120,
-                    # **kwargs,
-                    max_completion_tokens=16384,
+                    **kwargs,
                 )
 
-                choice = completion.choices[0]
-                content = choice.message.content or ""
-                usage: Dict[str, Any] = {}
-                if completion.usage:
-                    usage = {
-                        "prompt_tokens": completion.usage.prompt_tokens,
-                        "completion_tokens": completion.usage.completion_tokens,
-                        "total_tokens": completion.usage.total_tokens,
-                    }
-
-                # Extract reasoning tokens if present (e.g. DeepSeek-R1 style)
-                reasoning = getattr(choice.message, "reasoning_content", None)
-                if reasoning:
-                    usage["_reasoning_content"] = reasoning
-
-                finish_reason = choice.finish_reason
-                if finish_reason:
-                    usage["_finish_reason"] = finish_reason
+                data = self._completion_to_dict(completion)
+                content, usage = self._extract_chat_text_and_usage(data)
+                reasoning = usage.get("_reasoning_content")
+                finish_reason = usage.get("_finish_reason")
 
                 # Retry if content is empty but reasoning exists
                 if (not content or not content.strip()) and reasoning:
@@ -279,7 +344,12 @@ class AzureOpenAIInference:
                         f"  [AzureOpenAI] Empty content persisted after {self.max_retries} retries, "
                         f"using reasoning as content ({len(reasoning)} chars)"
                     )
-                    return reasoning, usage
+                    first = data.get("choices", [{}])[0]
+                    if isinstance(first, dict):
+                        message = first.setdefault("message", {})
+                        if isinstance(message, dict):
+                            message["content"] = reasoning
+                    return data
 
                 if not content or not content.strip():
                     comp_tokens = usage.get("completion_tokens", "?")
@@ -288,7 +358,7 @@ class AzureOpenAIInference:
                         f"(finish={finish_reason}, tokens={comp_tokens})"
                     )
 
-                return content, usage
+                return data
 
             except APIStatusError as e:
                 last_error = e
@@ -325,7 +395,7 @@ class AzureOpenAIInference:
             f"  [AzureOpenAI] Request failed after {self.max_retries} retries: "
             f"{last_error}. Returning empty output."
         )
-        return "", {}
+        return {}
 
     def _backoff(self, attempt: int) -> float:
         delay = min(self.max_delay, self.base_delay * (2 ** attempt))

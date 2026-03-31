@@ -1,0 +1,166 @@
+# SkyRL fully async warmup-search training on OpenForesight, B200 6+2 benchmark.
+#
+# Purpose of this variant:
+# - Keep the same async trainer / B200 environment as the proven 4+4 config.
+# - Shift the node to 6 inference GPUs and 2 training GPUs.
+# - Use a smaller global train batch than 4+4 so the 2-GPU learner has real memory headroom on
+#   long trajectories, while keeping the same async topology and search stack.
+# - Lower only the training-side pressure that is most likely to trigger late-step learner crashes.
+#
+# Submit with:
+#   python mpi_scripts/skyrl_search/submit_skyrl_search_train.py \
+#     --config configs/skyrl/skyrl_openforesight_search_warmup_qwen3.5_4b_fully_async_b200_6x2.yaml --runs 1
+
+sim_name: "skyrl_of_search_warmup_qwen3.5_4b_fully_async_b200_6x2"
+run_script: "run_skyrl_search_train_fully_async.sh"
+mode: "train"
+
+resources:
+  gpus: 8
+  # For B200 async jobs, just request the full 8-GPU resource bundle directly and let HTCondor
+  # place the job on any slot that satisfies it.
+  full_node: false
+  cpus: 64
+  # 200 GB is enough for the validated 6+2 runs while keeping scheduler eligibility broader than
+  # the old 256 GB request.
+  memory_gb: 200
+  disk_gb: 50
+  bid: 55
+  requirements: "TARGET.CUDADeviceName == \"NVIDIA B200\""
+job_env:
+  FSIM_RAY_HEAP_MEMORY_BYTES: "8589934592"
+  FSIM_RAY_OBJECT_STORE_BYTES: "4294967296"
+  PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+
+data:
+  dataset_path: "${FSIM_DATASET_PATH}"
+  train_split: "train"
+  val_split: "test"
+  lookback_days: 7
+  global_sim_date: null
+  max_train_questions: null
+  max_val_questions: null
+  resolution_start: null
+  resolution_end: null
+  seed: 42
+
+search:
+  search_db: "${FSIM_SEARCH_DB}"
+  embedding_model: "${FSIM_EMBEDDING_MODEL}"
+  # 0.08 leaves no KV/cache headroom for Qwen3-Embedding-8B on B200, so the
+  # embedding vLLM dies at startup and search silently degrades. 0.10 still
+  # keeps the colocated embedding footprint small while letting retrieval run.
+  embedding_gpu_mem: 0.10
+  embedding_max_num_seqs: 64
+  aux_cuda_visible_devices: null
+  search_type: "hybrid"
+  search_cutoff_days: 0
+  search_min_days: 0
+  max_snippet_chars: 1200
+  allow_substring_match: true
+
+agent:
+  max_outcomes_per_question: 5
+  max_search_results: 5
+  warmup_max_actions: 10
+  warmup_max_total_tokens: 32768
+  warmup_submit_reserve_tokens: 0
+  warmup_force_submit_threshold_tokens: 0
+
+matching: "openrouter"
+matcher: "deepseek/deepseek-v3.2"
+
+matcher_cache:
+  enabled: true
+  path: null
+
+training:
+  model_path: "${FSIM_SKYRL_MODEL_PATH}"
+  project_name: "skyrl-search-agent"
+  run_name: "skyrl_of_search_warmup_qwen3.5_4b_fully_async_b200_6x2"
+  ckpt_path: "${FSIM_SKYRL_CKPT_BASE}/{run_name}"
+  export_path: "${FSIM_SKYRL_CKPT_BASE}/{run_name}/exports"
+  log_path: "${FSIM_SKYRL_LOG_BASE}/{run_name}/infra"
+  logger: "wandb"
+
+  strategy: "fsdp2"
+  ref_fsdp_cpu_offload: false
+  placement:
+    colocate_all: false
+    colocate_policy_ref: true
+    policy_num_gpus_per_node: 2
+    ref_num_gpus_per_node: 2
+
+  epochs: 1
+  update_epochs_per_batch: 1
+  train_batch_size: 48
+  policy_mini_batch_size: 48
+  critic_mini_batch_size: 48
+  # Keep forward throughput reasonably high while still backing off the backward peak memory on the
+  # 2-GPU learner.
+  micro_forward_batch_size_per_gpu: 4
+  micro_train_batch_size_per_gpu: 2
+  gradient_checkpointing: true
+  gradient_checkpointing_use_reentrant: false
+
+  eval_batch_size: 160
+  eval_before_train: true
+  eval_interval: 20
+  eval_n_samples_per_prompt: 1
+  dump_eval_results: true
+
+  max_prompt_length: 32768
+  max_input_length: 32768
+  flash_attn: true
+  use_sample_packing: false
+
+  n_samples_per_prompt: 4
+  max_turns: 0
+  use_conversation_multi_turn: true
+  append_eos_token_after_stop_str_in_multi_turn: true
+
+  temperature: 0.7
+  top_p: 0.95
+  top_k: 20
+  min_p: 0.0
+  repetition_penalty: 1.0
+  max_generate_length: 4096
+  sampling_logprobs: null
+  eval_sampling_logprobs: null
+  stop_tokens:
+    - "</tool_call>"
+
+  learning_rate: 1.0e-6
+  max_grad_norm: 0.5
+  use_kl_loss: false
+  kl_loss_coef: 0.001
+  grpo_norm_by_std: false
+  tis_ratio_type: token
+  token_tis_ratio_clip_high: 2.0
+  fully_async:
+    max_staleness_steps: 2
+    # The earlier full 6+2 run developed non-finite grad norms before crashing in NCCL. Keep
+    # enough overlap for async benefits while reducing stale-trajectory pressure on the 2-GPU
+    # learner.
+    num_parallel_generation_workers: 64
+
+  inference_backend: "vllm"
+  inference_num_engines: 6
+  inference_tensor_parallel_size: 1
+  run_engines_locally: true
+  weight_sync_backend: "nccl"
+  async_engine: true
+  batched: false
+  gpu_memory_utilization: 0.80
+  inference_max_num_batched_tokens: 98304
+  inference_max_num_seqs: 96
+  inference_max_model_len: null
+  max_env_workers: 64
+
+  ckpt_interval: 20
+  hf_save_interval: 200
+  max_ckpts_to_keep: 5
+
+hydra_overrides:
+  - "generator.inference_engine.engine_init_kwargs.language_model_only=true"
+  - "generator.inference_engine.engine_init_kwargs.skip_mm_profiling=true"

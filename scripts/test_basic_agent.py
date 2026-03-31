@@ -43,6 +43,7 @@ from pathing import REPO_ROOT, expand_env_tree, load_repo_env, raise_for_unresol
 load_repo_env(REPO_ROOT)
 
 from environment.env import SimulationEnvironment, SimForecastInterface
+from environment.matcher_cache import resolve_sim_matcher_cache_path
 from agents.basicAgent import BasicAgent, AgentConfig
 from agents.allQAgent import AllQAgent, AllQDailyAgent
 from agents.ogAgent import OgAgent
@@ -314,6 +315,11 @@ def _is_qwen_model(model: str) -> bool:
     return ("qwen" in model_l) and ("gpt-oss" not in model_l)
 
 
+def _is_qwen35_model(model: str) -> bool:
+    model_l = str(model or "").lower()
+    return ("qwen3.5" in model_l) or ("qwen3_5" in model_l)
+
+
 def _is_miro_model(model: str) -> bool:
     return "mirothinker" in str(model or "").lower()
 
@@ -328,8 +334,11 @@ def _resolve_vllm_tool_call_parser(model: str, args) -> str | None:
     if not bool(getattr(args, "vllm_enable_tools", False)):
         return None
 
-    if _is_qwen_model(model):
+    if _is_qwen35_model(model):
         return "qwen3_coder"
+
+    if _is_qwen_model(model):
+        return "hermes"
 
     if _is_miro_model(model):
         return None
@@ -454,6 +463,9 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
         max_tokens = agent_def.get('max_tokens', defaults.get('max_tokens', args.max_tokens))
         reasoning = agent_def.get('reasoning', defaults.get('reasoning', None))
         search_cutoff_days = agent_def.get('search_cutoff_days', defaults.get('search_cutoff_days', getattr(args, 'search_cutoff_days', 0)))
+        resolution_guard = _optional_int(
+            agent_def.get('resolution_guard', defaults.get('resolution_guard', getattr(args, 'resolution_guard', None)))
+        )
         enable_memory = agent_def.get('enable_memory', defaults.get('enable_memory', True))
         memory_format = agent_def.get('memory_format', defaults.get('memory_format', 'structured'))
         memory_max_entries = int(agent_def.get('memory_max_entries', defaults.get('memory_max_entries', 500)))
@@ -467,8 +479,6 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
                 defaults.get('tool_result_keep_last', getattr(args, 'tool_result_keep_last', -1))
             )
         )
-        cheat_feedback = agent_def.get('cheat_feedback', defaults.get('cheat_feedback', getattr(args, 'cheat_feedback', False)))
-        cheat_feedback_detail = agent_def.get('cheat_feedback_detail', defaults.get('cheat_feedback_detail', getattr(args, 'cheat_feedback_detail', 'full')))
         gptoss_prompt_mode = agent_def.get(
             'gptoss_prompt_mode',
             defaults.get('gptoss_prompt_mode', getattr(args, 'gptoss_prompt_mode', 'instructions'))
@@ -521,6 +531,7 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
             memory_format=memory_format,
             memory_max_entries=memory_max_entries,
             memory_update_max_total_tokens=memory_update_max_total_tokens,
+            append_model_output_logs=bool(getattr(args, "resume", None)),
             singleans=singleans,
             tool_result_keep_last=tool_result_keep_last,
             sampling_params={
@@ -532,6 +543,7 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
                 **({'reasoning': reasoning} if reasoning is not None else {}),
             },
             search_cutoff_days=search_cutoff_days,
+            resolution_guard=resolution_guard,
             timegap_days=getattr(args, 'timegap_days', 1),
             single_agent_mode=(len(agents_list) == 1),  # Adjust prompt for single-agent runs
             gptoss_prompt_mode=gptoss_prompt_mode,
@@ -540,8 +552,6 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
             gptoss_responses_max_retries=gptoss_responses_max_retries,
             gptoss_retry_backoff_base_s=gptoss_retry_backoff_base_s,
             gptoss_retry_backoff_max_s=gptoss_retry_backoff_max_s,
-            cheat_feedback=cheat_feedback,
-            cheat_feedback_detail=cheat_feedback_detail,
         )
 
         # GPT-OSS Harmony tool calling: only when using vLLM + enable_tools + gpt-oss weights.
@@ -665,6 +675,8 @@ def main():
                        help="Resolution window end (YYYY-MM-DD). Defaults to --end_date.")
     parser.add_argument("--lookback_days", type=int, default=7,
                        help="Days before first resolution to start simulation (default 7)")
+    parser.add_argument("--resolution_guard", type=int, default=None,
+                       help="Warmup-only per-question current/search date: resolution_date - resolution_guard days; replaces the shared warmup sim-day date when set")
     
     # Data paths
     # Data paths
@@ -698,11 +710,6 @@ def main():
                        help="Run agents in parallel (default: True)")
     parser.add_argument("--no_parallel", action="store_true",
                        help="Disable parallel agent execution")
-    parser.add_argument("--cheat_feedback", action="store_true", default=False,
-                       help="Provide agents with privileged directional-correctness feedback before memory update")
-    parser.add_argument("--cheat_feedback_detail", choices=["full", "direction"], default="full",
-                       help="Cheat feedback detail level: 'full' (Brier scores) or 'direction' (labels only)")
-    
     # Single-agent settings (used when no config file)
     parser.add_argument("--scaffold", choices=["basic", "allQ", "allq", "allqd", "og", "qwenbasic", "qwenallq", "mirobasic", "miroallq", "gptossbasic", "gptossallq"], default="basic",
                        help="Agent scaffold to use (default: basic). Native Qwen/Miro/GPT-OSS variants must be selected explicitly.")
@@ -1083,6 +1090,21 @@ def main():
     # Set output dir for matcher logs
     # Set output dir for matcher logs
     os.environ['SIM_OUTPUT_DIR'] = output_dir
+
+    matcher_cache_path = str(
+        resolve_sim_matcher_cache_path(
+            output_dir=output_dir,
+            matching=args.matching,
+            matcher=args.matcher,
+            split=args.split,
+            matcher_cache=getattr(args, "matcher_cache", None),
+        )
+    )
+    local_matcher_cache_path = os.path.join(output_dir, "matcher_cache.json")
+    if os.path.normpath(matcher_cache_path) == os.path.normpath(os.path.abspath(local_matcher_cache_path)):
+        print(f"Matcher cache: per-run JSON at {matcher_cache_path}")
+    else:
+        print(f"Matcher cache: shared JSON at {matcher_cache_path}")
     
     matcher_provider = None
     
@@ -1265,6 +1287,7 @@ def main():
             max_submit_retries=args.max_retries,
             memory_dir=agent_dir,
             enable_memory=True,
+            append_model_output_logs=bool(args.resume),
             tool_result_keep_last=int(getattr(args, 'tool_result_keep_last', -1)),
             sampling_params={
                 'temperature': args.temperature,
@@ -1274,6 +1297,7 @@ def main():
                 **({'repetition_penalty': float(args.repetition_penalty)} if getattr(args, 'repetition_penalty', None) is not None else {}),
             },
             search_cutoff_days=args.search_cutoff_days,
+            resolution_guard=args.resolution_guard,
             timegap_days=args.timegap_days,
             single_agent_mode=True,  # Legacy CLI mode is always single-agent
             gptoss_prompt_mode=args.gptoss_prompt_mode,
@@ -1282,8 +1306,6 @@ def main():
             gptoss_responses_max_retries=args.gptoss_responses_max_retries,
             gptoss_retry_backoff_base_s=args.gptoss_retry_backoff_base_s,
             gptoss_retry_backoff_max_s=args.gptoss_retry_backoff_max_s,
-            cheat_feedback=getattr(args, 'cheat_feedback', False),
-            cheat_feedback_detail=getattr(args, 'cheat_feedback_detail', 'full'),
         )
         if args.scaffold == 'basic':
             agent_cls = BasicAgent
@@ -1405,7 +1427,7 @@ def main():
         subsample_per_month=args.subsample_per_month,
         timegap_days=args.timegap_days,
         resume_dir=args.resume if args.resume else None,
-        cheat_feedback=getattr(args, 'cheat_feedback', False),
+        matcher_cache_path=matcher_cache_path,
     )
     
     # Add all agents

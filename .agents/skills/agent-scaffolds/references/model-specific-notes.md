@@ -25,13 +25,13 @@ python mpi_scripts/run_sim/submit_sim.py \
 
 ### Qwen3 vs Qwen3.5 (which scaffold)
 
-- **Qwen3:** Do **not** use `qwenbasic` / `qwenallq` (`agents/qwenAgent`). Those scaffolds assume **Qwen3.5-style** vLLM native tool calling (`qwen3_coder` parser). For Qwen3 in this repo, use **`basic` / `allQ` / `allqd`** with **`vllm_enable_tools: false`** so the model follows the **BasicAgent text/action protocol** (see `configs/qwen3/`). If you ever enable vLLM native tools on Qwen3, Qwen’s docs point at **`hermes`** as the tool-call parser—set `vllm_tool_call_parser: hermes` explicitly; the repo’s auto-picker uses **`qwen3_coder`** for any model id containing `qwen`, which targets Qwen3.5 rather than Qwen3.
-- **Qwen3.5:** Use **`qwenbasic`** or **`qwenallq`** with **`vllm_enable_tools: true`** and **`vllm_tool_call_parser: qwen3_coder`** (matches vLLM’s Qwen3.5 recipe). See `configs/qwen3.5/`.
+- **Qwen3:** Base scaffolds are now tool-only too. For Qwen3 on vLLM, use **`basic` / `allQ` / `allqd`** with **`vllm_enable_tools: true`** and set **`vllm_tool_call_parser: hermes`** explicitly. `qwenbasic` / `qwenallq` are still the Qwen-native compatibility wrappers, but the repo no longer keeps a separate XML/text protocol for base scaffolds.
+- **Qwen3.5:** Use **`basic` / `allQ` / `allqd`** or the thin **`qwenbasic` / `qwenallq`** wrappers with **`vllm_enable_tools: true`** and **`vllm_tool_call_parser: qwen3_coder`**. See `configs/qwen3.5/`.
 
 ### Qwen3.5 tuning and loop notes
 
-- Use scaffold `qwenbasic` or `qwenallq` explicitly for 3.5.
-- Qwen scaffolds keep the base simulation semantics but use Qwen-native tool-calling and prompt formatting.
+- Use scaffold `qwenbasic` or `qwenallq` explicitly for 3.5 only if you want the thin Qwen-named wrappers; the base scaffolds now share the same chat-tools loop.
+- Qwen scaffolds keep the base simulation semantics and now mostly act as compatibility shims over the base tool loop.
 - `qwenallq` mirrors AllQ warmup semantics with the native Qwen loop.
 - For local Qwen3.5 runs in this repo, the current full-context tuning is:
   - `max_model_len=262144`

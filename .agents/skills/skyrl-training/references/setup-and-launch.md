@@ -31,16 +31,16 @@ export PYTHONPATH="$(pwd):$(pwd)/third_party/SkyRL:$(pwd)/third_party/SkyRL/skyr
 
 ## Optional Manual Data Prep
 
+`scripts/run_skyrl_openforesight_search.py` **rebuilds** `train.parquet` / `validation.parquet` on every launch under ``<resolved training.log_path>/prepared_parquet/`` and **deletes that directory** when the driver exits (success or failure). Set **`training.log_path`** (e.g. ``${FSIM_SKYRL_LOG_BASE}/{run_name}/infra``) so each run has a stable log tree.
+
+To materialize parquets elsewhere without running SkyRL (debugging or ad-hoc inspection), use:
+
 ```bash
 python scripts/prepare_skyrl_openforesight_search_data.py \
   --dataset_path "${FSIM_DATASET_PATH}" \
-  --prepared-data-dir "${FSIM_SKYRL_PREPARED_DATA_DIR}" \
+  --prepared-data-dir /path/to/output_dir \
   --search_db "${FSIM_SEARCH_DB}"
 ```
-
-`scripts/run_skyrl_openforesight_search.py` can also build the data automatically if it is missing.
-
-Set **`FSIM_SKYRL_PREPARED_DATA_DIR`** (and `data.prepared_data_dir: ${FSIM_SKYRL_PREPARED_DATA_DIR}` in YAML) to **one** directory reused by all runs. To consolidate from older per-experiment folders, copy the latest `train.parquet` / `validation.parquet` into that directory (or run prep once with `--force-rebuild-data`). Per-run SkyRL outputs use **`training.log_path`** / **`FSIM_SKYRL_LOG_BASE`**, not `FSIM_SKYRL_PREPARED_DATA_DIR`.
 
 When the SkyRL config sets `matching: "openrouter"`, the warmup env reuses
 forecast-sim's `AnswerMatcher`, so `OPENROUTER_API_KEY` must be available in

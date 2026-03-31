@@ -1,10 +1,10 @@
-from datetime import date
+from datetime import date, timedelta
 from typing import List, Dict, Any, Optional, NamedTuple
 import time
 
 from agents.basicAgent.agent import BasicAgent
 from agents.basicAgent.config import AgentConfig
-from agents.utils.forecast_parser import parse_action, parse_answer_probability, ParsedAction
+from agents.basicAgent.tools import build_memory_phase_tools, chat_response_to_action
 from agents.utils.budget import BudgetSettings, BudgetTracker
 
 
@@ -54,30 +54,8 @@ class AllQAgent(BasicAgent):
         return any(marker in msg for marker in fatal_markers)
 
     def _build_warmup_final_submit_instruction(self, target_qid: str, budget: BudgetTracker) -> str:
-        """
-        Build a strict final-submit instruction once the loop budget becomes binding.
-
-        This is warmup-only and always targets a single question id.
-        """
-        preamble = self._build_force_submit_preamble(budget)
-        if self.config.singleans:
-            return (
-                f"{preamble}\n"
-                f"Target question ID: {target_qid}\n"
-                "Do NOT search, query, or skip.\n"
-                "Respond ONLY with:\n"
-                "<answer>...</answer>\n"
-                "<probability>...</probability>\n"
-                "No extra text."
-            )
-
-        return (
-            f"{preamble}\n"
-            f"Target question ID: {target_qid}\n"
-            "Do NOT use search, query, or next.\n"
-            "Return exactly one submit action for this qid only:\n"
-            f"<action type=\"submit\"><forecast qid=\"{target_qid}\">...</forecast></action>"
-        )
+        """Build the strict final-submit instruction for one warmup question."""
+        return self._build_final_submit_tool_instruction(target_qid, budget)
 
     def _warmup_memory_mode(self) -> Optional[str]:
         from agents.utils.memory import ActiveMemory, StructuredMemory
@@ -107,38 +85,32 @@ class AllQAgent(BasicAgent):
         sampling_params["max_tokens"] = min(max_tokens, self.WARMUP_MEMORY_MAX_OUTPUT_TOKENS)
         return sampling_params
 
-    def _build_warmup_memory_prompt(self, qid: str, question_title: str) -> str:
-        mode = self._warmup_memory_mode()
-        if mode == "active":
-            return f"""You just finished forecasting question {qid}: "{question_title}".
-
-Using the conversation above, write exactly one question-specific memory entry for this qid.
-- Capture only the key reasoning, evidence, calibration, and what would change your mind.
-- Keep the memory concise and specific.
-- Do not add meta-lessons across multiple questions.
-- Do not mention future cleanup steps.
-
-Output exactly one block:
-<mem_add>
-qid: {qid}
-question: {question_title}
-memory: Key reasoning, evidence, prediction, and update triggers (max 1000 chars)
-category: topic_category
-</mem_add>"""
-
+    @staticmethod
+    def _build_warmup_mem_tool_prompt(qid: str, question_title: str) -> str:
         return f"""You just finished forecasting question {qid}: "{question_title}".
 
-Using the conversation above, create exactly one structured memory entry for this question only.
-- Store question-specific reasoning, evidence, calibration, and what would change your mind.
-- Do not add cross-question meta-lessons.
-- Include the question id in the entry name or description.
+Call exactly one tool now: `mem_add`.
+Do not answer with plain text.
 
-Output exactly one action block:
-<action type="memory_new">
-<name>q{qid}-lowercase-hyphenated-topic</name>
-<description>Question {qid}: what this stores and when to use it</description>
-<content>Key reasoning, evidence, prediction, and update triggers (max 1024 chars)</content>
-</action>"""
+Requirements:
+- qid must be exactly "{qid}"
+- question should be "{question_title}"
+- memory should store only question-specific reasoning, evidence, calibration, and update triggers
+- do not store cross-question lessons or cleanup notes
+- keep memory concise and specific"""
+
+    @staticmethod
+    def _build_warmup_structured_memory_tool_prompt(qid: str, question_title: str) -> str:
+        return f"""You just finished forecasting question {qid}: "{question_title}".
+
+Call exactly one tool now: `memory_new`.
+Do not answer with plain text.
+
+Requirements:
+- store only question-specific reasoning, evidence, calibration, and update triggers
+- do not store cross-question meta-lessons
+- include question id {qid} in the entry name or description
+- use a short lowercase hyphenated name"""
 
     def warmup(self, forecast_interface, current_date: date) -> None:
         """
@@ -146,6 +118,7 @@ Output exactly one action block:
         This effectively replaces the standard 'act' loop for Day 0.
         """
         print(f"[{self.agent_id}] Starting WARMUP phase on {current_date}")
+        self._require_chat_tools()
         
         # Start timing for Day 0
         self._timer.start_day()
@@ -245,7 +218,7 @@ Output exactly one action block:
                         ) from e
             
         self.warmed_up = True
-        forecast_interface.flush_warmup_raw_logs()
+        self._flush_warmup_raw_logs()
 
         # Active memory: seed mem_df from per-question warmup conversations.
         from agents.utils.memory import ActiveMemory
@@ -292,38 +265,59 @@ Output exactly one action block:
 
     def _process_single_question(self, q, current_date, forecast_interface):
         """Process a single question validation loop (thread-safe)."""
-        # customized prompt for single-question focus
-        system_prompt = self._build_warmup_system_prompt(current_date, q, forecast_interface=forecast_interface)
-        messages = [{"role": "user", "content": system_prompt}]
+        effective_current_date = self._get_warmup_current_date(current_date, q)
+        self._set_warmup_search_context(current_date, q)
+        try:
+            # customized prompt for single-question focus
+            system_prompt = self._build_warmup_system_prompt(
+                effective_current_date,
+                q,
+                forecast_interface=forecast_interface,
+            )
+            messages = [{"role": "user", "content": system_prompt}]
 
-        # Run mini-loop for this question
-        result = self._run_warmup_loop(messages, forecast_interface, q.qid)
+            # Run mini-loop for this question
+            result = self._run_warmup_loop(messages, forecast_interface, q.qid)
 
-        if hasattr(self, '_warmup_mem_entries'):
-            if result.context_limit_hit:
-                self._warmup_mem_entries.append(
-                    self._warmup_mem_placeholder(q.qid, q.title, result.submitted_forecasts)
-                )
-            elif result.submitted:
-                mem_entry = self._request_warmup_mem(
-                    messages, q.qid, q.title, result.submitted_forecasts
-                )
-                if mem_entry:
-                    self._warmup_mem_entries.append(mem_entry)
-
-        if hasattr(self, '_warmup_structured_entries'):
-            if result.context_limit_hit:
-                self._warmup_structured_entries.append(
-                    self._warmup_structured_placeholder(
-                        q.qid, q.title, result.submitted_forecasts
+            if hasattr(self, '_warmup_mem_entries'):
+                if result.context_limit_hit:
+                    self._warmup_mem_entries.append(
+                        self._warmup_mem_placeholder(
+                            q.qid,
+                            q.title,
+                            result.submitted_forecasts,
+                        )
                     )
-                )
-            elif result.submitted:
-                structured_entry = self._request_warmup_structured_memory(
-                    messages, q.qid, q.title, result.submitted_forecasts
-                )
-                if structured_entry:
-                    self._warmup_structured_entries.append(structured_entry)
+                elif result.submitted:
+                    mem_entry = self._request_warmup_mem(
+                        messages,
+                        q.qid,
+                        q.title,
+                        result.submitted_forecasts,
+                    )
+                    if mem_entry:
+                        self._warmup_mem_entries.append(mem_entry)
+
+            if hasattr(self, '_warmup_structured_entries'):
+                if result.context_limit_hit:
+                    self._warmup_structured_entries.append(
+                        self._warmup_structured_placeholder(
+                            q.qid,
+                            q.title,
+                            result.submitted_forecasts,
+                        )
+                    )
+                elif result.submitted:
+                    structured_entry = self._request_warmup_structured_memory(
+                        messages,
+                        q.qid,
+                        q.title,
+                        result.submitted_forecasts,
+                    )
+                    if structured_entry:
+                        self._warmup_structured_entries.append(structured_entry)
+        finally:
+            self._clear_warmup_search_context()
 
     def _request_warmup_mem(
         self,
@@ -333,13 +327,23 @@ Output exactly one action block:
         submitted_forecasts: Optional[List[Dict[str, Any]]] = None,
     ) -> Optional[Dict]:
         """Finalize one same-context warmup mem_df entry for a submitted question."""
-        from agents.utils.forecast_parser import extract_mem_ops
-
-        mem_messages = messages + [{"role": "user", "content": self._build_warmup_memory_prompt(qid, question_title)}]
+        mem_messages = messages + [{"role": "user", "content": self._build_warmup_mem_tool_prompt(qid, question_title)}]
+        allowed_tools = [
+            tool
+            for tool in build_memory_phase_tools(enable_memory=True, enable_mem_df=True)
+            if tool.get("function", {}).get("name") == "mem_add"
+        ]
         sampling_params = self._warmup_memory_sampling_params()
+        sampling_params["tool_choice"] = "required"
+
         for attempt in range(self.WARMUP_MEMORY_MAX_RETRIES + 1):
             try:
-                response, usage = self.inference.chat(mem_messages, sampling_params)
+                resp_json = self._call_chat_json_with_retries(
+                    messages=mem_messages,
+                    tools=allowed_tools,
+                    sampling_params=sampling_params,
+                )
+                usage = self._normalize_chat_usage(resp_json)
                 self._timer.record_tokens(usage)
                 self._timer.record_cost(usage.get("cost", 0), "llm")
             except Exception as e:
@@ -349,9 +353,9 @@ Output exactly one action block:
                 print(f"[{self.agent_id}] Warmup mem finalize failed for qid {qid}: {e}")
                 continue
 
-            adds, _, _ = extract_mem_ops(response)
-            if adds:
-                add = adds[0]
+            parsed, _, _ = chat_response_to_action(resp_json)
+            if parsed is not None and parsed.action_type == "mem_add" and parsed.mem_data:
+                add = dict(parsed.mem_data)
                 add_qid = str(add.get("qid", qid))
                 if add_qid != str(qid):
                     if attempt < self.WARMUP_MEMORY_MAX_RETRIES:
@@ -375,12 +379,12 @@ Output exactly one action block:
             if attempt < self.WARMUP_MEMORY_MAX_RETRIES:
                 print(
                     f"[{self.agent_id}] Warmup mem finalize retry {attempt+1} for qid {qid}: "
-                    f"response_preview={response[:200]!r}"
+                    f"action={getattr(parsed, 'action_type', None)}"
                 )
                 continue
             print(
                 f"[{self.agent_id}] Warmup mem finalize invalid for qid {qid}: "
-                f"response_preview={response[:200]!r}"
+                f"action={getattr(parsed, 'action_type', None)}"
             )
 
         return self._warmup_mem_placeholder(qid, question_title, submitted_forecasts)
@@ -494,13 +498,23 @@ Output exactly one action block:
         submitted_forecasts: Optional[List[Dict[str, Any]]] = None,
     ) -> Optional[Dict]:
         """Finalize one same-context warmup structured-memory entry."""
-        from agents.utils.forecast_parser import parse_action
-
-        mem_messages = messages + [{"role": "user", "content": self._build_warmup_memory_prompt(qid, question_title)}]
+        mem_messages = messages + [{"role": "user", "content": self._build_warmup_structured_memory_tool_prompt(qid, question_title)}]
+        allowed_tools = [
+            tool
+            for tool in build_memory_phase_tools(enable_memory=True, enable_mem_df=False)
+            if tool.get("function", {}).get("name") == "memory_new"
+        ]
         sampling_params = self._warmup_memory_sampling_params()
+        sampling_params["tool_choice"] = "required"
+
         for attempt in range(self.WARMUP_MEMORY_MAX_RETRIES + 1):
             try:
-                response, usage = self.inference.chat(mem_messages, sampling_params)
+                resp_json = self._call_chat_json_with_retries(
+                    messages=mem_messages,
+                    tools=allowed_tools,
+                    sampling_params=sampling_params,
+                )
+                usage = self._normalize_chat_usage(resp_json)
                 self._timer.record_tokens(usage)
                 self._timer.record_cost(usage.get("cost", 0), "llm")
             except Exception as e:
@@ -510,19 +524,19 @@ Output exactly one action block:
                 print(f"[{self.agent_id}] Warmup structured memory finalize failed for qid {qid}: {e}")
                 continue
 
-            parsed = parse_action(response, self.config.max_outcomes_per_question)
-            if parsed.action_type == "memory_new" and parsed.memory_new_data:
-                return parsed.memory_new_data
+            parsed, _, _ = chat_response_to_action(resp_json)
+            if parsed is not None and parsed.action_type == "memory_new" and parsed.memory_new_data:
+                return dict(parsed.memory_new_data)
 
             if attempt < self.WARMUP_MEMORY_MAX_RETRIES:
                 print(
                     f"[{self.agent_id}] Warmup structured memory retry {attempt+1} for qid {qid}: "
-                    f"response_preview={response[:200]!r}"
+                    f"action={getattr(parsed, 'action_type', None)}"
                 )
                 continue
             print(
                 f"[{self.agent_id}] Warmup structured memory invalid for qid {qid}: "
-                f"response_preview={response[:200]!r}"
+                f"action={getattr(parsed, 'action_type', None)}"
             )
 
         return self._warmup_structured_placeholder(qid, question_title, submitted_forecasts)
@@ -546,8 +560,27 @@ Output exactly one action block:
         Special setup for warmup that skips DfInterface since market CSV doesn't exist yet.
         """
         # We purposely skip self._query_handler.setup() because query is disabled in warmup
+        self._set_log_date(current_date)
         self._search_handler.set_date(current_date)
         self._forecast_interface = forecast_interface
+
+    def _get_warmup_current_date(self, current_date: date, q) -> date:
+        resolution_guard = getattr(self.config, "resolution_guard", None)
+        resolution_date = getattr(q, "resolution_date", None)
+        if resolution_guard is None or resolution_date is None:
+            return current_date
+        return resolution_date - timedelta(days=resolution_guard)
+
+    def _set_warmup_search_context(self, current_date: date, q) -> None:
+        self._search_handler.set_date(current_date)
+        effective_current_date = self._get_warmup_current_date(current_date, q)
+        if effective_current_date == current_date:
+            self._search_handler.clear_current_date_override()
+            return
+        self._search_handler.set_current_date_override(effective_current_date)
+
+    def _clear_warmup_search_context(self) -> None:
+        self._search_handler.clear_current_date_override()
 
     def _build_instructions(self, current_date: date) -> str:
         """
@@ -596,243 +629,27 @@ Output exactly one action block:
 
     def _run_warmup_loop(self, messages: List[Dict], forecast_interface, target_qid: str) -> WarmupLoopResult:
         """
-        Specialized action loop for warmup:
-        - Max actions determined by config.warmup_max_actions (default 10)
-        - Submit MUST be for target_qid (enforced by prompt mostly, but logic handles generic submit)
-        - All actions are tagged with target_qid for searchable logs
+        Per-question warmup loop using the same chat-tools protocol as the daily agent.
         """
-        budget = self._create_warmup_budget_tracker()
-        budget.bootstrap_context(messages)
-        raw_stream = "warmup"
-        final_submit_prompt_injected = False
-        final_submit_retry_used = False
-        empty_retries = 0
-        max_empty_retries = 2  # retry up to 2 times on empty responses mid-loop
-
-        while not budget.is_exhausted():
-            force_submit_turn = budget.should_force_submit()
-            if force_submit_turn and not final_submit_prompt_injected:
-                self._append_with_budget(
-                    messages,
-                    budget,
-                    {
-                        "role": "user",
-                        "content": self._build_warmup_final_submit_instruction(target_qid, budget),
-                    },
-                )
-                final_submit_prompt_injected = True
-
-            # Get response
-            try:
-                with self._timer.track("llm"):
-                    response, usage = self.inference.chat(messages, self.config.sampling_params)
-            except Exception as e:
-                print(f"  [{self.agent_id}] Warmup LLM error for qid {target_qid}: {e}")
-                if self._is_fatal_inference_failure(e):
-                    raise
-                self._log_action(
-                    forecast_interface,
-                    messages,
-                    "",
-                    "llm_error",
-                    budget,
-                    qid=target_qid,
-                    error=str(e),
-                    raw_stream=raw_stream,
-                )
-                return WarmupLoopResult(submitted=False)
-
-            if not response or not response.strip():
-                if force_submit_turn and not final_submit_retry_used:
-                    final_submit_retry_used = True
-                    continue
-                # Retry empty responses a few times before giving up
-                if empty_retries < max_empty_retries:
-                    empty_retries += 1
-                    print(f"  [{self.agent_id}] Empty response in warmup (retry {empty_retries}/{max_empty_retries})")
-                    continue
-                print(f"  [{self.agent_id}] Empty response in warmup after {max_empty_retries} retries, skipping Q.")
-                self._log_action(
-                    forecast_interface, messages, response or "", "warmup_empty_skip",
-                    budget, qid=target_qid, raw_stream=raw_stream,
-                )
-                return WarmupLoopResult(submitted=False)
-                
-            # Successful response — reset empty retry counter
-            empty_retries = 0
-
-            reasoning = usage.get("_reasoning_content") if usage else None
-            self._timer.record_tokens(usage)
-            self._timer.record_cost(usage.get("cost", 0), "llm")
-            budget.record_usage(usage)
-
-            # singleans mode: accept <answer>/<probability> tags and submit a single-outcome forecast.
-            if self.config.singleans:
-                answer, prob, err = parse_answer_probability(response)
-                if err:
-                    if force_submit_turn and not final_submit_retry_used:
-                        final_submit_retry_used = True
-                        continue
-                    self._append_with_budget(messages, budget, {"role": "assistant", "content": response})
-                    budget.consume_action()
-                    self._log_action(
-                        forecast_interface,
-                        messages,
-                        response,
-                        "warmup_singleans_parse_error",
-                        budget,
-                        qid=target_qid,
-                        error=err,
-                        reasoning=reasoning,
-                        raw_stream=raw_stream,
-                    )
-                    feedback = (
-                        "Format error: In singleans mode you must output:\n"
-                        "<answer>...</answer>\n"
-                        "<probability>...</probability>\n\n"
-                        f"Parser error: {err}"
-                    )
-                    self._append_with_budget(
-                        messages,
-                        budget,
-                        {"role": "user", "content": budget.format_feedback(feedback)},
-                    )
-                    continue
-
-                self._append_with_budget(messages, budget, {"role": "assistant", "content": response})
-                parsed = ParsedAction(
-                    action_type="submit",
-                    code=None,
-                    forecasts=[{"qid": target_qid, "outcomes": {answer: prob}}],
-                    query=None,
-                    error=None,
-                )
-                # Only end this question if submission actually succeeded.
-                submitted = self._handle_submit(
-                    messages,
-                    forecast_interface,
-                    response,
-                    parsed,
-                    budget,
-                    qid=target_qid,
-                    reasoning=reasoning,
-                )
-                if submitted:
-                    return WarmupLoopResult(
-                        submitted=True,
-                        submitted_forecasts=list(parsed.forecasts or []),
-                    )
-                continue
-            
-            # Parse
-            parsed = parse_action(response, self.config.max_outcomes_per_question)
-            valid_forecasts = []
-            if parsed.action_type == "submit" and parsed.forecasts:
-                valid_forecasts = [f for f in parsed.forecasts if f.get("qid") == target_qid]
-
-            has_valid_final_submit = (
-                parsed.action_type == "submit"
-                and bool(valid_forecasts)
-                and self._forecasts_within_probability_bounds(valid_forecasts)
+        if self.config.singleans:
+            raise RuntimeError(
+                "AllQAgent warmup now requires chat tools. singleans is no longer supported here; "
+                "use the dedicated og scaffold if you need the answer/probability format."
             )
-            if force_submit_turn and not final_submit_retry_used and not has_valid_final_submit:
-                final_submit_retry_used = True
-                continue
 
-            self._append_with_budget(messages, budget, {"role": "assistant", "content": response})
-            
-            if parsed.action_type == "next":
-                # In warmup, 'next' isn't really appropriate as we want them to submit.
-                # But if they insist on skipping, we break.
-                self._log_action(forecast_interface, messages, response, "warmup_skip", 
-                               budget, qid=target_qid, reasoning=reasoning, raw_stream=raw_stream)
-                print(f"  [{self.agent_id}] Agent chose 'next' (skipping submission).")
-                break
-            
-            elif parsed.action_type == "query":
-                # Queries are disabled in warmup (no DataFrame access)
-                budget.consume_action()
-                self._log_action(forecast_interface, messages, response, "warmup_query_disabled",
-                               budget, qid=target_qid, reasoning=reasoning, raw_stream=raw_stream)
-                feedback = "Error: Database queries are not available in this per-question focused mode. Please use search or submit your forecast."
-                self._append_with_budget(
-                    messages,
-                    budget,
-                    {"role": "user", "content": budget.format_feedback(feedback)},
-                )
-            
-            elif parsed.action_type == "search":
-                self._handle_search(
-                    messages, forecast_interface, response, parsed, budget, 
-                    qid=target_qid, reasoning=reasoning, raw_stream=raw_stream
-                )
-            
-            elif parsed.action_type == "submit":
-                # Enforce strict single-QID submission
-                if parsed.forecasts:
-                    for f in parsed.forecasts:
-                        if f['qid'] != target_qid:
-                            print(f"  [{self.agent_id}] Ignoring submission for {f['qid']} (target: {target_qid})")
-                
-                # Replace with filtered list
-                parsed.forecasts = valid_forecasts
-                
-                if valid_forecasts:
-                    submitted = self._handle_submit(
-                        messages, forecast_interface, response, parsed, budget, 
-                        qid=target_qid, reasoning=reasoning, raw_stream=raw_stream
-                    )
-                    # End interaction immediately after successful submission.
-                    if submitted:
-                        return WarmupLoopResult(
-                            submitted=True,
-                            submitted_forecasts=list(valid_forecasts),
-                        )
-                    continue
-                else:
-                    # If no valid forecasts, warn agent
-                    budget.consume_action()
-                    self._log_action(forecast_interface, messages, response, "warmup_submit_wrong_qid",
-                                   budget, qid=target_qid, reasoning=reasoning, raw_stream=raw_stream)
-                    feedback = f"Error: You must submit a forecast for question {target_qid}. You submitted for different IDs or none."
-                    self._append_with_budget(
-                        messages,
-                        budget,
-                        {"role": "user", "content": budget.format_feedback(feedback)},
-                    )
-                
-            else:
-                self._handle_invalid(
-                    messages, forecast_interface, response, parsed, budget, 
-                    qid=target_qid, reasoning=reasoning, raw_stream=raw_stream
-                )
-
-        return WarmupLoopResult(submitted=False)
-
-    @staticmethod
-    def _forecasts_within_probability_bounds(forecasts: List[Dict[str, Any]]) -> bool:
-        """
-        Validate forecast payload structure against environment probability constraints.
-        """
-        if not forecasts:
-            return False
-        for f in forecasts:
-            outcomes = f.get("outcomes")
-            if not isinstance(outcomes, dict) or not outcomes:
-                return False
-            total = 0.0
-            for p in outcomes.values():
-                try:
-                    pv = float(p)
-                except Exception:
-                    return False
-                if pv < 0.0 or pv > 1.0:
-                    return False
-                total += pv
-            if total > 1.0 + 1e-6:
-                return False
-        return True
-
+        forecasts, context_limit_hit = self._run_chat_tools_action_loop(
+            messages=messages,
+            forecast_interface=forecast_interface,
+            target_qid=target_qid,
+            enable_query=False,
+            warmup_budget=True,
+            max_actions=self.config.warmup_max_actions,
+        )
+        return WarmupLoopResult(
+            submitted=bool(forecasts),
+            context_limit_hit=context_limit_hit,
+            submitted_forecasts=list(forecasts),
+        )
     def _format_forecast_dict(self, outcomes: Optional[Dict[str, float]]) -> str:
         """Compact, stable formatting for probability dicts in prompts."""
         if not outcomes:
@@ -884,27 +701,6 @@ Key Mechanics:
         budget_start_status = self._build_start_budget_status(warmup=True)
         budget_start_block = f"\nBudget at start:\n{budget_start_status}" if budget_start_status else ""
 
-        # Borrowing structure from BasicAgent._build_instructions but simplified
-        
-        search_section = ""
-        submit_num = 1
-        if self._search_handler.is_available:
-             submit_num = 2
-             search_section = f"""
-### 1. Search News Articles
-<action type="search">
-your search query here
-</action>
-
-Optional date filtering:
-<action type="search" from="YYYY-MM-DD" to="YYYY-MM-DD">
-your search query here
-</action>
-
-{self._search_results_description()}
-You can search for recent news to inform your forecast.
-"""
-
         # Optional: include existing prediction + market aggregate (without DF access).
         # We only include this section if there's something non-empty to show; on day 0
         # it is typically None/empty and can distract the model.
@@ -932,7 +728,14 @@ You can search for recent news to inform your forecast.
 
         # Detailed instructions as requested, based on BasicAgent but stripped of memory/peer score
         scoring_section = self._get_warmup_scoring_section(forecast_interface)
-        return f"""You are a forecasting agent. Today is {current_date}. 
+        search_block = ""
+        if self._search_handler.is_available:
+            search_block = (
+                "- `search_news(query, from_date?, to_date?)` for evidence. "
+                f"{self._search_results_description()}\n"
+            )
+
+        return f"""You are a forecasting agent. Today is {current_date}.
 Target Question: {q.title} (ID: {q.qid})
 
 Background: {q.background}
@@ -942,34 +745,24 @@ Answer Type: {q.answer_type}
 
 {scoring_section}
 
-## ACTIONS
+## INTERACTION FLOW
 {self._build_budget_overview(warmup=True, per_question=True)}
+This is per-question warmup mode, so `query_df` is unavailable.
 
-{search_section}
+## RESPONSE FORMAT
+Use the function tools from the tool schema. Call exactly one tool per turn. Do not emit XML action blocks.
 
-### {submit_num}. Submit Forecast
-<action type="submit">
-<forecast qid="{q.qid}">
-  <outcome name="Answer1" prob="0.5"/>
-  <outcome name="Answer2" prob="0.3"/>
-</forecast>
-</action>
-(Submitting ends your turn for this question).
+## TOOLS YOU SHOULD USE
+{search_block}- `submit_forecasts(forecasts)`: submit exactly one forecast for qid `{q.qid}`.
+- `next_day()`: skip this question only if you truly have no forecast to submit.
 
 ## SUBMISSION RULES
 - qid must be {q.qid}
 - Outcome names must be REAL predicted answers (e.g., person names, locations, numbers)
 - You can submit up to {self.config.max_outcomes_per_question} outcomes per question.
-- NEVER use placeholders like "Unknown", "TBD", "Other", "N/A" - these ALWAYS hurt your score
-- Probabilities must sum to ≤ 1.0
-
-## RESPONSE FORMAT
-<reasoning>
-...
-</reasoning>
-<action type="...">
-...
-</action>
+- NEVER use placeholders like "Unknown", "TBD", "Other", or "N/A"
+- Probabilities must sum to <= 1.0
+- A successful `submit_forecasts` call ends this question's warmup interaction.
 
 {budget_start_block}
 """
@@ -986,6 +779,7 @@ class AllQDailyAgent(AllQAgent):
 
     def act(self, doc_interface, forecast_interface, current_date: date):
         print(f"[{self.agent_id}] Starting ALLQD daily run on {current_date}")
+        self._require_chat_tools()
 
         # Start timing for the day
         self._timer.reset()

@@ -159,6 +159,23 @@ def _get_function_call_strings(model_output: str) -> List[str]:
     return [match[0] if match[0] else match[1] for match in raw_function_calls]
 
 
+def _json_safe(value: Any) -> Any:
+    """Normalize python-only containers from ``ast.literal_eval`` into JSON-safe shapes."""
+    if isinstance(value, dict):
+        return {key: _json_safe(val) for key, val in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, tuple):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, (set, frozenset)):
+        items = [_json_safe(item) for item in value]
+        try:
+            return sorted(items, key=lambda item: json.dumps(item, sort_keys=True, ensure_ascii=False))
+        except TypeError:
+            return items
+    return value
+
+
 def extract_tool_calls_vllm_qwen3_coder(
     model_output: str,
     *,
@@ -183,6 +200,7 @@ def extract_tool_calls_vllm_qwen3_coder(
         args = parsed.get("arguments")
         if not isinstance(name, str) or not isinstance(args, dict):
             continue
+        args = _json_safe(args)
         raw = json.dumps(args, ensure_ascii=False)
         calls.append(
             {

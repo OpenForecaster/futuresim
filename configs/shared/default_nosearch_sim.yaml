@@ -9,6 +9,7 @@ start_date: "2025-05-01" # Resolution window start
 end_date: "2025-08-23"   # Resolution window end
 lookback_days: 7         # Days before first resolution to start simulation
 search_cutoff_days: 0    # Cap on search date based on current date in sim
+resolution_guard: null   # Warmup-only extra search cap: resolution_date - resolution_guard days
 split: "test"            # Dataset split: train, test, or validation
 
 # --- Data Paths ---

@@ -1,0 +1,184 @@
+# SkyRL fully async day-0 style warmup search training on OpenForesight train split.
+# Uses a custom multi-turn env with LanceDB search + OpenForesight-style Brier reward.
+# Parquets are rebuilt every launch next to ``training.log_path`` and deleted when the driver exits.
+#
+# Submit with:
+#   python mpi_scripts/skyrl_search/submit_skyrl_search_train.py \
+#     --config configs/skyrl/skyrl_openforesight_search_warmup_qwen3.5_4b_fully_async.yaml --runs 1
+
+sim_name: "skyrl_of_search_warmup_qwen3.5_4b_fully_async"
+run_script: "run_skyrl_search_train_fully_async.sh"
+mode: "train"
+
+resources:
+  gpus: 8
+  # On MPI, the HTCondor `FullNode` template is A100-specific. Use root-slot mode so our
+  # H100/B200 CUDA-capability requirement is preserved while still asking for an empty 8-GPU node.
+  full_node: true
+  full_node_mode: "root_slot"
+  # Keep Ray's visible CPU budget at the proven MPI-safe value.
+  # On this cluster, raising it to 32 made ``ray.init`` stall before actor scheduling even though
+  # the local Ray instance started successfully.
+  cpus: 16
+  memory_gb: 256
+  disk_gb: 50
+  bid: 55
+  requirements: "TARGET.CUDACapability >= 9.0 && TARGET.CUDAGlobalMemoryMb > 70000"
+
+data:
+  dataset_path: "${FSIM_DATASET_PATH}"
+  train_split: "train"
+  val_split: "test"
+  # Day-0 warmup style: each question is evaluated at (resolution_date - lookback_days)
+  lookback_days: 7
+  # Optional shared cutoff date across all questions. Leave null to use per-question
+  # resolution_date - lookback_days.
+  global_sim_date: null
+  # Keep full train/validation by default; set these for quicker smoke tests.
+  max_train_questions: null
+  max_val_questions: null
+  resolution_start: null
+  resolution_end: null
+  seed: 42
+
+search:
+  search_db: "${FSIM_SEARCH_DB}"
+  embedding_model: "${FSIM_EMBEDDING_MODEL}"
+  # The embedding server shares one inference-side GPU but still has plenty of headroom on 4+4 runs.
+  # A modest bump gives it more scheduler/KV headroom during search-heavy rollouts.
+  embedding_gpu_mem: 0.30
+  # Warmup rollouts can hit the embedding server from many env workers at once.
+  # Matching the server scheduler to env concurrency reduces query queueing without changing policy behavior.
+  embedding_max_num_seqs: 32
+  aux_cuda_visible_devices: null
+  search_type: "hybrid"
+  search_cutoff_days: 0
+  search_min_days: 0
+  max_snippet_chars: 1200
+  allow_substring_match: true
+
+# Agent-facing warmup semantics. Keep these aligned with the Qwen tokenbudget eval configs.
+agent:
+  max_outcomes_per_question: 5
+  max_search_results: 5
+  warmup_max_actions: null
+  # Keep aligned with ``training.max_input_length`` (vLLM rollout cap + env token budget).
+  warmup_max_total_tokens: 65536
+  warmup_submit_reserve_tokens: 8192
+  warmup_force_submit_threshold_tokens: 16384
+
+# Keep correctness checks aligned with the main forecast-sim environment.
+matching: "openrouter"
+matcher: "deepseek/deepseek-v3.2"
+
+# OpenRouter matcher cache: ``FSIM_SKYRL_MATCHER_CACHE_DIR`` (default ``${FSIM_SKYRL_LOG_BASE}/matcher_cache``); ``<matcher_slug>.json`` when path is null.
+matcher_cache:
+  enabled: true
+  path: null
+
+training:
+  model_path: "${FSIM_SKYRL_MODEL_PATH}"
+  project_name: "skyrl-search-agent"
+  run_name: "skyrl_of_search_warmup_qwen3.5_4b_fully_async"
+  ckpt_path: "${FSIM_SKYRL_CKPT_BASE}/{run_name}"
+  export_path: "${FSIM_SKYRL_CKPT_BASE}/{run_name}/exports"
+  log_path: "${FSIM_SKYRL_LOG_BASE}/{run_name}/infra"
+  logger: "wandb"
+
+  strategy: "fsdp2"
+  # Qwen3.5 ref forward is stable here only when the ref model stays on GPU.
+  ref_fsdp_cpu_offload: false
+  placement:
+    # Full async needs disaggregated generation + training. Keep policy/ref colocated on the
+    # training side and reserve the other half of the 8-GPU node for vLLM engines.
+    colocate_all: false
+    colocate_policy_ref: true
+    policy_num_gpus_per_node: 4
+    ref_num_gpus_per_node: 4
+
+  epochs: 1
+  update_epochs_per_batch: 1
+  # Fully async requires ``train_batch_size == policy_mini_batch_size``.
+  train_batch_size: 64
+  # Keep the async trigger batch equal to the effective update batch so we preserve the current
+  # 64-prompt training semantics while meeting SkyRL's fully async constraint.
+  policy_mini_batch_size: 64
+  critic_mini_batch_size: 64
+  # Keep the proven per-GPU micro-batches; only the global placement changes here.
+  micro_forward_batch_size_per_gpu: 2
+  micro_train_batch_size_per_gpu: 1
+  gradient_checkpointing: true
+  gradient_checkpointing_use_reentrant: false
+
+  eval_batch_size: 160
+  eval_before_train: true
+  eval_interval: 20
+  eval_n_samples_per_prompt: 1
+  dump_eval_results: true
+
+  # Initial prompts are short, but the multi-turn search transcript can get long.
+  # Shorter cap reduces FSDP logprob forward peak memory after long search rollouts.
+  max_prompt_length: 32768
+  # Rollout + env budget cap; keeps multi-turn transcripts bounded for FSDP backward with colocated vLLM.
+  max_input_length: 65536
+  flash_attn: true
+  use_sample_packing: false
+
+  # Fewer rollouts per prompt cuts trajectory count (64×n_samples) and stabilizes colocated VRAM.
+  n_samples_per_prompt: 4
+  # `0` means "do not enforce a turn cap in the warmup env"; token budget becomes the visible limit.
+  max_turns: 0
+  use_conversation_multi_turn: true
+  append_eos_token_after_stop_str_in_multi_turn: true
+
+  # Match Qwen3.5 forecast-sim defaults (see configs/qwen3.5/allq_sim_qwen3.5_4b.yaml ``defaults.*``).
+  # ``scripts/run_skyrl_openforesight_search.py`` mirrors these into ``generator.eval_sampling_params``
+  # unless you set eval_* overrides explicitly.
+  temperature: 0.7
+  top_p: 0.95
+  top_k: 20
+  min_p: 0.0
+  repetition_penalty: 1.0
+  max_generate_length: 8192
+  sampling_logprobs: null
+  eval_sampling_logprobs: null
+  stop_tokens:
+    - "</tool_call>"
+
+  learning_rate: 1.0e-6
+  use_kl_loss: false
+  kl_loss_coef: 0.001
+  grpo_norm_by_std: false
+  tis_ratio_type: token
+  token_tis_ratio_clip_high: 2.0
+  fully_async:
+    max_staleness_steps: 4
+    # SkyRL's default heuristic is ``policy_mini_batch_size * (max_staleness_steps / 2 + 1)``.
+    # With a 64-group async mini-batch and max staleness 4, that gives 192 parallel workers.
+    num_parallel_generation_workers: 192
+
+  inference_backend: "vllm"
+  # 4 inference GPUs + 4 training GPUs on a single 8-GPU node.
+  inference_num_engines: 4
+  inference_tensor_parallel_size: 1
+  run_engines_locally: true
+  weight_sync_backend: "nccl"
+  async_engine: true
+  batched: false
+  # On disaggregated 4+4 H100 runs, inference GPUs have much more headroom than the sync/colocated path.
+  # Raising this improves KV-cache capacity and rollout concurrency while staying well below observed limits.
+  gpu_memory_utilization: 0.30
+  # Larger prefill chunks reduce scheduler overhead for long multi-turn prompts without changing tokens seen.
+  inference_max_num_batched_tokens: 32768
+  # Launcher derives vLLM max_model_len from max_input_length + max_generate_length unless overridden here.
+  inference_max_model_len: null
+  max_env_workers: 32
+
+  ckpt_interval: 20
+  hf_save_interval: 200
+  max_ckpts_to_keep: 5
+
+# Extra Hydra overrides (optional)
+hydra_overrides:
+  - "generator.inference_engine.engine_init_kwargs.language_model_only=true"
+  - "generator.inference_engine.engine_init_kwargs.skip_mm_profiling=true"

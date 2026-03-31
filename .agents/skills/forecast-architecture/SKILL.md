@@ -19,7 +19,8 @@ Use this skill for edits in `agents/`, `environment/`, prompt construction, and 
 
 - Predictions append to per-question history; they do not overwrite earlier forecasts.
 - Agents in the same wakeup session should see the same frozen aggregate state for fairness.
-- Persistent memory is the intended cross-day durable context.
+- The environment owns wakeup scheduling, market snapshots, and scoring; scaffold-specific session/transcript policy lives in `agents/`.
+- Persistent memory is the durable cross-run context for BasicAgent-style scaffolds, but live wakeup-session carryover is scaffold-owned rather than an environment invariant.
 - `timegap_days` turns the daily loop into wakeup sessions; prompt text, memory carryover, and active-question scoring should respect that session cadence.
 - `allQ` and `allqd` use per-question loops without the DataFrame query path.
 - Scaffold-specific prompt formats can differ, but simulation semantics should stay comparable unless the user wants a methodological shift.

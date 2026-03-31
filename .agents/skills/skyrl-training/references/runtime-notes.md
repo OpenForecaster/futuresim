@@ -1,7 +1,7 @@
 # Runtime Notes
 
 - `mpi_scripts/skyrl_search/run_skyrl_search_train.sh` wires `PYTHONPATH` so repo-local `sitecustomize.py` shims are active in workers.
-- OpenForesight warmup **prepared parquets** (`train.parquet` / `validation.parquet`) use **`FSIM_SKYRL_PREPARED_DATA_DIR`** / `data.prepared_data_dir` as a **single shared cache** across runs. Per-run SkyRL logs and infra use **`FSIM_SKYRL_LOG_BASE`** and `training.log_path`, not the prepared-data path.
+- OpenForesight warmup **prepared parquets** are written under **``<training.log_path>/prepared_parquet/``**, rebuilt on **every** `run_skyrl_openforesight_search.py` launch, then **removed** when the driver exits. Use **`FSIM_SKYRL_LOG_BASE`** / explicit `training.log_path` for per-run layout (see tracked SkyRL YAMLs).
 - The wrapper exports `RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES=1` to avoid duplicate-GPU NCCL initialization issues on packed nodes.
 - The wrapper also sets `SOFTFILELOCK=1` and cluster-safe Hugging Face cache paths.
 - Real FlashAttention is expected to be installed in the env; there is no repo-local fake `flash_attn` shim anymore.
@@ -40,7 +40,7 @@
 - Warmup env `search_news` / submit selection use `qwen_execute_news_search`,
   `qwen_optional_search_dates_from_parsed`, and `qwen_parse_warmup_submit_outcomes`
   from `agents/qwenAgent/agent.py` (same path as `QwenBasicAgent._qwen_handle_search`
-  and `_qwen_handle_submit` forecast filtering + `_forecasts_within_probability_bounds`).
+  and `_qwen_handle_submit` forecast filtering + `BasicAgent._forecasts_within_probability_bounds`).
 - Current `sitecustomize.py` shims (SkyRL **v0.1.0**; no backward-compat with older SkyRL):
   - torch **2.10+** process-group kwarg selection (`backend_options` vs `pg_options`)
   - Qwen3.5 FSDP wrap policy when `_no_split_modules` references absent vision layers

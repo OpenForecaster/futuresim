@@ -213,6 +213,8 @@ class AnswerMatcher:
         self._timing_total_seconds = 0.0
         self._timing_total_cost = 0.0
         self._cache_dirty = False
+        self._cache_hit_count = 0
+        self._cache_miss_count = 0
 
         # (pred_norm, truth_norm, qid, title_norm) -> bool
         self._cache: Dict[tuple, bool] = {}
@@ -266,8 +268,7 @@ class AnswerMatcher:
                 for k, v in raw_cache.items():
                     key = self._disk_to_key(str(k))
                     self._cache[key] = bool(v)
-                if self.logger:
-                    print(f"  Loaded matcher cache: {len(self._cache)} entries from {path}")
+                print(f"  Loaded matcher cache: {len(self._cache)} entries from {path}")
             except Exception as e:
                 print(f"  Error loading matcher cache: {e}")
 
@@ -278,7 +279,7 @@ class AnswerMatcher:
         path = str(self.cache_path)
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         lock_path = path + ".lock"
-        tmp_path = path + ".tmp"
+        tmp_path = f"{path}.{os.getpid()}.tmp"
         written = False
 
         try:
@@ -296,7 +297,7 @@ class AnswerMatcher:
                                 merged = {str(k): bool(v) for k, v in cur.items()}
                         except Exception:
                             merged = {}
-                    for tup, val in self._cache.items():
+                    for tup, val in list(self._cache.items()):
                         merged[self._key_to_disk(tup)] = bool(val)
                     payload = json.dumps(merged, ensure_ascii=False, sort_keys=True)
                     with open(tmp_path, "w", encoding="utf-8") as wf:
@@ -317,7 +318,7 @@ class AnswerMatcher:
                             merged = {str(k): bool(v) for k, v in cur.items()}
                     except Exception:
                         merged = {}
-                for tup, val in self._cache.items():
+                for tup, val in list(self._cache.items()):
                     merged[self._key_to_disk(tup)] = bool(val)
                 payload = json.dumps(merged, ensure_ascii=False, sort_keys=True)
                 with open(tmp_path, "w", encoding="utf-8") as wf:
@@ -335,6 +336,7 @@ class AnswerMatcher:
 
         if written:
             self._cache_dirty = False
+            print(f"  Persisted matcher cache: {len(self._cache)} entries -> {path}")
 
     def save_cache(self):
         """Backward-compatible alias for :meth:`persist_cache`."""
@@ -380,12 +382,14 @@ class AnswerMatcher:
 
         cache_key = self._make_cache_key(pred_norm, truth_norm, question_id, question_title)
         if cache_key in self._cache:
+            self._cache_hit_count += 1
             return self._cache[cache_key]
 
         legacy_key = (pred_norm, truth_norm, str(question_id) if question_id else "None")
         if legacy_key in self._cache:
             val = self._cache[legacy_key]
             self._cache[cache_key] = val
+            self._cache_hit_count += 1
             return val
 
         # Ask LLM
@@ -393,6 +397,7 @@ class AnswerMatcher:
         self._cache[cache_key] = result
         if self.cache_path:
             self._cache_dirty = True
+        self._cache_miss_count += 1
 
         return result
     
@@ -465,10 +470,12 @@ class AnswerMatcher:
                 continue
             cache_key = self._make_cache_key(pred_norm, truth_norm, qid, qtitle)
             if cache_key in self._cache:
+                self._cache_hit_count += 1
                 results[i] = self._cache[cache_key]
                 continue
             legacy_key = (pred_norm, truth_norm, str(qid) if qid else "None")
             if legacy_key in self._cache:
+                self._cache_hit_count += 1
                 results[i] = self._cache[legacy_key]
                 self._cache[cache_key] = self._cache[legacy_key]
                 continue
@@ -516,6 +523,7 @@ class AnswerMatcher:
 
         if pending_messages and self.cache_path:
             self._cache_dirty = True
+        self._cache_miss_count += len(pending_messages)
 
         return [r if r is not None else False for r in results]
 
@@ -638,6 +646,8 @@ class AnswerMatcher:
         total = snapshot["matcher_total_seconds"]
         return {
             "cache_size": len(self._cache),
+            "cache_hits": int(self._cache_hit_count),
+            "cache_misses": int(self._cache_miss_count),
             "matcher_count": count,
             "matcher_total_seconds": round(total, 3),
             "matcher_avg_seconds": round(
@@ -655,6 +665,9 @@ class AnswerMatcher:
             "matcher_count": int(self._timing_count),
             "matcher_total_seconds": float(self._timing_total_seconds),
             "matcher_total_cost": float(self._timing_total_cost),
+            "cache_hits": int(self._cache_hit_count),
+            "cache_misses": int(self._cache_miss_count),
+            "cache_size": int(len(self._cache)),
         }
     
     def clear(self):

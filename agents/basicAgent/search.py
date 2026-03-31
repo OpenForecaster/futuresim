@@ -1,6 +1,7 @@
 """BasicAgent search handling."""
 
 from datetime import date, timedelta
+from threading import local
 from typing import List, Optional, Tuple
 
 from agents.search_tools.base import BaseSearchTool, SearchResult
@@ -24,6 +25,7 @@ class SearchHandler:
         self._search_cutoff_days = search_cutoff_days
         # Optional calendar ceiling on the latest article date (min with sim_date - cutoff). Useful for fixed "as of" evals.
         self._max_search_date = max_search_date
+        self._thread_state = local()
     
     @property
     def is_available(self) -> bool:
@@ -37,6 +39,21 @@ class SearchHandler:
     
     def set_date(self, current_date: date) -> None:
         self._current_date = current_date
+
+    def set_current_date_override(self, current_date: Optional[date]) -> None:
+        self._thread_state.current_date_override = current_date
+        self._thread_state.has_current_date_override = True
+
+    def clear_current_date_override(self) -> None:
+        if hasattr(self._thread_state, "current_date_override"):
+            del self._thread_state.current_date_override
+        if hasattr(self._thread_state, "has_current_date_override"):
+            del self._thread_state.has_current_date_override
+
+    def _effective_current_date(self) -> Optional[date]:
+        if getattr(self._thread_state, "has_current_date_override", False):
+            return getattr(self._thread_state, "current_date_override", None)
+        return self._current_date
     
     def search(
         self,
@@ -48,11 +65,13 @@ class SearchHandler:
     ) -> Tuple[str, Optional[str]]:
         if not self.is_available:
             return "", "Search not available"
-        if not self._current_date:
+        current_date = self._effective_current_date()
+        if not current_date:
             return "", "Current date not set"
         
-        # Never search past the simulation day (+ optional cutoff) to prevent leakage.
-        allowed_max_date = self._current_date - timedelta(days=self._search_cutoff_days)
+        # Never search past the effective current day (+ optional cutoff).
+        # Warmup can replace the shared sim day per-thread with a question-specific day.
+        allowed_max_date = current_date - timedelta(days=self._search_cutoff_days)
         if self._max_search_date is not None:
             allowed_max_date = min(allowed_max_date, self._max_search_date)
         effective_max_date = allowed_max_date

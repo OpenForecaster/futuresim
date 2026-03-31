@@ -18,6 +18,7 @@ from dataclasses import dataclass
 
 try:
     import requests
+    from requests.adapters import HTTPAdapter
 except ImportError:
     raise ImportError("requests module not found. Install with: pip install requests")
 
@@ -27,6 +28,42 @@ _VLLM_SERVERS: Dict[str, dict] = {}  # port -> {process, model_path}
 _NEXT_PORT = 8001
 _SERVERS_LOCK = Lock()
 _PORT_LOCK = Lock()
+
+
+def _normalize_cuda_visible_devices(cuda_visible_devices: Optional[str]) -> Optional[str]:
+    """Map UUID-based GPU specs to integer ordinals for subprocesses that require them."""
+    if cuda_visible_devices is None:
+        return None
+
+    raw = str(cuda_visible_devices).strip()
+    if not raw:
+        return raw
+
+    parts = [part.strip() for part in raw.split(",") if part.strip()]
+    if not parts or not any(part.startswith("GPU-") for part in parts):
+        return raw
+
+    try:
+        rows = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=index,uuid", "--format=csv,noheader,nounits"],
+            text=True,
+        ).splitlines()
+    except Exception:
+        return raw
+
+    uuid_to_index: Dict[str, str] = {}
+    for row in rows:
+        if not row.strip():
+            continue
+        index, _, uuid = row.partition(",")
+        if not uuid:
+            continue
+        uuid_to_index[uuid.strip()] = index.strip()
+
+    normalized: List[str] = []
+    for part in parts:
+        normalized.append(uuid_to_index.get(part, part))
+    return ",".join(normalized)
 
 
 def _is_gpt_oss_model(model_path: str, model_name: str) -> bool:
@@ -109,6 +146,7 @@ class VLLMInference:
                  max_model_len: int = 8192,
                  gpu_memory_utilization: float = 0.3,
                  max_num_seqs: int = 8,
+                 http_pool_maxsize: Optional[int] = None,
                  tensor_parallel_size: int = 1,
                  data_parallel_size: int = 1,
                  pipeline_parallel_size: int = 1,
@@ -152,6 +190,14 @@ class VLLMInference:
         self.max_model_len = max_model_len
         self.gpu_mem = gpu_memory_utilization
         self.max_num_seqs = max(1, int(max_num_seqs or 8))
+        if http_pool_maxsize is None:
+            env_pool = os.environ.get("FSIM_VLLM_HTTP_POOL_MAXSIZE", "").strip()
+            if env_pool:
+                try:
+                    http_pool_maxsize = int(env_pool)
+                except ValueError:
+                    http_pool_maxsize = None
+        self.http_pool_maxsize = max(1, int(http_pool_maxsize or max(32, self.max_num_seqs * 2)))
         self.tensor_parallel_size = max(1, int(tensor_parallel_size))
         self.data_parallel_size = max(1, int(data_parallel_size))
         self.pipeline_parallel_size = max(1, int(pipeline_parallel_size))
@@ -258,9 +304,9 @@ class VLLMInference:
                 cmd += ["--enable-prefix-caching"]
         
             # vLLM only needs auto-tool-choice flags when the server itself should
-            # parse model output into tool calls. Some scaffolds, like Miro, still
-            # pass tool schemas in the request but intentionally parse the emitted
-            # text client-side.
+            # parse model output into tool calls. MiroBasicAgent passes OpenAI `tools` for
+            # schema-side hints while prompts require MCP text; the client parses
+            # `<use_mcp_tool>` first, then API `tool_calls` if present.
             if self.enable_tools:
                 if self.tool_call_parser:
                     cmd += ["--enable-auto-tool-choice", "--tool-call-parser", self.tool_call_parser]
@@ -447,6 +493,14 @@ class VLLMInference:
         """Get or create requests session with proxy disabled for localhost."""
         if self._session is None:
             self._session = requests.Session()
+            adapter = HTTPAdapter(
+                pool_connections=self.http_pool_maxsize,
+                pool_maxsize=self.http_pool_maxsize,
+                max_retries=0,
+                pool_block=False,
+            )
+            self._session.mount("http://", adapter)
+            self._session.mount("https://", adapter)
             # Disable proxy for localhost - cluster has Squid proxy that intercepts all traffic
             self._session.proxies = {'http': None, 'https': None}
             self._session.trust_env = False  # Don't use system proxy settings
@@ -461,7 +515,7 @@ class VLLMInference:
         """
         env = os.environ.copy()
         if self.cuda_visible_devices is not None:
-            env["CUDA_VISIBLE_DEVICES"] = str(self.cuda_visible_devices)
+            env["CUDA_VISIBLE_DEVICES"] = _normalize_cuda_visible_devices(self.cuda_visible_devices)
         # Ensure subprocess can import local modules (inference.* wrapper).
         repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         existing_pythonpath = env.get("PYTHONPATH", "")

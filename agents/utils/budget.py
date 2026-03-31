@@ -78,7 +78,7 @@ def build_budget_overview(settings: BudgetSettings, *, per_question: bool = Fals
         elif settings.memory_phase_threshold_tokens is not None:
             action_budget = settings.max_total_tokens - settings.memory_phase_threshold_tokens
             lines.append(
-                "When you finish forecasting, call <action type=\"next\"/> to transition to the memory update phase. "
+                "When you finish forecasting, call `next_day()` to transition to the memory update phase. "
                 f"The transition also happens automatically when ~{action_budget} tokens have been used. "
                 f"The remaining ~{settings.memory_phase_threshold_tokens} tokens are reserved for memory updates."
             )
@@ -192,11 +192,35 @@ class BudgetTracker:
             return True
         return False
 
+    def force_submit_budget_active(self) -> bool:
+        return (
+            self.settings.submit_reserve_tokens > 0
+            or self.settings.force_submit_threshold_tokens > 0
+        )
+
+    def actions_until_force_submit(self) -> Optional[int]:
+        if not self.force_submit_budget_active() or self.actions_remaining is None:
+            return None
+        return max(self.actions_remaining - 1, 0)
+
+    def tokens_until_force_submit(self) -> Optional[int]:
+        if not self.force_submit_budget_active():
+            return None
+        remaining_tokens = self.token_budget_remaining()
+        if remaining_tokens is None:
+            return None
+        return max(remaining_tokens - self.settings.force_submit_threshold_tokens, 0)
+
     # ------------------------------------------------------------------
     # Status / feedback
     # ------------------------------------------------------------------
 
-    def status_text(self, *, include_exhaustion_warning: bool = False) -> str:
+    def status_text(
+        self,
+        *,
+        include_exhaustion_warning: bool = False,
+        include_force_submit_status: bool = False,
+    ) -> str:
         lines: List[str] = []
         if self.actions_remaining is not None:
             lines.append(f"Actions remaining: {max(self.actions_remaining, 0)}")
@@ -212,12 +236,28 @@ class BudgetTracker:
             until_mem = self.tokens_until_memory_phase()
             if until_mem is not None:
                 lines.append(f"Tokens remaining until memory phase: {until_mem}")
+            if include_force_submit_status:
+                until_force_actions = self.actions_until_force_submit()
+                if until_force_actions is not None:
+                    lines.append(f"Actions remaining until submit is forced: {until_force_actions}")
+                until_force_tokens = self.tokens_until_force_submit()
+                if until_force_tokens is not None:
+                    lines.append(f"Context tokens remaining until submit is forced: {until_force_tokens}")
         if include_exhaustion_warning and self.is_exhausted():
             lines.append("No more budget available. Your day ends now.")
         return "\n".join(lines)
 
-    def format_feedback(self, feedback: str, *, include_exhaustion_warning: bool = True) -> str:
-        status = self.status_text(include_exhaustion_warning=include_exhaustion_warning)
+    def format_feedback(
+        self,
+        feedback: str,
+        *,
+        include_exhaustion_warning: bool = True,
+        include_force_submit_status: bool = True,
+    ) -> str:
+        status = self.status_text(
+            include_exhaustion_warning=include_exhaustion_warning,
+            include_force_submit_status=include_force_submit_status,
+        )
         if not status:
             return feedback
         if feedback.endswith("\n"):
@@ -235,6 +275,9 @@ class BudgetTracker:
             metadata["token_budget_used"] = self.current_context_tokens
             metadata["token_budget_remaining"] = self.token_budget_remaining()
             metadata["prompt_cached_tokens"] = self.cached_prompt_tokens
+        if self.force_submit_budget_active():
+            metadata["actions_until_force_submit"] = self.actions_until_force_submit()
+            metadata["tokens_until_force_submit"] = self.tokens_until_force_submit()
         if self.settings.memory_phase_threshold_tokens is not None:
             metadata["tokens_until_memory_phase"] = self.tokens_until_memory_phase()
             metadata["in_memory_phase"] = self.memory_phase

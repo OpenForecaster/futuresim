@@ -74,6 +74,8 @@ parallel: true
 defaults:
   provider: "vllm"
   scaffold: "qwenallq"
+  max_total_tokens: 262144
+  warmup_max_total_tokens: 262144
   max_actions: 50
   warmup_max_actions: 10
   temperature: 0.7

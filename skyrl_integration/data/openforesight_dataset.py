@@ -15,7 +15,7 @@ from agents.qwenAgent.agent import QwenAllQAgent
 from datasets import Dataset
 import pandas as pd
 
-from skyrl_integration.constants import OPENFORESIGHT_SEARCH_WARMUP_ENV_ID
+from skyrl_integration.envs import OPENFORESIGHT_SEARCH_WARMUP_ENV_ID
 
 _REQUIRED_COLUMNS = [
     "qid",
@@ -102,6 +102,7 @@ def _build_row(
     search_db: str,
     embedding_model: str,
     embedding_gpu_mem: float,
+    embedding_max_num_seqs: int,
     aux_cuda_visible_devices: str,
     search_type: str,
     search_topk: int,
@@ -187,6 +188,7 @@ def _build_row(
         "search_db": search_db,
         "embedding_model": embedding_model,
         "embedding_gpu_mem": float(embedding_gpu_mem),
+        "embedding_max_num_seqs": int(embedding_max_num_seqs),
         "aux_cuda_visible_devices": str(aux_cuda_visible_devices or ""),
         "search_type": search_type,
         "search_topk": int(search_topk),
@@ -222,6 +224,7 @@ def _build_split_dataset(
     search_db: str,
     embedding_model: str,
     embedding_gpu_mem: float,
+    embedding_max_num_seqs: int,
     aux_cuda_visible_devices: str,
     search_type: str,
     search_topk: int,
@@ -265,6 +268,7 @@ def _build_split_dataset(
             search_db=search_db,
             embedding_model=embedding_model,
             embedding_gpu_mem=embedding_gpu_mem,
+            embedding_max_num_seqs=embedding_max_num_seqs,
             aux_cuda_visible_devices=aux_cuda_visible_devices,
             search_type=search_type,
             search_topk=search_topk,
@@ -303,6 +307,7 @@ def prepare_openforesight_search_dataset(
     search_db: str,
     embedding_model: str,
     embedding_gpu_mem: float = 0.3,
+    embedding_max_num_seqs: int = 16,
     aux_cuda_visible_devices: str = "",
     train_split: str = "train",
     val_split: str = "validation",
@@ -349,6 +354,7 @@ def prepare_openforesight_search_dataset(
         search_db=search_db,
         embedding_model=embedding_model,
         embedding_gpu_mem=float(embedding_gpu_mem),
+        embedding_max_num_seqs=int(embedding_max_num_seqs),
         aux_cuda_visible_devices=str(aux_cuda_visible_devices or ""),
         search_type=search_type,
         search_topk=search_topk,
@@ -381,6 +387,7 @@ def prepare_openforesight_search_dataset(
         search_db=search_db,
         embedding_model=embedding_model,
         embedding_gpu_mem=float(embedding_gpu_mem),
+        embedding_max_num_seqs=int(embedding_max_num_seqs),
         aux_cuda_visible_devices=str(aux_cuda_visible_devices or ""),
         search_type=search_type,
         search_topk=search_topk,

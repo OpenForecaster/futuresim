@@ -203,27 +203,17 @@ class OpenRouterInference:
         # Ensure rate limiter is initialized
         GlobalRateLimiter()
     
-    def chat(self, messages: List[Dict[str, str]], sampling_params: Dict[str, Any]) -> Tuple[str, Dict]:
-        """
-        Chat completion using messages format.
-        
-        Args:
-            messages: List of {"role": "system"|"user"|"assistant", "content": "..."}
-            sampling_params: Dict with temperature, max_tokens, etc.
-                Supported keys: temperature, max_tokens, top_p, top_k, 
-                frequency_penalty, presence_penalty, stop
-        
-        Returns:
-            The assistant's response text.
-        """
-        # Build request payload
-        payload = {
+    def _build_payload(
+        self,
+        messages: List[Dict[str, Any]],
+        sampling_params: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
             "model": self.model,
             "messages": messages,
             "usage": {"include": True},
         }
-        
-        # Map sampling_params to OpenRouter parameters
+
         param_mapping = {
             "temperature": "temperature",
             "max_tokens": "max_tokens",
@@ -232,29 +222,58 @@ class OpenRouterInference:
             "frequency_penalty": "frequency_penalty",
             "presence_penalty": "presence_penalty",
             "stop": "stop",
+            "tools": "tools",
+            "tool_choice": "tool_choice",
+            "parallel_tool_calls": "parallel_tool_calls",
         }
-        
         for local_key, api_key in param_mapping.items():
             if local_key in sampling_params:
                 payload[api_key] = sampling_params[local_key]
 
-        # Reasoning is a nested object, not a simple key rename — handle separately.
-        # Accepts either a dict (e.g. {"effort": "high"}) or a string effort level.
         reasoning_cfg = sampling_params.get("reasoning")
         if reasoning_cfg is not None:
             if isinstance(reasoning_cfg, str):
                 reasoning_cfg = {"effort": reasoning_cfg}
             payload["reasoning"] = reasoning_cfg
-        
-        # Add any default kwargs
+
         for key, value in self.default_kwargs.items():
             if key not in payload:
                 payload[key] = value
-        
-        # Make request with retries
-        return self._request_with_retry(payload)
+
+        return payload
+
+    def chat(self, messages: List[Dict[str, Any]], sampling_params: Dict[str, Any]) -> Tuple[str, Dict]:
+        data = self.chat_json(messages, sampling_params)
+        return self._extract_chat_text_and_usage(data)
+
+    def chat_json(self, messages: List[Dict[str, Any]], sampling_params: Dict[str, Any]) -> Dict[str, Any]:
+        payload = self._build_payload(messages, sampling_params)
+        return self._request_json_with_retry(payload)
+
+    @staticmethod
+    def _extract_chat_text_and_usage(data: Dict[str, Any]) -> Tuple[str, Dict]:
+        if "choices" not in data:
+            return "", {}
+
+        message = data["choices"][0]["message"]
+        content = message.get("content")
+        usage = data.get("usage", {})
+
+        reasoning = message.get("reasoning")
+        if reasoning:
+            usage["_reasoning_content"] = reasoning
+
+        finish_reason = data["choices"][0].get("finish_reason")
+        if finish_reason:
+            usage["_finish_reason"] = finish_reason
+
+        if isinstance(content, str):
+            return content, usage
+        if content is None:
+            return "", usage
+        return str(content), usage
     
-    def _request_with_retry(self, payload: Dict[str, Any]) -> Tuple[str, Dict]:
+    def _request_json_with_retry(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """
         Make API request with exponential backoff retry logic.
         
@@ -295,7 +314,7 @@ class OpenRouterInference:
                             continue
                         # Exhausted retries
                         print(f"  [OpenRouter] Malformed JSON after {self.max_retries} retries. Returning empty output.")
-                        return "", {}
+                        return {}
                     
                     # Check for provider errors returned as 200 (e.g., Xiaomi 524 timeout)
                     if "error" in data and "choices" not in data:
@@ -318,17 +337,9 @@ class OpenRouterInference:
                         error_detail = data.get("error", data)
                         raise RuntimeError(f"OpenRouter returned invalid response: {error_detail}")
                     
-                    content = data["choices"][0]["message"]["content"]
-                    usage = data.get("usage", {})
-
-                    # Extract reasoning if available
-                    reasoning = data["choices"][0]["message"].get("reasoning")
-                    if reasoning:
-                        usage["_reasoning_content"] = reasoning
-
-                    finish_reason = data["choices"][0].get("finish_reason")
-                    if finish_reason:
-                        usage["_finish_reason"] = finish_reason
+                    content, usage = self._extract_chat_text_and_usage(data)
+                    reasoning = usage.get("_reasoning_content")
+                    finish_reason = usage.get("_finish_reason")
 
                     # Treat null/empty content as retryable when reasoning exists
                     if (not content or not content.strip()) and reasoning:
@@ -349,7 +360,12 @@ class OpenRouterInference:
                             f"  [OpenRouter] Empty content persisted after {self.max_retries} retries, "
                             f"using reasoning as content ({len(reasoning)} chars)"
                         )
-                        return reasoning, usage
+                        first = data.get("choices", [{}])[0]
+                        if isinstance(first, dict):
+                            message = first.setdefault("message", {})
+                            if isinstance(message, dict):
+                                message["content"] = reasoning
+                        return data
 
                     # Log empty content without reasoning (unexpected)
                     if not content or not content.strip():
@@ -360,7 +376,7 @@ class OpenRouterInference:
                             f"reasoning={'yes' if reasoning else 'no'})"
                         )
 
-                    return content, usage
+                    return data
                 
                 # Rate limit or server error - retry (including 524 Cloudflare timeout)
                 if response.status_code in RETRYABLE_STATUS_CODES:
@@ -411,7 +427,7 @@ class OpenRouterInference:
         
         # All retries exhausted - return empty output to allow simulation to continue
         print(f"  [OpenRouter] Request failed after {self.max_retries} retries: {last_error}. Returning empty output.")
-        return "", {}
+        return {}
     
     def _calculate_backoff(self, attempt: int) -> float:
         """

@@ -110,9 +110,6 @@ class DummyForecastInterface:
     def submit_prediction(self, pred):
         self.submitted.append(pred)
 
-    def get_cheat_feedback(self, detail="full"):
-        return {"items": []}
-
 
 class ScriptedQwenAgent(QwenBasicAgent):
     """Agent that returns scripted Chat Completions responses."""

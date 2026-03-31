@@ -1,5 +1,6 @@
 """Custom SkyRL environments for forecast-sim."""
 
-from skyrl_integration.constants import OPENFORESIGHT_SEARCH_WARMUP_ENV_ID
+# Gym / SkyRL env id for ``openforesight_search_warmup_env.OpenForesightSearchWarmupEnv`` (registered in training entrypoint).
+OPENFORESIGHT_SEARCH_WARMUP_ENV_ID = "openforesight_search_warmup"
 
 __all__ = ["OPENFORESIGHT_SEARCH_WARMUP_ENV_ID"]

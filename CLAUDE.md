@@ -68,7 +68,7 @@ SkyRL training uses the **same repo `.venv`** as the rest of forecast-sim: run `
 ## Architecture
 
 ### Core Loop (`environment/env.py`)
-`SimulationEnvironment` runs a daily loop: resolve maturing questions → compute scores → call each agent's `act()` → log results. Thread-safe via locks. Agents interact through `SimForecastInterface` which exposes: `list_questions()`, `get_market_csv_path()`, `submit_prediction(qid, {outcome: prob})`, `search(query, from_date, to_date)`, `get_article(id)`, `query(python_code)`.
+`SimulationEnvironment` runs a daily loop: resolve maturing questions → compute scores → call each agent's `act()` → log shared simulation results. Thread-safe via locks. Agents interact through `SimForecastInterface`, which primarily exposes market snapshot paths, submission/history access, cadence metadata, and env-computed scoring/resolution context. Query/search prompt logic and per-agent transcript logging live in the scaffolds under `agents/`.
 
 ### Agent Variants (`agents/`)
 - **BaseAgent** (`base.py`): Abstract class. `act(doc_interface, forecast_interface, current_date) -> List[actions]`.

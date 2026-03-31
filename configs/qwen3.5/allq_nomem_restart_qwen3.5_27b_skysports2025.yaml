@@ -53,7 +53,8 @@ embedding_max_model_len: 32768
 vllm_gpu_mem: 0.85
 vllm_tensor_parallel_size: 2
 vllm_startup_timeout: 600
-vllm_enable_tools: false
+vllm_enable_tools: true
+vllm_tool_call_parser: "qwen3_coder"
 language_model_only: true
 
 # --- Local 3-GPU Pinning ---
@@ -68,6 +69,8 @@ parallel: true
 defaults:
   provider: "vllm"
   scaffold: "allQ"
+  max_total_tokens: 65536
+  warmup_max_total_tokens: 65536
   enable_memory: false
   max_actions: 50
   warmup_max_actions: 10

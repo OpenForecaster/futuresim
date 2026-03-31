@@ -20,7 +20,7 @@ Use this skill for `scripts/run_skyrl_openforesight_search.py`, `mpi_scripts/sky
 - SkyRL dependencies are typically installed into the **repo `.venv`** (`uv sync` at root, then `uv sync --active` under `third_party/SkyRL`); HTCondor wrappers try `.venv` first.
 - SkyRL lives as a submodule in `third_party/SkyRL`.
 - Repo-specific integration code lives in `skyrl_integration/`.
-- `scripts/run_skyrl_openforesight_search.py` can auto-build training data if it is missing.
+- `scripts/run_skyrl_openforesight_search.py` rebuilds prepared parquets every launch (next to `training.log_path`) and deletes them after the job.
 - HTCondor submission goes through `mpi_scripts/skyrl_search/submit_skyrl_search_train.py`.
 - Keep the Qwen boundary clean: prompt text and tool schemas should come from `agents/qwenAgent`, while SkyRL-only parsing/bridging should stay in `skyrl_integration/`.
 - OpenForesight warmup env (`skyrl_integration/envs/openforesight_search_warmup_env.py`) should **call** `QwenBasicAgent._append_tool_output_message` / shared submit helpers for message parity; raw assistant completions are parsed with **`skyrl_integration/vllm_qwen3_coder_text.py`** (vLLM `qwen3_coder` XML only — no JSON-in-`<tool_call>` fallback).
@@ -30,4 +30,4 @@ Use this skill for `scripts/run_skyrl_openforesight_search.py`, `mpi_scripts/sky
 
 - A change would repin the SkyRL submodule or alter training semantics.
 - You need to choose between local debugging and cluster execution.
-- A data rebuild would be large enough to deserve confirmation.
+- A change would make every launch’s parquet rebuild prohibitively expensive for the target cluster (rare; prep is usually CPU-bound over the OpenForesight split).

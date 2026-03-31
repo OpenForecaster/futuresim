@@ -8,14 +8,15 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from agents.basicAgent.agent import BasicAgent
 from agents.basicAgent.search import SearchHandler
+from agents.basicAgent.tools import (
+    build_action_tools,
+    execute_news_search,
+    final_submit_tool_instruction_text,
+    optional_search_dates_from_parsed,
+)
 from agents.qwenAgent.agent import (
-    QwenBasicAgent,
-    qwen_execute_news_search,
-    qwen_final_submit_instruction_text,
-    qwen_optional_search_dates_from_parsed,
     qwen_parse_warmup_submit_outcomes,
 )
-from agents.qwenAgent.tools import build_action_tools
 from agents.search_tools.lancedb import LanceDBSearchTool
 from agents.utils.budget import BudgetSettings, BudgetTracker, estimate_budget_tokens
 from environment.ansmatching import AnswerMatcher
@@ -34,7 +35,7 @@ from skyrl_integration.vllm_qwen3_coder_text import extract_tool_calls_vllm_qwen
 
 _SEARCH_TOOL_CACHE: Dict[Tuple[str, str, float, str], LanceDBSearchTool] = {}
 _SEARCH_TOOL_LOCK = Lock()
-_MATCHER_CACHE: Dict[tuple[str, str], AnswerMatcher] = {}
+_MATCHER_CACHE: Dict[tuple[str, str, str], AnswerMatcher] = {}
 _MATCHER_LOCK = Lock()
 
 
@@ -105,6 +106,7 @@ def _get_or_create_search_tool(
     model_path: str,
     embedding_gpu_mem: float,
     aux_cuda_visible_devices: str,
+    embedding_max_num_seqs: int,
 ) -> Optional[LanceDBSearchTool]:
     if not db_path:
         return None
@@ -114,6 +116,7 @@ def _get_or_create_search_tool(
         model_path or "",
         float(embedding_gpu_mem),
         aux_cuda_visible_devices or "",
+        int(embedding_max_num_seqs),
     )
     with _SEARCH_TOOL_LOCK:
         tool = _SEARCH_TOOL_CACHE.get(cache_key)
@@ -123,6 +126,7 @@ def _get_or_create_search_tool(
                 embedding_model = VLLMInference(
                     model_path,
                     gpu_memory_utilization=float(embedding_gpu_mem),
+                    max_num_seqs=int(embedding_max_num_seqs),
                     enable_prefix_caching=False,
                     cuda_visible_devices=aux_cuda_visible_devices or None,
                 )
@@ -189,6 +193,7 @@ class OpenForesightSearchWarmupEnv(BaseTextEnv):
         self.search_db = str(extras.get("search_db", ""))
         self.embedding_model = str(extras.get("embedding_model", "")).strip()
         self.embedding_gpu_mem = float(extras.get("embedding_gpu_mem", 0.3))
+        self.embedding_max_num_seqs = max(1, int(extras.get("embedding_max_num_seqs", 16)))
         self.aux_cuda_visible_devices = str(extras.get("aux_cuda_visible_devices", "")).strip()
         self.search_topk = int(extras.get("search_topk", 5))
         self.search_type = str(extras.get("search_type", "hybrid")).strip().lower() or "hybrid"
@@ -229,6 +234,7 @@ class OpenForesightSearchWarmupEnv(BaseTextEnv):
             self.embedding_model,
             self.embedding_gpu_mem,
             self.aux_cuda_visible_devices,
+            self.embedding_max_num_seqs,
         )
         self.search_handler = SearchHandler(
             search_tool=self.tool,
@@ -289,6 +295,9 @@ class OpenForesightSearchWarmupEnv(BaseTextEnv):
             "matcher_count": 0,
             "matcher_total_seconds": 0.0,
             "matcher_total_cost": 0.0,
+            "cache_hits": 0,
+            "cache_misses": 0,
+            "cache_size": 0,
         }
 
     def _get_matcher_timing_snapshot(self) -> Dict[str, float]:
@@ -300,6 +309,9 @@ class OpenForesightSearchWarmupEnv(BaseTextEnv):
                 "matcher_count": int(snapshot.get("matcher_count", 0)),
                 "matcher_total_seconds": float(snapshot.get("matcher_total_seconds", 0.0)),
                 "matcher_total_cost": float(snapshot.get("matcher_total_cost", 0.0)),
+                "cache_hits": int(snapshot.get("cache_hits", 0)),
+                "cache_misses": int(snapshot.get("cache_misses", 0)),
+                "cache_size": int(snapshot.get("cache_size", 0)),
             }
         return self._zero_matcher_metrics()
 
@@ -316,6 +328,9 @@ class OpenForesightSearchWarmupEnv(BaseTextEnv):
                 0.0,
                 float(after["matcher_total_cost"]) - float(before["matcher_total_cost"]),
             ),
+            "cache_hits": max(0, int(after["cache_hits"]) - int(before["cache_hits"])),
+            "cache_misses": max(0, int(after["cache_misses"]) - int(before["cache_misses"])),
+            "cache_size": max(int(before["cache_size"]), int(after["cache_size"])),
         }
 
     def _user_message(self, content: str) -> Dict[str, str]:
@@ -347,7 +362,7 @@ class OpenForesightSearchWarmupEnv(BaseTextEnv):
         )
 
     def _build_final_submit_instruction(self) -> str:
-        return qwen_final_submit_instruction_text(
+        return final_submit_tool_instruction_text(
             self.question_id,
             self.budget,
             forbid_query_df=False,
@@ -444,14 +459,14 @@ class OpenForesightSearchWarmupEnv(BaseTextEnv):
             message = self._user_message(formatted)
             self.chat_history.append(message)
         elif feedback_kind == "search":
-            message = QwenBasicAgent._append_tool_output_message(
+            message = BasicAgent._append_tool_output_message(
                 self.chat_history,
                 tool_call=None,
                 tool_name="search_news",
                 output=formatted,
             )
         elif feedback_kind == "submit_error":
-            message = QwenBasicAgent._append_tool_output_message(
+            message = BasicAgent._append_tool_output_message(
                 self.chat_history,
                 tool_call=None,
                 tool_name="submit_forecasts",
@@ -483,10 +498,10 @@ class OpenForesightSearchWarmupEnv(BaseTextEnv):
 
     def _run_search(self, parsed) -> BaseTextEnvStepOutput:
         self.search_calls += 1
-        min_date, max_date = qwen_optional_search_dates_from_parsed(parsed)
+        min_date, max_date = optional_search_dates_from_parsed(parsed)
         if min_date is None and self.search_min_days > 0:
             min_date = self.current_date - timedelta(days=self.search_min_days)
-        effect = qwen_execute_news_search(
+        effect = execute_news_search(
             parsed,
             self.search_handler,
             max_results=self.max_search_results,
@@ -682,6 +697,23 @@ class OpenForesightSearchWarmupEnv(BaseTextEnv):
             **self._budget_metadata(),
             "search_parse_failed_turns": list(self.search_parse_failed_turns),
         }
+
+    def close(self):
+        if self.matcher is None:
+            return
+        get_stats = getattr(self.matcher, "get_stats", None)
+        if callable(get_stats):
+            try:
+                stats = get_stats()
+                print(
+                    "  Matcher stats on env close: "
+                    f"cache_size={stats.get('cache_size', 0)} "
+                    f"cache_hits={stats.get('cache_hits', 0)} "
+                    f"cache_misses={stats.get('cache_misses', 0)} "
+                    f"matcher_count={stats.get('matcher_count', 0)}"
+                )
+            except Exception:
+                pass
 
     @staticmethod
     def aggregate_metrics(metrics: List[Dict[str, Any]]) -> Dict[str, Any]:

@@ -28,7 +28,10 @@ from loguru import logger
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl_gym.envs import register
 
-from skyrl_integration.constants import OPENFORESIGHT_SEARCH_WARMUP_ENV_ID
+from pathing import load_repo_env
+
+from skyrl_integration.envs import OPENFORESIGHT_SEARCH_WARMUP_ENV_ID
+from skyrl_integration.matcher_cache import setup_core_dump_cwd
 
 
 def _coerce_eval_float(value: Any) -> float | None:
@@ -244,7 +247,9 @@ def _patch_skyrl_evaluate_for_forecast_metrics() -> None:
 
 
 def _log_step(message: str) -> None:
-    print(f"[forecast-sim skyrl] {message}", file=sys.stderr, flush=True)
+    # Use stdout so HTCondor `.out` captures driver milestones (do not alias stderr→stdout: Ray
+    # cloudpickles remote functions and breaks on write-mode file handles).
+    print(f"[forecast-sim skyrl] {message}", flush=True)
 
 
 def _set_sim_output_dir(cfg: SkyRLTrainConfig) -> None:
@@ -331,17 +336,42 @@ def _patch_skyrl_peer_access_supported_for_gpu_driver() -> None:
 
 
 def _patch_skyrl_compat() -> None:
-    """Rendezvous patch + GPU-driver-only peer access (no temporary Ray for CPU heads)."""
+    """Shared SkyRL runtime patches for this integration."""
     _patch_skyrl_rendezvous_for_new_ray()
     _patch_skyrl_peer_access_supported_for_gpu_driver()
 
 
+def _ray_system_config_from_env() -> Dict[str, int]:
+    """Build optional Ray `_system_config` overrides from env vars."""
+    out: Dict[str, int] = {}
+    env_to_key = {
+        "RAY_health_check_initial_delay_ms": "health_check_initial_delay_ms",
+        "RAY_health_check_period_ms": "health_check_period_ms",
+        "RAY_health_check_timeout_ms": "health_check_timeout_ms",
+        "RAY_health_check_failure_threshold": "health_check_failure_threshold",
+        "RAY_worker_register_timeout_seconds": "worker_register_timeout_seconds",
+        "RAY_gcs_rpc_server_reconnect_timeout_s": "gcs_rpc_server_reconnect_timeout_s",
+        "RAY_raylet_rpc_server_reconnect_timeout_base_s": "raylet_rpc_server_reconnect_timeout_base_s",
+        "RAY_raylet_rpc_server_reconnect_timeout_max_s": "raylet_rpc_server_reconnect_timeout_max_s",
+        "RAY_core_worker_rpc_server_reconnect_timeout_base_s": "core_worker_rpc_server_reconnect_timeout_base_s",
+        "RAY_core_worker_rpc_server_reconnect_timeout_max_s": "core_worker_rpc_server_reconnect_timeout_max_s",
+    }
+    for env_name, key in env_to_key.items():
+        raw = os.environ.get(env_name)
+        if raw is None or str(raw).strip() == "":
+            continue
+        out[key] = int(raw)
+    return out
+
+
 def _initialize_ray_with_memory(cfg: SkyRLTrainConfig) -> None:
     """
-    Initialize Ray like SkyRL normally does, but with explicit memory sizing.
+    Initialize Ray with the known-good explicit memory sizing, plus:
+    - canonical ``PYTHONPATH`` / ``FSIM_REPO_DIR`` for workers
+    - ``FSIM_CORE_DUMP_DIR`` in ``runtime_env`` env_vars
 
-    This keeps the fix at the launch boundary instead of monkey-patching `ray.init`
-    process-wide.
+    The eval baseline that reached ``sync_registries()`` and ``skyrl_entrypoint`` used
+    explicit ``object_store_memory`` / ``_memory``. Keep that proven path here.
     """
 
     from skyrl.backends.skyrl_train.utils.ppo_utils import sync_registries
@@ -370,6 +400,15 @@ def _initialize_ray_with_memory(cfg: SkyRLTrainConfig) -> None:
         _pp_parts.append(_driver_pp)
     env_vars["PYTHONPATH"] = os.pathsep.join([p for p in _pp_parts if p])
 
+    _cd = os.environ.get("FSIM_CORE_DUMP_DIR", "").strip()
+    if not _cd:
+        raise RuntimeError(
+            "FSIM_CORE_DUMP_DIR is unset after setup_core_dump_cwd(); "
+            "SkyRL Ray workers need it in runtime_env."
+        )
+    env_vars["FSIM_CORE_DUMP_DIR"] = _cd
+
+    # Match the known-good eval path: shared trainer.log_path infra file.
     if not verbose_logging:
         log_path = Path(cfg.trainer.log_path).resolve()
         log_path.mkdir(parents=True, exist_ok=True)
@@ -381,22 +420,53 @@ def _initialize_ray_with_memory(cfg: SkyRLTrainConfig) -> None:
         log_file = ""
 
     # Registry sync cloudpickles every policy-loss / advantage-estimator into the object store.
-    # 256MiB is too small in practice (driver/worker put failures or OOM with no Python traceback).
+    # 256MiB is too small in practice (driver/worker put failures or silent early exits).
     _obj_store = int(os.environ.get("FSIM_RAY_OBJECT_STORE_BYTES", str(2 * 1024**3)))
     _ray_heap = int(os.environ.get("FSIM_RAY_HEAP_MEMORY_BYTES", str(4 * 1024**3)))
-    _log_step(f"ray.init: object_store_memory={_obj_store} _memory={_ray_heap}")
-
-    ray.init(
-        runtime_env={"env_vars": env_vars},
-        log_to_driver=True,
-        include_dashboard=False,
-        object_store_memory=_obj_store,
-        _memory=_ray_heap,
+    _ray_num_cpus_raw = os.environ.get("FSIM_RAY_NUM_CPUS", "").strip()
+    _ray_num_cpus = int(_ray_num_cpus_raw) if _ray_num_cpus_raw else None
+    _ray_num_gpus_raw = os.environ.get("FSIM_RAY_NUM_GPUS", "").strip()
+    _ray_num_gpus = int(_ray_num_gpus_raw) if _ray_num_gpus_raw else None
+    _ray_node_ip = os.environ.get("FSIM_RAY_NODE_IP", "").strip() or None
+    _system_config = _ray_system_config_from_env()
+    _log_step(
+        "ray.init: "
+        f"object_store_memory={_obj_store} _memory={_ray_heap}"
+        + (f" num_cpus={_ray_num_cpus}" if _ray_num_cpus is not None else "")
+        + (f" num_gpus={_ray_num_gpus}" if _ray_num_gpus is not None else "")
+        + (f" node_ip={_ray_node_ip}" if _ray_node_ip else "")
+        + (f" _system_config={_system_config}" if _system_config else "")
     )
-    _log_step("ray.init returned")
+    try:
+        ray_init_kwargs = dict(
+            runtime_env={"env_vars": env_vars},
+            log_to_driver=True,
+            include_dashboard=False,
+            object_store_memory=_obj_store,
+            _memory=_ray_heap,
+            _system_config=_system_config or None,
+        )
+        if _ray_num_cpus is not None:
+            ray_init_kwargs["num_cpus"] = _ray_num_cpus
+        if _ray_num_gpus is not None:
+            ray_init_kwargs["num_gpus"] = _ray_num_gpus
+        if _ray_node_ip is not None:
+            ray_init_kwargs["_node_ip_address"] = _ray_node_ip
+            ray_init_kwargs["_node_name"] = _ray_node_ip
+        ray.init(
+            **ray_init_kwargs,
+        )
+    except BaseException:
+        _log_step("ray.init: FAILED (see traceback below)")
+        traceback.print_exc()
+        raise
+    _log_step("ray.init: returned")
+    try:
+        _log_step(f"ray.cluster_resources: {dict(ray.cluster_resources())}")
+        _log_step(f"ray.available_resources: {dict(ray.available_resources())}")
+    except BaseException:
+        _log_step("ray resource introspection failed")
 
-    # Avoid Loguru -> SKYRL_LOG_FILE here: on Lustre/NFS the file sink can block the driver before
-    # ``sync_registries()``, which looks like a hang right after "Started a local Ray instance".
     if not verbose_logging:
         _log_step(f"Infrastructure logs will be written to: {log_file}")
 
@@ -404,45 +474,91 @@ def _initialize_ray_with_memory(cfg: SkyRLTrainConfig) -> None:
     try:
         sync_registries()
     except BaseException:
-        _log_step("sync_registries: FAILED")
-        traceback.print_exc(file=sys.stderr)
-        sys.stderr.flush()
+        _log_step("sync_registries: FAILED (see traceback below)")
+        traceback.print_exc()
         raise
     _log_step("sync_registries: done")
 
 
-@ray.remote(num_cpus=1)
-def skyrl_entrypoint(cfg: SkyRLTrainConfig):
+def _patch_tracking_timing_to_stdout() -> None:
+    """Echo ``timing/*`` from SkyRL's trainer to stdout for early steps (tailable HTCondor ``.out``).
+
+    W&B already receives the same keys. Set ``FSIM_SKYRL_TIMING_STDOUT_STEPS=0`` to disable.
+    Does not change optimization or metrics, only visibility.
+    """
+
+    import skyrl.train.utils.tracking as tr_mod
+
+    if getattr(tr_mod.Tracking, "_fsim_timing_stdout_patch", False):
+        return
+
     try:
-        _log_step("skyrl_entrypoint: starting")
-        _set_sim_output_dir(cfg)
-        _ensure_vllm_spawn_multiproc()
-        _patch_skyrl_compat()
-        from skyrl.train.entrypoints.main_base import BasePPOExp
+        max_step = int(os.environ.get("FSIM_SKYRL_TIMING_STDOUT_STEPS", "16"))
+    except ValueError:
+        max_step = 16
+    if max_step <= 0:
+        return
 
-        register(
-            id=OPENFORESIGHT_SEARCH_WARMUP_ENV_ID,
-            entry_point="skyrl_integration.envs.openforesight_search_warmup_env:OpenForesightSearchWarmupEnv",
-        )
-        _log_step("skyrl_entrypoint: env registered")
+    _orig = tr_mod.Tracking.log
 
-        _patch_concatenate_generator_outputs_for_forecast_env_metrics()
-        _patch_skyrl_evaluate_for_forecast_metrics()
+    def _log(self, data, step, commit=False):
+        if isinstance(step, int) and step <= max_step:
+            timing = {k: v for k, v in data.items() if str(k).startswith("timing/")}
+            if timing:
+                parts: list[str] = []
+                for k in sorted(timing.keys()):
+                    v = timing[k]
+                    try:
+                        parts.append(f"{k}={float(v):.3f}")
+                    except (TypeError, ValueError):
+                        parts.append(f"{k}={v}")
+                print(f"[forecast-sim timing] step={step} " + " ".join(parts), flush=True)
+        return _orig(self, data, step, commit)
 
-        exp = BasePPOExp(cfg)
-        _log_step("skyrl_entrypoint: experiment constructed")
-        exp.run()
-        _log_step("skyrl_entrypoint: experiment finished")
-    except BaseException:
-        _log_step("skyrl_entrypoint: unhandled exception")
-        traceback.print_exc(file=sys.stderr)
-        raise
+    tr_mod.Tracking.log = _log  # type: ignore[method-assign]
+    tr_mod.Tracking._fsim_timing_stdout_patch = True
 
 
-def main() -> None:
+def _prepare_openforesight_entrypoint(cfg: SkyRLTrainConfig) -> None:
+    """Shared OpenForesight worker setup for both sync and fully-async entrypoints."""
+    setup_core_dump_cwd()
+    _set_sim_output_dir(cfg)
+    _ensure_vllm_spawn_multiproc()
+    _patch_skyrl_compat()
+
+    register(
+        id=OPENFORESIGHT_SEARCH_WARMUP_ENV_ID,
+        entry_point="skyrl_integration.envs.openforesight_search_warmup_env:OpenForesightSearchWarmupEnv",
+    )
+    _log_step("skyrl_entrypoint: env registered")
+
+    _patch_concatenate_generator_outputs_for_forecast_env_metrics()
+    _patch_skyrl_evaluate_for_forecast_metrics()
+    _patch_tracking_timing_to_stdout()
+
+
+def _run_openforesight_entrypoint(cfg: SkyRLTrainConfig, *, exp_cls: Any) -> None:
+    """Construct and run an OpenForesight SkyRL experiment class inside a Ray worker."""
+    _log_step("skyrl_entrypoint: starting")
+    _prepare_openforesight_entrypoint(cfg)
+    exp = exp_cls(cfg)
+    _log_step("skyrl_entrypoint: experiment constructed")
+    exp.run()
+    _log_step("skyrl_entrypoint: experiment finished")
+
+
+def _prepare_openforesight_main() -> None:
+    """Shared driver-side setup before parsing CLI overrides."""
+    load_repo_env(_repo_root)
+    setup_core_dump_cwd()
+    _patch_skyrl_compat()
+
+
+def _run_openforesight_main(entrypoint_remote: Any) -> None:
+    """Shared driver logic for both sync and fully-async OpenForesight launchers."""
     try:
         _log_step("main: starting")
-        _patch_skyrl_compat()
+        _prepare_openforesight_main()
         from skyrl.train.entrypoints.main_base import validate_cfg
 
         cfg = SkyRLTrainConfig.from_cli_overrides(sys.argv[1:])
@@ -453,12 +569,28 @@ def main() -> None:
 
         _initialize_ray_with_memory(cfg)
         _log_step("main: ray initialized")
-        ray.get(skyrl_entrypoint.remote(cfg))
+        ray.get(entrypoint_remote.remote(cfg))
         _log_step("main: skyrl_entrypoint completed")
     except BaseException:
         _log_step("main: unhandled exception")
-        traceback.print_exc(file=sys.stderr)
+        traceback.print_exc()
         raise
+
+
+@ray.remote(num_cpus=1)
+def skyrl_entrypoint(cfg: SkyRLTrainConfig):
+    try:
+        from skyrl.train.entrypoints.main_base import BasePPOExp
+
+        _run_openforesight_entrypoint(cfg, exp_cls=BasePPOExp)
+    except BaseException:
+        _log_step("skyrl_entrypoint: unhandled exception")
+        traceback.print_exc()
+        raise
+
+
+def main() -> None:
+    _run_openforesight_main(skyrl_entrypoint)
 
 
 if __name__ == "__main__":

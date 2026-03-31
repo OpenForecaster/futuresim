@@ -22,6 +22,7 @@ Use this skill for `scripts/test_basic_agent.py`, `mpi_scripts/run_sim/submit_si
 - Scaffold selection is explicit. Model names do not auto-switch scaffold classes.
 - `scripts/test_basic_agent.py` writes run outputs under `FSIM_OUTPUT_BASE`.
 - `mpi_scripts/run_sim/submit_sim.py` writes cluster logs under `FSIM_SIM_LOG_BASE`.
+- Sim answer matching still falls back to per-run `matcher_cache.json`, but if `FSIM_SIM_MATCHER_CACHE_DIR` is set then `split: "test"` runs automatically reuse a shared `<matcher_slug>.json` and only merge back at run end. Non-test runs can opt in with top-level YAML `matcher_cache: {enabled: true, path: null}`.
 - Resume mode skips Day 0 warmup because predictions are restored from `actions.jsonl`.
 - `daily_metrics.csv` is session-based: one row per wakeup date. `test_daily_metrics.csv` mirrors it for test-only metrics.
 

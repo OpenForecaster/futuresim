@@ -51,6 +51,12 @@ source "${REPO_DIR}/.venv/bin/activate"
 # Use shared tokenizer data provisioned by setup_news_pipeline.sh
 export NLTK_DATA="${NLTK_DATA:-${REPO_DIR}/.venv/nltk_data}"
 
+echo "Ensuring NLTK tokenizer data..."
+if ! python3 "${NEWS_REPO_DIR}/scripts/ensure_nltk_data.py"; then
+  echo "ERROR: Missing required NLTK tokenizer data in ${NLTK_DATA}" >&2
+  exit 2
+fi
+
 # Navigate to news-please
 cd "$NEWS_REPO_DIR/news-please"
 

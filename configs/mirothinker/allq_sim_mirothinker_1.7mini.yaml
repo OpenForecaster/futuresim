@@ -10,6 +10,8 @@
 #   while adopting MiroThinker's recommended context/sampling defaults.
 # - MiroThinker-1.7-mini is a Qwen3-MoE derivative, so we keep the 2-GPU TP+EP
 #   launch shape used for the comparable local Qwen MoE runs.
+# - vllm_tool_call_parser is required: miroallq sends tools + tool_choice=auto; vLLM
+#   needs --enable-auto-tool-choice and --tool-call-parser or requests return 400.
 # - max_actions / warmup_max_actions cap tool turns per day and per warmup question.
 
 run_script: "run_sim.sh"
@@ -62,6 +64,7 @@ vllm_startup_timeout: 900
 vllm_enable_expert_parallel: true
 vllm_all2all_backend: "deepep_high_throughput"
 vllm_enable_tools: true
+vllm_tool_call_parser: "qwen3_coder"
 language_model_only: true
 
 # --- Local 3-GPU Pinning ---

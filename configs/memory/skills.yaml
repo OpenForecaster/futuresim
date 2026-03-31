@@ -39,9 +39,6 @@ rate_limit: 32.0
 parallel: true
 
 # --- Cheat Feedback (privileged directional-correctness before memory update) ---
-# cheat_feedback: true
-# cheat_feedback_detail: "direction"  # "full" (Brier scores) or "direction" (labels only)
-
 # --- Agents Configuration ---
 defaults:
   provider: "openrouter"

@@ -18,7 +18,7 @@ Use this skill for scaffold selection, scaffold routing in `scripts/test_basic_a
 ## Repo Conventions
 
 - Shared config fields should stay reusable across scaffolds when possible.
-- **`qwenbasic` / `qwenallq` are for Qwen3.5 + vLLM native tools only.** Qwen3 should use `basic` / `allQ` / `allqd` with `vllm_enable_tools: false` (and `hermes` if you enable tools). Details: [references/model-specific-notes.md](references/model-specific-notes.md).
+- **Base scaffolds (`basic` / `allQ` / `allqd`) now require chat tools.** For Qwen3 on vLLM, enable tools and use `hermes`; for Qwen3.5, enable tools and use `qwen3_coder`. `qwenbasic` / `qwenallq` remain thin Qwen-named wrappers. Details: [references/model-specific-notes.md](references/model-specific-notes.md).
 - Native Qwen and GPT-OSS scaffolds may change tool-call formatting, but should preserve comparable simulation semantics.
 - Warmup and memory knobs are scaffold-level controls, not model-name heuristics.
 

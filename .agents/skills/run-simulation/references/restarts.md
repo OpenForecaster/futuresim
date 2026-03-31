@@ -19,7 +19,7 @@ Current helper behavior:
 - copies timing stats before the restart day
 - copies `daily_metrics.csv` rows before the restart day
 - copies `test_daily_metrics.csv` rows before the restart day
-- copies `matcher_cache.json` when present
+- copies `matcher_cache.json` when present (shared `FSIM_SIM_MATCHER_CACHE_DIR` caches are reused separately)
 
 This is the normal way to preserve an expensive AllQ Day 0 warmup and rerun later days.
 

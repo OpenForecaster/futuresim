@@ -5,7 +5,7 @@
 # Notes:
 # - Agent runs on GPU0; matcher + embedder run on GPU1 (same split pattern as allq_sim_oss20b).
 # - defaults.max_tokens is per LLM call (per action/turn), not a budget across all actions.
-# - Qwen3: keep scaffold allQ and vllm_enable_tools: false (BasicAgent text protocol). qwenbasic/qwenallq are for Qwen3.5 only — see .agents/skills/agent-scaffolds/references/model-specific-notes.md
+# - Base allQ/basic scaffolds are now tools-only. For Qwen3 on vLLM, enable tools and use the `hermes` parser.
 
 # --- Simulation Meta ---
 sim_name: "allq_sim_qwen3_4b_it_2507"
@@ -51,7 +51,8 @@ max_model_len: 32768
 
 # --- vLLM Agent Runtime ---
 vllm_gpu_mem: 0.6
-vllm_enable_tools: false
+vllm_enable_tools: true
+vllm_tool_call_parser: "hermes"
 
 # --- Local 2-GPU Pinning ---
 # matcher + embedder on GPU1 (parent process), agent vLLM on GPU0 (subprocess override).

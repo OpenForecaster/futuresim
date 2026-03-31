@@ -4,7 +4,8 @@
 
 - Persistent memory is controlled by `AgentConfig.enable_memory`.
 - Per-session files live at `agents/<agent_id>/memory/YYYY-MM-DD.txt`, keyed by wakeup date.
-- At the start of each wakeup, the agent loads the latest memory snapshot strictly before the current date.
+- At the start of each wakeup, `BasicAgent`-style scaffolds load the latest memory snapshot strictly before the current date.
+- Wakeup-to-wakeup transcript/session carryover is scaffold-owned; the environment only schedules wakeups and exposes the current market / scoring context.
 - If `enable_memory=false`, the BasicAgent end-of-session memory update is skipped.
 - Token-budget reserve exhaustion is separate from memory-update behavior. `submit_reserve_tokens` stops the forecast/action loop, but end-of-session memory update is still attempted afterward in the Basic and GPT-OSS paths.
 - In the Qwen paths, memory update is skipped only when the provider already returned a real context-limit error; going below `submit_reserve_tokens` by itself does not skip memory update.

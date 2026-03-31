@@ -41,7 +41,7 @@ from agents.allQAgent.agent import AllQDailyAgent
 from agents.gptossAgent import GPTOSSBasicAgent, GPTOSSAllQAgent
 from agents.ogAgent import OgAgent
 from agents.qwenAgent import QwenBasicAgent, QwenAllQAgent
-from agents.qwenAgent.tools import build_action_tools
+from agents.basicAgent.tools import build_action_tools
 from environment.env import SimulationEnvironment, SimForecastInterface
 
 
