@@ -1,0 +1,62 @@
+# AllQ warmup on aljazeeraRecent2 split; sim/search day 2025-01-01; openai/gpt-4.1-mini (OpenRouter), reasoning high.
+# Parquet: ${FSIM_DATASET_PATH}/aljazeeraRecent2-00000-of-00001.parquet
+# Source JSONL: questions/aljazeera2025/aljazeeraRecent2.jsonl
+#
+# Usage: python mpi_scripts/run_sim/submit_sim.py --config configs/warmup_only_openrouter_gpt-4.1-mini_simday_2025-01-01_aljazeeraRecent2_reasoning_high.yaml --runs 1
+# Requires OPENROUTER_API_KEY in .env
+
+run_script: "run_sim.sh"
+
+sim_name: "warmup_only_openrouter_gpt-4.1-mini_simday_2025-01-01_aljazeeraRecent2_reasoning_high"
+start_date: "2025-01-08"
+end_date: "2025-01-01"
+lookback_days: 7
+search_cutoff_days: 0
+split: "aljazeeraRecent2"
+
+resolution_start: "2025-03-01"
+resolution_end: "2025-12-31"
+
+resources:
+  gpus: 2
+  cpus: 16
+  memory_gb: 128
+  disk_gb: 50
+  bid: 55
+  requirements: "TARGET.CUDACapability >= 9.0 && TARGET.CUDAGlobalMemoryMb > 70000 && TARGET.Machine =!= \"i103.internal.cluster.is.localnet\""
+
+dataset: "openforesight"
+dataset_path: "${FSIM_DATASET_PATH}"
+min_forecasters: 10
+resolved_only: true
+output_base: "${FSIM_OUTPUT_BASE}"
+warmup_parallelism: 32
+
+search_db: "${FSIM_SEARCH_DB}"
+embedding_model: "${FSIM_EMBEDDING_MODEL}"
+embedding_gpu_mem: 0.7
+
+matching: "openrouter"
+matcher: "deepseek/deepseek-v3.2"
+matcher_gpu_mem: 0.0
+max_model_len: 8192
+embedding_max_model_len: 32768
+vllm_startup_timeout: 900
+
+rate_limit: 16.0
+parallel: true
+
+defaults:
+  provider: "openrouter"
+  scaffold: "allQ"
+  max_actions: 50
+  warmup_max_actions: 20
+  temperature: 0.7
+  max_tokens: 4096
+  max_retries: 3
+  reasoning:
+    effort: high
+
+agents:
+  - model: "openai/gpt-4.1-mini"
+    provider: "openrouter"
