@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any, Dict, List, Optional, Tuple
 
-from agents.allQAgent.agent import AllQAgent
+from agents.allQAgent.agent import AllQAgent, WarmupLoopResult
 from agents.basicAgent.agent import BasicAgent
 from agents.basicAgent.search import SearchHandler
 from agents.utils.budget import BudgetTracker
@@ -469,7 +469,7 @@ class QwenBasicAgent(BasicAgent):
 
         sp = dict(sampling_params or {})
         sp["tools"] = tools
-        sp["tool_choice"] = "auto"
+        sp["tool_choice"] = sp.get("tool_choice", "auto")
         return self.inference.chat_json(messages, sp)
 
     @staticmethod
@@ -865,24 +865,151 @@ class QwenAllQAgent(AllQAgent, QwenBasicAgent):
         )
         return self._rewrite_allq_warmup_prompt_for_qwen(base_prompt)
 
-    def _process_single_question(self, q, current_date, forecast_interface):
-        system_prompt = self._build_warmup_system_prompt(current_date, q, forecast_interface=forecast_interface)
-        messages = [{"role": "user", "content": system_prompt}]
+    @staticmethod
+    def _build_qwen_warmup_mem_prompt(qid: str, question_title: str) -> str:
+        return f"""You just finished forecasting question {qid}: "{question_title}".
 
-        context_limit_hit = self._run_warmup_loop(messages, forecast_interface, q.qid)
+Call exactly one tool now: `mem_add`.
+Do not answer with plain text.
 
-        if hasattr(self, "_warmup_mem_entries"):
-            if context_limit_hit:
-                # Context limit hit — still create a placeholder so every question has an entry
-                self._warmup_mem_entries.append(self._warmup_mem_placeholder(q.qid, q.title))
-            else:
-                mem_entry = self._request_warmup_mem(messages, q.qid, q.title)
-                if mem_entry:
-                    self._warmup_mem_entries.append(mem_entry)
+Requirements:
+- qid must be exactly "{qid}"
+- question should be "{question_title}"
+- memory should store only question-specific reasoning, evidence, calibration, and update triggers
+- do not store cross-question lessons or cleanup notes
+- keep memory concise and specific"""
 
-    def _run_warmup_loop(self, messages: List[Dict], forecast_interface, target_qid: str) -> bool:
+    @staticmethod
+    def _build_qwen_warmup_structured_prompt(qid: str, question_title: str) -> str:
+        return f"""You just finished forecasting question {qid}: "{question_title}".
+
+Call exactly one tool now: `memory_new`.
+Do not answer with plain text.
+
+Requirements:
+- store only question-specific reasoning, evidence, calibration, and update triggers
+- do not store cross-question lessons
+- include question id {qid} in the entry name or description
+- use a short lowercase hyphenated name"""
+
+    def _request_warmup_mem(
+        self,
+        messages: List[Dict],
+        qid,
+        question_title: str,
+        submitted_forecasts: Optional[List[Dict[str, Any]]] = None,
+    ) -> Optional[Dict]:
+        prompt = self._build_qwen_warmup_mem_prompt(qid, question_title)
+        mem_messages = messages + [{"role": "user", "content": prompt}]
+        allowed_tools = [
+            tool
+            for tool in build_memory_phase_tools(enable_memory=True, enable_mem_df=True)
+            if tool.get("function", {}).get("name") == "mem_add"
+        ]
+        sampling_params = self._warmup_memory_sampling_params()
+        sampling_params["tool_choice"] = "required"
+
+        for attempt in range(self.WARMUP_MEMORY_MAX_RETRIES + 1):
+            try:
+                resp_json = self._call_chat_json_with_retries(
+                    messages=mem_messages,
+                    tools=allowed_tools,
+                    sampling_params=sampling_params,
+                )
+            except Exception as e:
+                if attempt < self.WARMUP_MEMORY_MAX_RETRIES:
+                    print(f"[{self.agent_id}] Warmup mem finalize retry {attempt+1} for qid {qid} after error: {e}")
+                    continue
+                print(f"[{self.agent_id}] Warmup mem finalize failed for qid {qid}: {e}")
+                break
+
+            usage = self._normalize_chat_usage(resp_json)
+            self._timer.record_tokens(usage)
+            self._timer.record_cost(usage.get("cost", 0), "llm")
+            parsed, _, _ = chat_response_to_action(resp_json)
+            if parsed is not None and parsed.action_type == "mem_add" and parsed.mem_data:
+                data = dict(parsed.mem_data)
+                data_qid = str(data.get("qid", qid))
+                if data_qid != str(qid):
+                    if attempt < self.WARMUP_MEMORY_MAX_RETRIES:
+                        print(f"[{self.agent_id}] Warmup mem finalize retry {attempt+1} for qid {qid}: got qid={data_qid!r}")
+                        continue
+                    print(f"[{self.agent_id}] Warmup mem finalize invalid for qid {qid}: got qid={data_qid!r}")
+                    break
+                data["qid"] = data_qid
+                data["question"] = str(data.get("question", question_title) or question_title)
+                data["memory"] = str(data.get("memory", ""))[:1000]
+                data["category"] = data.get("category")
+                return data
+
+            if attempt < self.WARMUP_MEMORY_MAX_RETRIES:
+                print(f"[{self.agent_id}] Warmup mem finalize retry {attempt+1} for qid {qid}: action={getattr(parsed, 'action_type', None)}")
+                continue
+            print(f"[{self.agent_id}] Warmup mem finalize invalid for qid {qid}: action={getattr(parsed, 'action_type', None)}")
+
+        print(f"[{self.agent_id}] Warmup mem finalize falling back to XML parser for qid {qid}")
+        return super()._request_warmup_mem(messages, qid, question_title, submitted_forecasts)
+
+    def _request_warmup_structured_memory(
+        self,
+        messages: List[Dict],
+        qid,
+        question_title: str,
+        submitted_forecasts: Optional[List[Dict[str, Any]]] = None,
+    ) -> Optional[Dict]:
+        prompt = self._build_qwen_warmup_structured_prompt(qid, question_title)
+        mem_messages = messages + [{"role": "user", "content": prompt}]
+        allowed_tools = [
+            tool
+            for tool in build_memory_phase_tools(enable_memory=True, enable_mem_df=False)
+            if tool.get("function", {}).get("name") == "memory_new"
+        ]
+        sampling_params = self._warmup_memory_sampling_params()
+        sampling_params["tool_choice"] = "required"
+
+        for attempt in range(self.WARMUP_MEMORY_MAX_RETRIES + 1):
+            try:
+                resp_json = self._call_chat_json_with_retries(
+                    messages=mem_messages,
+                    tools=allowed_tools,
+                    sampling_params=sampling_params,
+                )
+            except Exception as e:
+                if attempt < self.WARMUP_MEMORY_MAX_RETRIES:
+                    print(f"[{self.agent_id}] Warmup structured memory retry {attempt+1} for qid {qid} after error: {e}")
+                    continue
+                print(f"[{self.agent_id}] Warmup structured memory finalize failed for qid {qid}: {e}")
+                break
+
+            usage = self._normalize_chat_usage(resp_json)
+            self._timer.record_tokens(usage)
+            self._timer.record_cost(usage.get("cost", 0), "llm")
+            parsed, _, _ = chat_response_to_action(resp_json)
+            if parsed is not None and parsed.action_type == "memory_new" and parsed.memory_new_data:
+                return dict(parsed.memory_new_data)
+
+            if attempt < self.WARMUP_MEMORY_MAX_RETRIES:
+                print(
+                    f"[{self.agent_id}] Warmup structured memory retry {attempt+1} for qid {qid}: "
+                    f"action={getattr(parsed, 'action_type', None)}"
+                )
+                continue
+            print(
+                f"[{self.agent_id}] Warmup structured memory invalid for qid {qid}: "
+                f"action={getattr(parsed, 'action_type', None)}"
+            )
+
+        print(f"[{self.agent_id}] Warmup structured memory falling back to XML parser for qid {qid}")
+        return super()._request_warmup_structured_memory(
+            messages,
+            qid,
+            question_title,
+            submitted_forecasts,
+        )
+
+    def _run_warmup_loop(self, messages: List[Dict], forecast_interface, target_qid: str) -> WarmupLoopResult:
         # Delegate warmup action handling to the shared Qwen tool-calling loop.
-        _, context_limit_hit = self._run_qwen_action_loop(
+        forecasts, context_limit_hit = self._run_qwen_action_loop(
             messages=messages,
             forecast_interface=forecast_interface,
             target_qid=target_qid,
@@ -890,7 +1017,11 @@ class QwenAllQAgent(AllQAgent, QwenBasicAgent):
             warmup_budget=True,
             max_actions=self.config.warmup_max_actions,
         )
-        return context_limit_hit
+        return WarmupLoopResult(
+            submitted=bool(forecasts),
+            context_limit_hit=context_limit_hit,
+            submitted_forecasts=list(forecasts),
+        )
 
     def _rewrite_allq_warmup_prompt_for_qwen(self, base_prompt: str) -> str:
         prefix = base_prompt

@@ -4,6 +4,7 @@ set -euo pipefail
 SHARED_ROOT="/mnt/nfs/datasets_ac"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+OPTIONAL_AGENT_MODEL="${FSIM_AGENT_MODEL_PATH:-}"
 
 CREATE_DIRS=0
 if [[ "${1:-}" == "--create" ]]; then
@@ -34,6 +35,9 @@ project_dirs=(
 echo "Checking AISA runtime paths"
 echo "  Shared root:  ${SHARED_ROOT}"
 echo "  Project root: ${PROJECT_ROOT}"
+if [[ -n "${OPTIONAL_AGENT_MODEL}" ]]; then
+  echo "  Agent model:  ${OPTIONAL_AGENT_MODEL}"
+fi
 echo
 
 missing=0
@@ -45,6 +49,15 @@ for p in "${required_paths[@]}"; do
     missing=$((missing + 1))
   fi
 done
+
+if [[ -n "${OPTIONAL_AGENT_MODEL}" ]]; then
+  if [[ -e "${OPTIONAL_AGENT_MODEL}" ]]; then
+    echo "[OK] ${OPTIONAL_AGENT_MODEL}"
+  else
+    echo "[MISSING] ${OPTIONAL_AGENT_MODEL}"
+    missing=$((missing + 1))
+  fi
+fi
 
 echo
 echo "Shared directories (heavy reusable):"

@@ -65,6 +65,14 @@ class _EmbedItem:
     outputs: _EmbedOutputs
 
 
+class VLLMTransportError(RuntimeError):
+    """Transport-level failure when talking to a vLLM server."""
+
+
+class VLLMChatTimeoutError(VLLMTransportError):
+    """Raised when a vLLM chat request times out."""
+
+
 def _find_free_port(start_port: int = 8001) -> int:
     """Find a free port starting from start_port."""
     port = start_port
@@ -702,15 +710,13 @@ class VLLMInference:
             except requests.exceptions.Timeout:
                 if attempt < 2:
                     continue
-                print(f"  [VLLM] Timeout after {self.timeout}s")
-                return "", {}
+                raise VLLMChatTimeoutError(f"vLLM chat/completions timeout after {self.timeout}s")
                 
             except requests.exceptions.ConnectionError:
                 if attempt < 2:
                     time.sleep(2)
                     continue
-                print("  [VLLM] Connection error")
-                return "", {}
+                raise VLLMTransportError("vLLM chat/completions connection error")
         
         return "", {}
 

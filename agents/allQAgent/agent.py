@@ -1,11 +1,17 @@
 from datetime import date
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, NamedTuple
 import time
 
 from agents.basicAgent.agent import BasicAgent
 from agents.basicAgent.config import AgentConfig
 from agents.utils.forecast_parser import parse_action, parse_answer_probability, ParsedAction
-from agents.utils.budget import BudgetTracker
+from agents.utils.budget import BudgetSettings, BudgetTracker
+
+
+class WarmupLoopResult(NamedTuple):
+    submitted: bool
+    context_limit_hit: bool = False
+    submitted_forecasts: Optional[List[Dict[str, Any]]] = None
 
 class AllQAgent(BasicAgent):
     """
@@ -18,6 +24,10 @@ class AllQAgent(BasicAgent):
     On subsequent days, it behaves like BasicAgent but with a reminder that initial
     predictions have already been made.
     """
+
+    WARMUP_MEMORY_TOKEN_RESERVE = 4096
+    WARMUP_MEMORY_MAX_OUTPUT_TOKENS = 512
+    WARMUP_MEMORY_MAX_RETRIES = 2
     
     def __init__(self, 
                  agent_id: str,
@@ -69,6 +79,67 @@ class AllQAgent(BasicAgent):
             f"<action type=\"submit\"><forecast qid=\"{target_qid}\">...</forecast></action>"
         )
 
+    def _warmup_memory_mode(self) -> Optional[str]:
+        from agents.utils.memory import ActiveMemory, StructuredMemory
+
+        if isinstance(self._memory, ActiveMemory):
+            return "active"
+        if isinstance(self._memory, StructuredMemory):
+            return "structured"
+        return None
+
+    def _create_warmup_budget_tracker(self) -> BudgetTracker:
+        settings = self._get_budget_settings(warmup=True)
+        if self._warmup_memory_mode() and settings.max_total_tokens is not None:
+            reserve = self.WARMUP_MEMORY_TOKEN_RESERVE
+            settings = BudgetSettings(
+                max_actions=settings.max_actions,
+                max_total_tokens=settings.max_total_tokens,
+                submit_reserve_tokens=settings.submit_reserve_tokens + reserve,
+                force_submit_threshold_tokens=settings.force_submit_threshold_tokens + reserve,
+            )
+        return BudgetTracker(settings, token_estimator=self._estimate_budget_tokens)
+
+    def _warmup_memory_sampling_params(self) -> Dict[str, Any]:
+        sampling_params = dict(self.config.sampling_params or {})
+        sampling_params["temperature"] = min(float(sampling_params.get("temperature", 0.2) or 0.2), 0.2)
+        max_tokens = int(sampling_params.get("max_tokens", self.WARMUP_MEMORY_MAX_OUTPUT_TOKENS) or self.WARMUP_MEMORY_MAX_OUTPUT_TOKENS)
+        sampling_params["max_tokens"] = min(max_tokens, self.WARMUP_MEMORY_MAX_OUTPUT_TOKENS)
+        return sampling_params
+
+    def _build_warmup_memory_prompt(self, qid: str, question_title: str) -> str:
+        mode = self._warmup_memory_mode()
+        if mode == "active":
+            return f"""You just finished forecasting question {qid}: "{question_title}".
+
+Using the conversation above, write exactly one question-specific memory entry for this qid.
+- Capture only the key reasoning, evidence, calibration, and what would change your mind.
+- Keep the memory concise and specific.
+- Do not add meta-lessons across multiple questions.
+- Do not mention future cleanup steps.
+
+Output exactly one block:
+<mem_add>
+qid: {qid}
+question: {question_title}
+memory: Key reasoning, evidence, prediction, and update triggers (max 1000 chars)
+category: topic_category
+</mem_add>"""
+
+        return f"""You just finished forecasting question {qid}: "{question_title}".
+
+Using the conversation above, create exactly one structured memory entry for this question only.
+- Store question-specific reasoning, evidence, calibration, and what would change your mind.
+- Do not add cross-question meta-lessons.
+- Include the question id in the entry name or description.
+
+Output exactly one action block:
+<action type="memory_new">
+<name>q{qid}-lowercase-hyphenated-topic</name>
+<description>Question {qid}: what this stores and when to use it</description>
+<content>Key reasoning, evidence, prediction, and update triggers (max 1024 chars)</content>
+</action>"""
+
     def warmup(self, forecast_interface, current_date: date) -> None:
         """
         Execute warmup phase: predict on ALL active questions individually.
@@ -115,7 +186,17 @@ class AllQAgent(BasicAgent):
             probe_params = {"temperature": 0.0, "max_tokens": 1}
             probe_response = ""
             for attempt in range(3):
-                probe_response, _ = self.inference.chat(probe_messages, probe_params)
+                try:
+                    probe_response, _ = self.inference.chat(probe_messages, probe_params)
+                except Exception as e:
+                    if attempt < 2:
+                        print(
+                            f"[{self.agent_id}] Initial vLLM probe failed; retrying ({attempt + 1}/3): {e}",
+                            flush=True,
+                        )
+                        time.sleep(5)
+                        continue
+                    raise
                 if probe_response and probe_response.strip():
                     break
                 if attempt < 2:
@@ -216,111 +297,160 @@ class AllQAgent(BasicAgent):
         messages = [{"role": "user", "content": system_prompt}]
 
         # Run mini-loop for this question
-        self._run_warmup_loop(messages, forecast_interface, q.qid)
+        result = self._run_warmup_loop(messages, forecast_interface, q.qid)
 
-        # Ask the LLM to produce a mem_df entry from this warmup conversation.
-        # The model has full context (search results, reasoning, prediction) and
-        # decides what's worth remembering. Falls back to placeholder to guarantee
-        # every question gets an entry.
         if hasattr(self, '_warmup_mem_entries'):
-            mem_entry = self._request_warmup_mem(messages, q.qid, q.title)
-            if mem_entry:
-                self._warmup_mem_entries.append(mem_entry)
+            if result.context_limit_hit:
+                self._warmup_mem_entries.append(
+                    self._warmup_mem_placeholder(q.qid, q.title, result.submitted_forecasts)
+                )
+            elif result.submitted:
+                mem_entry = self._request_warmup_mem(
+                    messages, q.qid, q.title, result.submitted_forecasts
+                )
+                if mem_entry:
+                    self._warmup_mem_entries.append(mem_entry)
 
-        # Structured memory: extract question-specific memory entry from warmup.
         if hasattr(self, '_warmup_structured_entries'):
-            structured_entry = self._request_warmup_structured_memory(messages, q.qid, q.title)
-            if structured_entry:
-                self._warmup_structured_entries.append(structured_entry)
+            if result.context_limit_hit:
+                self._warmup_structured_entries.append(
+                    self._warmup_structured_placeholder(
+                        q.qid, q.title, result.submitted_forecasts
+                    )
+                )
+            elif result.submitted:
+                structured_entry = self._request_warmup_structured_memory(
+                    messages, q.qid, q.title, result.submitted_forecasts
+                )
+                if structured_entry:
+                    self._warmup_structured_entries.append(structured_entry)
 
-    def _request_warmup_mem(self, messages: List[Dict], qid, question_title: str) -> Optional[Dict]:
-        """Ask the LLM to produce a mem entry from the warmup conversation.
-
-        Makes one additional LLM call with the full conversation context,
-        letting the model decide what's worth remembering — same as end-of-day
-        memory updates. Retries on parse failure and falls back to a placeholder
-        to guarantee an entry for every question.
-        """
+    def _request_warmup_mem(
+        self,
+        messages: List[Dict],
+        qid,
+        question_title: str,
+        submitted_forecasts: Optional[List[Dict[str, Any]]] = None,
+    ) -> Optional[Dict]:
+        """Finalize one same-context warmup mem_df entry for a submitted question."""
         from agents.utils.forecast_parser import extract_mem_ops
 
-        mem_prompt = f"""You just finished reasoning about and predicting question {qid}: "{question_title}".
-
-Store one mem_df entry capturing your key reasoning, evidence, and calibration insights for this question. This will help you on future forecasting days.
-
-Guidelines:
-- Focus on: key evidence found, reasoning chain, your confidence level, what would change your mind
-- Be specific: include numbers, sources, dates — not vague summaries
-- Include your confidence estimate in the memory text (e.g., "Confidence: 0.65")
-- Max 1000 chars
-
-<mem_add>
-qid: {qid}
-question: {question_title}
-memory: Your key reasoning, evidence, confidence, and triggers for updating (max 1000 chars)
-category: topic_category
-</mem_add>
-
-Output exactly one <mem_add> block. No other text needed."""
-
-        mem_messages = messages + [{"role": "user", "content": mem_prompt}]
-        try:
-            response, usage = self.inference.chat(mem_messages, self.config.sampling_params)
-            self._timer.record_tokens(usage)
-            self._timer.record_cost(usage.get("cost", 0), "llm")
-        except Exception as e:
-            print(f"[{self.agent_id}] Warmup mem LLM call failed for qid {qid}: {e}")
-            return self._warmup_mem_placeholder(qid, question_title)
-
-        adds, _, _ = extract_mem_ops(response)
-        if adds:
-            add = adds[0]
-            return {
-                "qid": str(add.get("qid", qid)),
-                "question": str(add.get("question", question_title)),
-                "memory": str(add.get("memory", ""))[:1000],
-                "category": add.get("category"),
-            }
-
-        # Retry up to 3 times on parse failure
-        print(
-            f"[{self.agent_id}] Warmup mem parse failed for qid {qid}, retrying: "
-            f"response_preview={response[:200]!r}"
-        )
-        for attempt in range(3):
+        mem_messages = messages + [{"role": "user", "content": self._build_warmup_memory_prompt(qid, question_title)}]
+        sampling_params = self._warmup_memory_sampling_params()
+        for attempt in range(self.WARMUP_MEMORY_MAX_RETRIES + 1):
             try:
-                response, usage = self.inference.chat(mem_messages, self.config.sampling_params)
+                response, usage = self.inference.chat(mem_messages, sampling_params)
                 self._timer.record_tokens(usage)
                 self._timer.record_cost(usage.get("cost", 0), "llm")
             except Exception as e:
-                print(f"[{self.agent_id}] Warmup mem retry {attempt+1} LLM error for qid {qid}: {e}")
+                if attempt < self.WARMUP_MEMORY_MAX_RETRIES:
+                    print(f"[{self.agent_id}] Warmup mem finalize retry {attempt+1} for qid {qid} after error: {e}")
+                    continue
+                print(f"[{self.agent_id}] Warmup mem finalize failed for qid {qid}: {e}")
                 continue
 
             adds, _, _ = extract_mem_ops(response)
             if adds:
                 add = adds[0]
+                add_qid = str(add.get("qid", qid))
+                if add_qid != str(qid):
+                    if attempt < self.WARMUP_MEMORY_MAX_RETRIES:
+                        print(
+                            f"[{self.agent_id}] Warmup mem finalize retry {attempt+1} for qid {qid}: "
+                            f"got qid={add_qid!r}"
+                        )
+                        continue
+                    print(
+                        f"[{self.agent_id}] Warmup mem finalize invalid for qid {qid}: "
+                        f"got qid={add_qid!r}"
+                    )
+                    break
                 return {
-                    "qid": str(add.get("qid", qid)),
+                    "qid": add_qid,
                     "question": str(add.get("question", question_title)),
                     "memory": str(add.get("memory", ""))[:1000],
                     "category": add.get("category"),
                 }
+
+            if attempt < self.WARMUP_MEMORY_MAX_RETRIES:
+                print(
+                    f"[{self.agent_id}] Warmup mem finalize retry {attempt+1} for qid {qid}: "
+                    f"response_preview={response[:200]!r}"
+                )
+                continue
             print(
-                f"[{self.agent_id}] Warmup mem retry {attempt+1} failed for qid {qid}: "
+                f"[{self.agent_id}] Warmup mem finalize invalid for qid {qid}: "
                 f"response_preview={response[:200]!r}"
             )
 
-        # All retries exhausted — use placeholder to guarantee coverage
-        print(f"[{self.agent_id}] Warmup mem all retries failed for qid {qid}, using placeholder.")
-        return self._warmup_mem_placeholder(qid, question_title)
+        return self._warmup_mem_placeholder(qid, question_title, submitted_forecasts)
 
     @staticmethod
-    def _warmup_mem_placeholder(qid, question_title: str) -> Dict:
+    def _warmup_forecast_summary(submitted_forecasts: Optional[List[Dict[str, Any]]]) -> str:
+        if not submitted_forecasts:
+            return ""
+        forecast = submitted_forecasts[0] if submitted_forecasts else None
+        if not isinstance(forecast, dict):
+            return ""
+        outcomes = forecast.get("outcomes")
+        if not isinstance(outcomes, dict) or not outcomes:
+            return ""
+
+        def _sort_key(item):
+            try:
+                return float(item[1])
+            except Exception:
+                return float("-inf")
+
+        parts = []
+        for name, prob in sorted(outcomes.items(), key=_sort_key, reverse=True):
+            try:
+                prob_text = f"{float(prob):.2f}"
+            except Exception:
+                prob_text = str(prob)
+            parts.append(f"{name}={prob_text}")
+        if not parts:
+            return ""
+        return " Submitted forecast: " + "; ".join(parts[:5]) + "."
+
+    @classmethod
+    def _warmup_placeholder_content(
+        cls,
+        submitted_forecasts: Optional[List[Dict[str, Any]]] = None,
+    ) -> str:
+        summary = cls._warmup_forecast_summary(submitted_forecasts)
+        return (
+            "WARMUP PLACEHOLDER: The agent reasoned about this question but did not create a memory entry."
+            f"{summary} Review the warmup logs and replace this placeholder with reasoning, evidence, "
+            "calibration, and update triggers."
+        )[:1000]
+
+    @classmethod
+    def _warmup_mem_placeholder(
+        cls,
+        qid,
+        question_title: str,
+        submitted_forecasts: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict:
         """Deterministic placeholder so every question gets a mem_df entry."""
         return {
             "qid": str(qid),
             "question": question_title[:200],
-            "memory": "No memory created during warmup. Update this entry with reasoning and evidence.",
-            "category": "",
+            "memory": cls._warmup_placeholder_content(submitted_forecasts),
+            "category": "warmup-placeholder",
+        }
+
+    @classmethod
+    def _warmup_structured_placeholder(
+        cls,
+        qid,
+        question_title: str,
+        submitted_forecasts: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict:
+        return {
+            "name": f"q{qid}-placeholder",
+            "description": f"Question {qid}: warmup placeholder for {question_title[:160]}",
+            "content": cls._warmup_placeholder_content(submitted_forecasts),
         }
 
     def _save_warmup_interop(self, current_date: date) -> None:
@@ -356,77 +486,46 @@ Output exactly one <mem_add> block. No other text needed."""
             )
             print(f"[{self.agent_id}] Warmup interop: wrote {len(entries)} entries to {flat_yaml_path.name}")
 
-    def _request_warmup_structured_memory(self, messages: List[Dict], qid, question_title: str) -> Optional[Dict]:
-        """Ask the LLM to produce a structured memory entry from the warmup conversation.
-
-        Makes one additional LLM call with the full conversation context.
-        Returns a dict with {name, description, content} or None on failure.
-        """
+    def _request_warmup_structured_memory(
+        self,
+        messages: List[Dict],
+        qid,
+        question_title: str,
+        submitted_forecasts: Optional[List[Dict[str, Any]]] = None,
+    ) -> Optional[Dict]:
+        """Finalize one same-context warmup structured-memory entry."""
         from agents.utils.forecast_parser import parse_action
 
-        memory_prompt = f"""You just finished reasoning about and predicting question {qid}: "{question_title}".
-
-Store one memory entry capturing your key reasoning, evidence, and calibration insights for this question. This will help you on future forecasting days.
-
-Guidelines:
-- Include the Question ID ({qid}) in the name or description so you can find it later
-- Focus on: key evidence found, reasoning chain, confidence level, what would change your mind
-- Be specific: include numbers, sources, dates — not vague summaries
-- Descriptions should answer: "Why would future-me want to read this?" not just "What did I do today"
-
-
-Memory tool call to add the entry:
-<action type="memory_new">
-<name>q{qid}-lowercase-hyphenated-topic (max 64 chars, a-z 0-9 hyphens only)</name>
-<description>What this stores and when to use it (max 256 chars, include Question ID)</description>
-<content>Your key reasoning, evidence, confidence, and triggers for updating (max 1024 chars)</content>
-</action>
-
-Output only the action block above. No other text needed."""
-
-        mem_messages = messages + [{"role": "user", "content": memory_prompt}]
-        try:
-            response, usage = self.inference.chat(mem_messages, self.config.sampling_params)
-            self._timer.record_tokens(usage)
-            self._timer.record_cost(usage.get("cost", 0), "llm")
-        except Exception as e:
-            print(f"[{self.agent_id}] Warmup structured memory LLM call failed for qid {qid}: {e}")
-            return None
-
-        parsed = parse_action(response, self.config.max_outcomes_per_question)
-        if parsed.action_type == "memory_new" and parsed.memory_new_data:
-            return parsed.memory_new_data  # dict with {name, description, content}
-
-        # Retry up to 3 times with the same context (strip failed attempt each time)
-        print(
-            f"[{self.agent_id}] Warmup structured memory parse failed for qid {qid}, retrying: "
-            f"action_type={parsed.action_type}, has_data={parsed.memory_new_data is not None}, "
-            f"response_preview={response[:200]!r}"
-        )
-        for attempt in range(3):
+        mem_messages = messages + [{"role": "user", "content": self._build_warmup_memory_prompt(qid, question_title)}]
+        sampling_params = self._warmup_memory_sampling_params()
+        for attempt in range(self.WARMUP_MEMORY_MAX_RETRIES + 1):
             try:
-                response, usage = self.inference.chat(mem_messages, self.config.sampling_params)
+                response, usage = self.inference.chat(mem_messages, sampling_params)
                 self._timer.record_tokens(usage)
                 self._timer.record_cost(usage.get("cost", 0), "llm")
             except Exception as e:
-                print(f"[{self.agent_id}] Warmup structured memory retry {attempt+1} LLM error for qid {qid}: {e}")
+                if attempt < self.WARMUP_MEMORY_MAX_RETRIES:
+                    print(f"[{self.agent_id}] Warmup structured memory retry {attempt+1} for qid {qid} after error: {e}")
+                    continue
+                print(f"[{self.agent_id}] Warmup structured memory finalize failed for qid {qid}: {e}")
                 continue
 
             parsed = parse_action(response, self.config.max_outcomes_per_question)
             if parsed.action_type == "memory_new" and parsed.memory_new_data:
                 return parsed.memory_new_data
+
+            if attempt < self.WARMUP_MEMORY_MAX_RETRIES:
+                print(
+                    f"[{self.agent_id}] Warmup structured memory retry {attempt+1} for qid {qid}: "
+                    f"response_preview={response[:200]!r}"
+                )
+                continue
             print(
-                f"[{self.agent_id}] Warmup structured memory retry {attempt+1} failed for qid {qid}: "
+                f"[{self.agent_id}] Warmup structured memory invalid for qid {qid}: "
                 f"response_preview={response[:200]!r}"
             )
 
-        # All retries exhausted — create a deterministic placeholder entry
-        print(f"[{self.agent_id}] Warmup structured memory all retries failed for qid {qid}, using placeholder.")
-        return {
-            "name": f"q{qid}-placeholder",
-            "description": f"Question {qid}: {question_title[:200]}",
-            "content": "No memory created during warmup. Update this entry with reasoning and evidence.",
-        }
+        return self._warmup_structured_placeholder(qid, question_title, submitted_forecasts)
 
     def act(self,
             doc_interface,
@@ -473,10 +572,19 @@ Output only the action block above. No other text needed."""
 
         if self.warmed_up or (self.start_date and current_date > self.start_date):
             reminder = (
-                "\n\nIMPORTANT: You currently have predictions on "
-                f"{predicted_count} out of {active_count} active questions. "
-                "You can both update past predictions if new information became available, "
-                "or make new ones."
+                "\n\nIMPORTANT: You have predictions on "
+                f"{predicted_count} out of {active_count} active questions.\n"
+                "BEFORE making any forecasts, query your existing predictions:\n"
+                "  df[df['my_prediction'].notna()][['qid','title','my_prediction']]\n\n"
+                "UPDATE RULES:\n"
+                "- Do NOT re-predict questions from scratch unless you find specific new evidence.\n"
+                "- Only update a prediction if you find SPECIFIC NEW evidence (news, data) that changes your view.\n"
+                "- Anchor to your current prediction and adjust incrementally.\n\n"
+                "PRIORITIES:\n"
+                "1. Questions without predictions (if any)\n"
+                "2. Questions where today's news search reveals new information\n"
+                "3. Questions approaching resolution date that you haven't checked recently\n"
+                "4. Skip questions where nothing has changed"
             )
             # Insert before "You have {max_actions} actions..."
             if "You have" in base_instructions:
@@ -486,14 +594,14 @@ Output only the action block above. No other text needed."""
                 
         return base_instructions
 
-    def _run_warmup_loop(self, messages: List[Dict], forecast_interface, target_qid: str) -> None:
+    def _run_warmup_loop(self, messages: List[Dict], forecast_interface, target_qid: str) -> WarmupLoopResult:
         """
         Specialized action loop for warmup:
         - Max actions determined by config.warmup_max_actions (default 10)
         - Submit MUST be for target_qid (enforced by prompt mostly, but logic handles generic submit)
         - All actions are tagged with target_qid for searchable logs
         """
-        budget = self._create_budget_tracker(warmup=True)
+        budget = self._create_warmup_budget_tracker()
         budget.bootstrap_context(messages)
         raw_stream = "warmup"
         final_submit_prompt_injected = False
@@ -515,8 +623,24 @@ Output only the action block above. No other text needed."""
                 final_submit_prompt_injected = True
 
             # Get response
-            with self._timer.track("llm"):
-                response, usage = self.inference.chat(messages, self.config.sampling_params)
+            try:
+                with self._timer.track("llm"):
+                    response, usage = self.inference.chat(messages, self.config.sampling_params)
+            except Exception as e:
+                print(f"  [{self.agent_id}] Warmup LLM error for qid {target_qid}: {e}")
+                if self._is_fatal_inference_failure(e):
+                    raise
+                self._log_action(
+                    forecast_interface,
+                    messages,
+                    "",
+                    "llm_error",
+                    budget,
+                    qid=target_qid,
+                    error=str(e),
+                    raw_stream=raw_stream,
+                )
+                return WarmupLoopResult(submitted=False)
 
             if not response or not response.strip():
                 if force_submit_turn and not final_submit_retry_used:
@@ -532,7 +656,7 @@ Output only the action block above. No other text needed."""
                     forecast_interface, messages, response or "", "warmup_empty_skip",
                     budget, qid=target_qid, raw_stream=raw_stream,
                 )
-                break
+                return WarmupLoopResult(submitted=False)
                 
             # Successful response — reset empty retry counter
             empty_retries = 0
@@ -594,7 +718,10 @@ Output only the action block above. No other text needed."""
                     reasoning=reasoning,
                 )
                 if submitted:
-                    break
+                    return WarmupLoopResult(
+                        submitted=True,
+                        submitted_forecasts=list(parsed.forecasts or []),
+                    )
                 continue
             
             # Parse
@@ -657,7 +784,10 @@ Output only the action block above. No other text needed."""
                     )
                     # End interaction immediately after successful submission.
                     if submitted:
-                        break
+                        return WarmupLoopResult(
+                            submitted=True,
+                            submitted_forecasts=list(valid_forecasts),
+                        )
                     continue
                 else:
                     # If no valid forecasts, warn agent
@@ -676,6 +806,8 @@ Output only the action block above. No other text needed."""
                     messages, forecast_interface, response, parsed, budget, 
                     qid=target_qid, reasoning=reasoning, raw_stream=raw_stream
                 )
+
+        return WarmupLoopResult(submitted=False)
 
     @staticmethod
     def _forecasts_within_probability_bounds(forecasts: List[Dict[str, Any]]) -> bool:

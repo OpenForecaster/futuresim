@@ -134,3 +134,22 @@ def test_qwen_warmup_context_limit_creates_placeholder_mem():
     assert agent._warmup_mem_entries[0]["qid"] == "Q123"
     assert "placeholder" in agent._warmup_mem_entries[0]["memory"].lower() or "no memory" in agent._warmup_mem_entries[0]["memory"].lower()
     assert forecast_interface.logs[-1]["metadata"]["phase"] == "llm_context_limit"
+
+
+def test_qwen_warmup_context_limit_creates_structured_placeholder():
+    agent = WarmupContextLimitAgent()
+    agent._warmup_structured_entries = []
+    forecast_interface = DummyForecastInterface()
+    question = SimpleNamespace(
+        qid="Q123",
+        title="Who wins?",
+        background="Background",
+        resolution_criteria="Criteria",
+        answer_type="discrete",
+    )
+
+    agent._process_single_question(question, date(2025, 1, 1), forecast_interface)
+
+    assert len(agent._warmup_structured_entries) == 1
+    assert agent._warmup_structured_entries[0]["name"] == "qQ123-placeholder"
+    assert "warmup placeholder" in agent._warmup_structured_entries[0]["content"].lower()
