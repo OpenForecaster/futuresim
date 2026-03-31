@@ -106,6 +106,12 @@ fix_home
 load_runtime_env
 setup_core_dump_dir
 
+# FlashInfer uses filelock+flock on FLASHINFER_WORKSPACE_BASE; many shared paths (e.g. /fast) lack flock.
+# HTCondor sets local scratch here — use it so JIT locks work (overrides repo .env when present).
+if [ -n "${_CONDOR_SCRATCH_DIR:-}" ] && [ -d "${_CONDOR_SCRATCH_DIR}" ] && [ -w "${_CONDOR_SCRATCH_DIR}" ]; then
+    export FLASHINFER_WORKSPACE_BASE="${_CONDOR_SCRATCH_DIR}"
+fi
+
 export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-${HOME}/.cache/huggingface/datasets}"
 mkdir -p "${HF_DATASETS_CACHE}"
 

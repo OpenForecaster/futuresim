@@ -29,6 +29,8 @@ wheels/
 # Virtual environments
 .venv/
 .skyrl-venv/
+.venv
+.skyrl-venv
 venv/
 ENV/
 env/
