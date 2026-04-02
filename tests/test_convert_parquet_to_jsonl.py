@@ -31,7 +31,7 @@ def test_convert_parquet_to_jsonl_script(tmp_path):
     pq.write_table(table, parquet_path)
 
     output_dir = tmp_path / "jsonl"
-    script_path = Path("/home/sgoel/forecast-sim/scripts/convert_parquet_to_jsonl.py")
+    script_path = Path(__file__).resolve().parent.parent / "scripts" / "convert_parquet_to_jsonl.py"
     completed = subprocess.run(
         [
             sys.executable,

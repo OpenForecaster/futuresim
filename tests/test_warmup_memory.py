@@ -1,28 +1,64 @@
+"""Tests for AllQ warmup memory finalization using Chat Completions tool calls."""
+
+import json
 from datetime import date
 from types import SimpleNamespace
+from typing import Any, Dict, List
 
 from agents.allQAgent.agent import AllQAgent
 from agents.basicAgent import AgentConfig
 from agents.utils.memory import ActiveMemory
 
 
-def make_submit_response(qid: str) -> str:
-    return f"""<reasoning>Ready to submit.</reasoning>
-<action type="submit">
-<forecast qid="{qid}">
-  <outcome name="Alice" prob="0.7"/>
-  <outcome name="Bob" prob="0.3"/>
-</forecast>
-</action>"""
+def make_submit_tool_response(qid: str) -> Dict[str, Any]:
+    """Build a Chat Completions response with a submit_forecasts tool call."""
+    return {
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": "call_submit",
+                    "type": "function",
+                    "function": {
+                        "name": "submit_forecasts",
+                        "arguments": json.dumps({
+                            "forecasts": [{"qid": qid, "outcomes": {"Alice": 0.7, "Bob": 0.3}}]
+                        }),
+                    },
+                }],
+            },
+            "finish_reason": "tool_calls",
+        }],
+        "usage": {"prompt_tokens": 100, "completion_tokens": 30, "total_tokens": 130},
+    }
 
 
-def make_mem_add_response(qid: str, question: str) -> str:
-    return f"""<mem_add>
-qid: {qid}
-question: {question}
-memory: Predicted Alice 0.70 after reviewing recent polling and coalition math.
-category: politics
-</mem_add>"""
+def make_mem_add_tool_response(qid: str, question: str) -> Dict[str, Any]:
+    """Build a Chat Completions response with a mem_add tool call."""
+    return {
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": "call_mem",
+                    "type": "function",
+                    "function": {
+                        "name": "mem_add",
+                        "arguments": json.dumps({
+                            "qid": qid,
+                            "question": question,
+                            "memory": "Predicted Alice 0.70 after reviewing recent polling and coalition math.",
+                            "category": "politics",
+                        }),
+                    },
+                }],
+            },
+            "finish_reason": "tool_calls",
+        }],
+        "usage": {"prompt_tokens": 120, "completion_tokens": 40, "total_tokens": 160},
+    }
 
 
 class DummyForecastInterface:
@@ -37,14 +73,16 @@ class DummyForecastInterface:
         self.submitted.append(pred)
 
 
-class ScriptedTextInference:
-    def __init__(self, responses):
+class ScriptedChatInference:
+    """Inference provider that returns scripted Chat Completions JSON responses."""
+
+    def __init__(self, responses: List[Any]):
         self.responses = list(responses)
         self.call_index = 0
-        self.messages_per_call = []
-        self.sampling_params_per_call = []
+        self.messages_per_call: List[List[Dict]] = []
+        self.sampling_params_per_call: List[Dict] = []
 
-    def chat(self, messages, sampling_params):
+    def chat_json(self, messages, sampling_params):
         self.messages_per_call.append(list(messages))
         self.sampling_params_per_call.append(dict(sampling_params))
         if self.call_index >= len(self.responses):
@@ -53,12 +91,7 @@ class ScriptedTextInference:
         self.call_index += 1
         if isinstance(response, Exception):
             raise response
-        usage = {
-            "prompt_tokens": 100 + self.call_index,
-            "completion_tokens": 30,
-            "total_tokens": 130 + self.call_index,
-        }
-        return response, usage
+        return response
 
 
 class ScriptedAllQAgent(AllQAgent):
@@ -82,12 +115,10 @@ class ScriptedAllQAgent(AllQAgent):
 
 
 def test_allq_active_warmup_uses_same_context_memory_finalization(tmp_path):
-    inference = ScriptedTextInference(
-        [
-            make_submit_response("Q123"),
-            make_mem_add_response("Q123", "Who wins the election?"),
-        ]
-    )
+    inference = ScriptedChatInference([
+        make_submit_tool_response("Q123"),
+        make_mem_add_tool_response("Q123", "Who wins the election?"),
+    ])
     cfg = AgentConfig(
         enable_memory=True,
         memory_format="active",
@@ -119,17 +150,14 @@ def test_allq_active_warmup_uses_same_context_memory_finalization(tmp_path):
     assert "Alice 0.70" in agent._warmup_mem_entries[0]["memory"]
     assert len(inference.messages_per_call) == 2
     assert len(inference.messages_per_call[1]) > len(inference.messages_per_call[0])
-    assert inference.sampling_params_per_call[1]["max_tokens"] == agent.WARMUP_MEMORY_MAX_OUTPUT_TOKENS
 
 
 def test_allq_warmup_memory_transport_failure_falls_back_once(tmp_path):
-    inference = ScriptedTextInference(
-        [
-            make_submit_response("Q123"),
-            RuntimeError("vLLM chat/completions timeout after 300s"),
-            RuntimeError("vLLM chat/completions timeout after 300s"),
-        ]
-    )
+    inference = ScriptedChatInference([
+        make_submit_tool_response("Q123"),
+        RuntimeError("vLLM chat/completions timeout after 300s"),
+        RuntimeError("vLLM chat/completions timeout after 300s"),
+    ])
     cfg = AgentConfig(
         enable_memory=True,
         memory_format="active",

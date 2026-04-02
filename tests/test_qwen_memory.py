@@ -111,6 +111,12 @@ class DummyForecastInterface:
         self.submitted.append(pred)
 
 
+class _DummyChatProvider:
+    """Minimal inference provider that satisfies _require_chat_tools()."""
+    def chat_json(self, messages, sampling_params):
+        raise RuntimeError("Should not be called directly in these tests")
+
+
 class ScriptedQwenAgent(QwenBasicAgent):
     """Agent that returns scripted Chat Completions responses."""
 
@@ -123,7 +129,7 @@ class ScriptedQwenAgent(QwenBasicAgent):
         )
         super().__init__(
             agent_id="test_scripted",
-            inference_provider=None,
+            inference_provider=_DummyChatProvider(),
             config=cfg,
             **kwargs,
         )
@@ -173,7 +179,7 @@ class ScriptedQwenAllQAgent(QwenAllQAgent):
         )
         super().__init__(
             agent_id="test_qwen_warmup",
-            inference_provider=None,
+            inference_provider=_DummyChatProvider(),
             config=cfg,
             start_date=date(2025, 1, 1),
             **kwargs,
@@ -216,21 +222,6 @@ class RecordingInference(VLLMInference):
     def chat_json(self, messages, sampling_params):
         self.calls.append({"messages": list(messages), "sampling_params": dict(sampling_params)})
         return self.response
-
-
-class XMLWarmupInference:
-    def __init__(self, responses: List[Any]):
-        self._responses = list(responses)
-        self.calls: List[Dict[str, Any]] = []
-
-    def chat(self, messages, sampling_params):
-        self.calls.append({"messages": list(messages), "sampling_params": dict(sampling_params)})
-        if not self._responses:
-            raise RuntimeError("No more scripted XML warmup responses")
-        resp = self._responses.pop(0)
-        if isinstance(resp, Exception):
-            raise resp
-        return resp
 
 
 # ── A. Tool Schema Tests ─────────────────────────────────────────────────
@@ -1144,44 +1135,6 @@ class TestQwenWarmupMemoryFinalization:
         assert len(agent._warmup_mem_entries) == 1
         assert "warmup placeholder" in agent._warmup_mem_entries[0]["memory"].lower()
         assert "Alice=0.60" in agent._warmup_mem_entries[0]["memory"]
-
-    def test_warmup_memory_invalid_tool_falls_back_to_xml_parser(self, tmp_path):
-        responses = [
-            make_tool_call_response(
-                "submit_forecasts",
-                {"forecasts": [{"qid": "Q123", "outcomes": {"Alice": 0.6}}]},
-                call_id="submit_call",
-            ),
-            make_no_tool_response(content="I think Alice is ahead."),
-            make_no_tool_response(content="Still no tool."),
-        ]
-        agent = ScriptedQwenAllQAgent(responses)
-        agent.inference = XMLWarmupInference([
-            (
-                "<mem_add>\n"
-                "qid: Q123\n"
-                "question: Who wins the election?\n"
-                "memory: Alice leads after recent polling and coalition math.\n"
-                "category: politics\n"
-                "</mem_add>",
-                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
-            )
-        ])
-        agent._memory = ActiveMemory("warmup", str(tmp_path))
-        agent._memory.set_date(date(2025, 1, 1))
-        agent._warmup_mem_entries = []
-
-        fi = DummyForecastInterface()
-        agent._process_single_question(self._make_question(), date(2025, 1, 1), fi)
-
-        assert agent._call_index == 3
-        assert len(agent._warmup_mem_entries) == 1
-        entry = agent._warmup_mem_entries[0]
-        assert entry["qid"] == "Q123"
-        assert entry["category"] == "politics"
-        assert "coalition math" in entry["memory"]
-        assert len(agent.inference.calls) == 1
-        assert "write exactly one question-specific memory entry" in agent.inference.calls[0]["messages"][-1]["content"].lower()
 
     def test_warmup_memory_transport_timeout_retries_once_then_placeholder(self, tmp_path):
         responses = [

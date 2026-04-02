@@ -24,6 +24,7 @@ class AgentConfig:
     memory_format: str = "structured"  # "structured" (YAML entries), "plain" (legacy text), or "active" (mem_df + meta-insights)
     memory_max_entries: int = 500  # Max number of structured memory entries
     memory_update_max_total_tokens: int = 50000  # Token budget for end-of-day memory mini-loop
+    content_filter_circuit_breaker: int = 5  # Break out of loop after N consecutive content_filter responses
     append_model_output_logs: bool = False
     sampling_params: Optional[Dict[str, Any]] = None
     
@@ -39,6 +40,9 @@ class AgentConfig:
     # conversation to the model. -1 keeps all results.
     tool_result_keep_last: int = -1
     
+    # Allow the model to emit multiple tool calls per turn.
+    parallel_tool_calls: bool = False
+
     # Single agent mode - adjusts prompt to focus on accuracy only (no peer/market language)
     single_agent_mode: bool = False
 

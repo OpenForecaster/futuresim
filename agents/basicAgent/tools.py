@@ -634,6 +634,25 @@ def tool_calls_to_parsed_action(
     )
 
 
+def single_call_to_parsed_action(
+    call: Dict[str, Any],
+) -> Tuple[Optional[ParsedAction], str]:
+    """Parse a single tool call dict into a ParsedAction.
+
+    Routes through ``_memory_tool_call_to_action`` first (matching the
+    dispatch order in ``chat_response_to_action``) so that memory-phase
+    tools are recognised correctly.
+    """
+    name = call.get("name", "")
+    args = call.get("arguments") or {}
+    if isinstance(args, dict):
+        mem_parsed = _memory_tool_call_to_action(name, args)
+        if mem_parsed is not None:
+            return mem_parsed, ""
+    parsed, text, _ = tool_calls_to_parsed_action([call])
+    return parsed, text
+
+
 def _memory_tool_call_to_action(name: str, args: Dict[str, Any]) -> Optional[ParsedAction]:
     if name == "memory_retrieve":
         entry_name = args.get("name")

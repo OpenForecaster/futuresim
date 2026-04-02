@@ -31,11 +31,17 @@ class FakeMemory:
         self.current_date = current_date
 
 
+class _DummyChatProvider:
+    """Minimal inference provider that satisfies _require_chat_tools()."""
+    def chat_json(self, messages, sampling_params):
+        raise RuntimeError("Should not be called directly in these tests")
+
+
 class RetryTestAgent(QwenBasicAgent):
     def __init__(self):
         super().__init__(
             agent_id="retry_test",
-            inference_provider=None,
+            inference_provider=_DummyChatProvider(),
             config=AgentConfig(gptoss_responses_max_retries=3),
         )
         self.calls = 0
@@ -49,7 +55,7 @@ class SessionContextLimitAgent(QwenBasicAgent):
     def __init__(self):
         super().__init__(
             agent_id="session_test",
-            inference_provider=None,
+            inference_provider=_DummyChatProvider(),
             config=AgentConfig(enable_memory=True),
         )
         self._memory = FakeMemory()
@@ -72,7 +78,7 @@ class WarmupContextLimitAgent(QwenAllQAgent):
     def __init__(self):
         super().__init__(
             agent_id="warmup_test",
-            inference_provider=None,
+            inference_provider=_DummyChatProvider(),
             config=AgentConfig(enable_memory=False, warmup_max_actions=3),
             start_date=date(2025, 1, 1),
         )
@@ -112,7 +118,7 @@ def test_qwen_session_context_limit_ends_session_without_memory_update():
     assert forecasts == []
     assert agent.memory_update_calls == 0
     assert forecast_interface.next_day_calls == 1
-    assert forecast_interface.logs[-1]["metadata"]["phase"] == "llm_context_limit"
+    assert agent._context_limit_hit is True
 
 
 def test_qwen_warmup_context_limit_creates_placeholder_mem():
@@ -133,7 +139,6 @@ def test_qwen_warmup_context_limit_creates_placeholder_mem():
     assert len(agent._warmup_mem_entries) == 1  # placeholder created
     assert agent._warmup_mem_entries[0]["qid"] == "Q123"
     assert "placeholder" in agent._warmup_mem_entries[0]["memory"].lower() or "no memory" in agent._warmup_mem_entries[0]["memory"].lower()
-    assert forecast_interface.logs[-1]["metadata"]["phase"] == "llm_context_limit"
 
 
 def test_qwen_warmup_context_limit_creates_structured_placeholder():

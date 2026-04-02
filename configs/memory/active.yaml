@@ -3,7 +3,7 @@
 # Usage: python aisa_scripts/run_sim/submit_sim_aisa.py --config configs/memory/active.yaml --runs 1 --gpus 1 --memory 80 --time 2-00:00:00
 
 # --- Restart from shared warmup ---
-restart_from: "logs/current_sim/deepseek_shared_warmup_r00/26-03-22-11-32-28"
+restart_from: "/mnt/nfs/home/ac146091/forecast-sim/logs/current_sim/deepseek_shared_warmup_r00/26-03-22-11-32-28"
 restart_from_day: "2025-04-25"
 
 # --- Simulation Meta ---
@@ -31,6 +31,7 @@ embedding_gpu_mem: 0.7
 # --- Answer Matching ---
 matching: "openrouter"
 matcher: "deepseek/deepseek-v3.2"
+matcher_openrouter_provider_order: ["novita/fp8", "parasail/fp8", "deepseek"]
 matcher_gpu_mem: 0.0
 max_model_len: 8192
 
@@ -42,6 +43,7 @@ parallel: true
 # --- Agents Configuration ---
 defaults:
   provider: "openrouter"
+  openrouter_provider_order: ["novita/fp8", "parasail/fp8", "deepseek"]
   scaffold: "allQ"
   temperature: 0.7
   max_tokens: 2048

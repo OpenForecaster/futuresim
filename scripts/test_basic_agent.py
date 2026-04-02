@@ -259,7 +259,7 @@ def load_agents_config(config_path: str) -> dict:
     return config
 
 
-def create_inference_provider(provider: str, model: str, args):
+def create_inference_provider(provider: str, model: str, args, openrouter_provider_order=None):
     """Create an inference provider instance."""
     if provider == "vllm":
         from inference.vllm import VLLMInference
@@ -290,7 +290,10 @@ def create_inference_provider(provider: str, model: str, args):
         )
     elif provider == "openrouter":
         from inference.openrouter import OpenRouterInference
-        return OpenRouterInference(model)
+        kwargs = {}
+        if openrouter_provider_order:
+            kwargs["provider"] = {"order": openrouter_provider_order, "allow_fallbacks": True}
+        return OpenRouterInference(model, **kwargs)
     elif provider == "azure":
         from inference.azure_openai import AzureOpenAIInference
         return AzureOpenAIInference(model=model)
@@ -405,7 +408,8 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
         print(f"  [{i+1}/{len(agents_list)}] Creating {scaffold}:{provider}:{model}...", flush=True)
         
         # Create inference provider
-        inference_provider = create_inference_provider(provider, model, args)
+        openrouter_provider_order = agent_def.get('openrouter_provider_order', defaults.get('openrouter_provider_order', None))
+        inference_provider = create_inference_provider(provider, model, args, openrouter_provider_order=openrouter_provider_order)
         
         # Build agent config with merged settings
         max_actions = _optional_int(agent_def.get('max_actions', defaults.get('max_actions', args.max_actions)))
@@ -1135,7 +1139,11 @@ def main():
         print(f"  Matcher server ready!")
     elif args.matching == "openrouter":
         from inference.openrouter import OpenRouterInference
-        matcher_provider = OpenRouterInference(args.matcher)
+        matcher_kwargs = {}
+        matcher_prov_order = getattr(args, "matcher_openrouter_provider_order", None)
+        if matcher_prov_order:
+            matcher_kwargs["provider"] = {"order": matcher_prov_order, "allow_fallbacks": True}
+        matcher_provider = OpenRouterInference(args.matcher, **matcher_kwargs)
         print(f"Answer matching: OpenRouter with {args.matcher}")
     elif args.matching == "exact":
         print(f"Answer matching: exact (normalized string comparison)")

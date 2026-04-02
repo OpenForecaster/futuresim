@@ -32,6 +32,7 @@ from .tools import (
     extract_finish_reason,
     final_submit_tool_instruction_text,
     optional_search_dates_from_parsed,
+    single_call_to_parsed_action,
     tool_calls_to_parsed_action as normalize_tool_calls_to_parsed_action,
 )
 from agents.utils.memory import StructuredMemory, ActiveMemory
@@ -444,10 +445,10 @@ class BasicAgent(BaseAgent):
         """Build a compact recap of this session's resolutions for the memory update prompt."""
         feedback = getattr(self, '_last_feedback_data', None)
         if not feedback:
-            return ""
+            return "No questions resolved this session.\n"
         resolved = feedback.get('resolved_today', [])
         if not resolved:
-            return ""
+            return "No questions resolved this session.\n"
 
         lines = ["## QUESTIONS RESOLVED THIS SESSION (extract lessons from these)"]
         for item in resolved:
@@ -486,7 +487,7 @@ class BasicAgent(BaseAgent):
         sp = dict(sampling_params or {})
         sp["tools"] = tools
         sp["tool_choice"] = sp.get("tool_choice", "auto")
-        sp["parallel_tool_calls"] = sp.get("parallel_tool_calls", False)
+        sp["parallel_tool_calls"] = sp.get("parallel_tool_calls", self.config.parallel_tool_calls)
         return self.inference.chat_json(messages, sp)
 
     @staticmethod
@@ -582,7 +583,7 @@ class BasicAgent(BaseAgent):
         if assistant_text and assistant_text.strip():
             parts.append(assistant_text.strip())
         if tool_calls:
-            parts.append("TOOL_CALLS:\n" + json.dumps(tool_calls[:3], indent=2, sort_keys=True))
+            parts.append("TOOL_CALLS:\n" + json.dumps(tool_calls, indent=2, sort_keys=True))
         return "\n\n".join(parts).strip()
 
     def _log_chat_tools_action(
@@ -690,6 +691,7 @@ class BasicAgent(BaseAgent):
         final_submit_prompt_injected = False
         final_submit_retry_used = False
         consecutive_llm_failures = 0
+        consecutive_content_filters = 0
         pending_input_delta: List[Any] = list(messages)
 
         while not budget.is_exhausted():
@@ -737,6 +739,8 @@ class BasicAgent(BaseAgent):
             pending_input_delta = []
             sampling_params = dict(self.config.sampling_params or {})
             sampling_params.setdefault("tool_choice", "auto")
+            if memory_phase and self.config.parallel_tool_calls:
+                sampling_params["parallel_tool_calls"] = True
 
             try:
                 with self._timer.track("llm"):
@@ -813,26 +817,24 @@ class BasicAgent(BaseAgent):
             parsed, assistant_text, tool_calls = chat_response_to_action(resp_json)
             assistant_message = extract_assistant_message(resp_json)
             finish_reason = extract_finish_reason(resp_json)
+            if finish_reason == "content_filter":
+                consecutive_content_filters += 1
+                if consecutive_content_filters >= self.config.content_filter_circuit_breaker:
+                    print(f"  [{self.agent_id}] Circuit breaker: {consecutive_content_filters} "
+                          f"consecutive content_filter responses, ending phase")
+                    break
+            else:
+                consecutive_content_filters = 0
             appended = self._append_assistant_message(messages=messages, assistant_message=assistant_message)
             if appended is not None:
                 budget.record_appended_item(appended)
 
             rendered = self._render_turn_for_logging(assistant_text, tool_calls)
-            self._log_chat_tools_action(
-                messages=messages,
-                rendered_response=rendered,
-                phase="memory_update" if memory_phase else "llm",
-                budget=budget,
-                qid=target_qid,
-                reasoning=reasoning,
-                reasoning_tokens=reasoning_tokens_turn,
-                finish_reason=finish_reason,
-                usage=usage,
-                raw_stream=raw_stream,
-                prompt_override=model_input_delta,
-            )
+            # turn_log_extra collects handler-level metadata (submitted_qids,
+            # dropped_forecasts, errors, etc.) so a single post-dispatch log
+            # call captures everything without double-logging.
+            turn_log_extra: Dict[str, Any] = {}
 
-            tool_call = tool_calls[0] if tool_calls else None
             valid_final_forecasts: List[Dict[str, Any]] = []
             has_valid_final_submit = False
             if parsed is not None and parsed.action_type == "submit" and parsed.forecasts:
@@ -850,9 +852,16 @@ class BasicAgent(BaseAgent):
 
             if parsed is None:
                 budget.consume_action()
+                self._log_chat_tools_action(
+                    messages=messages, rendered_response=rendered,
+                    phase="memory_update" if memory_phase else "llm",
+                    budget=budget, qid=target_qid, reasoning=reasoning,
+                    reasoning_tokens=reasoning_tokens_turn, finish_reason=finish_reason,
+                    usage=usage, raw_stream=raw_stream, prompt_override=model_input_delta,
+                )
                 message = {
                     "role": "user",
-                    "content": budget.format_feedback("No tool call detected. Call exactly one tool each turn."),
+                    "content": budget.format_feedback("No tool call detected. Call at least one tool each turn."),
                 }
                 self._append_with_budget(messages, budget, message)
                 pending_input_delta.append(message)
@@ -894,115 +903,126 @@ class BasicAgent(BaseAgent):
 
             if memory_phase:
                 before_len = len(messages)
-                if parsed.action_type in ("memory_retrieve", "memory_new", "memory_add", "memory_update", "memory_delete"):
-                    self._handle_memory_action(
-                        messages,
-                        forecast_interface,
-                        rendered,
-                        parsed,
-                        budget,
-                        reasoning=reasoning,
-                        tool_call=tool_call,
-                    )
-                elif parsed.action_type in ("mem_add", "mem_update", "mem_delete"):
-                    self._handle_mem_action(
-                        messages,
-                        forecast_interface,
-                        rendered,
-                        parsed,
-                        budget,
-                        reasoning=reasoning,
-                        tool_call=tool_call,
-                    )
-                else:
-                    self._handle_invalid(
-                        messages,
-                        forecast_interface,
-                        rendered,
-                        parsed,
-                        budget,
-                        reasoning=reasoning,
-                        tool_call=tool_call,
-                    )
+                saw_next_day = False
+                _mem_actions: List[str] = []
+                for tc in tool_calls:
+                    tc_parsed, _ = single_call_to_parsed_action(tc)
+                    if tc_parsed is None:
+                        continue
+                    if tc_parsed.action_type == "next":
+                        saw_next_day = True
+                        break
+                    _mem_actions.append(tc_parsed.action_type)
+                    if tc_parsed.action_type in ("memory_retrieve", "memory_new", "memory_add",
+                                                  "memory_update", "memory_delete"):
+                        self._handle_memory_action(
+                            messages, forecast_interface, rendered, tc_parsed,
+                            budget, reasoning=reasoning, tool_call=tc,
+                        )
+                    elif tc_parsed.action_type in ("mem_add", "mem_update", "mem_delete"):
+                        self._handle_mem_action(
+                            messages, forecast_interface, rendered, tc_parsed,
+                            budget, reasoning=reasoning, tool_call=tc,
+                        )
+                    else:
+                        self._handle_invalid(
+                            messages, forecast_interface, rendered, tc_parsed,
+                            budget, reasoning=reasoning, tool_call=tc,
+                        )
+                        if tc_parsed.error:
+                            turn_log_extra["error"] = tc_parsed.error
                 pending_input_delta.extend(messages[before_len:])
+                _mem_phase = "memory_update_done" if saw_next_day else "memory_update"
+                if _mem_actions:
+                    turn_log_extra["actions"] = _mem_actions
+                self._log_chat_tools_action(
+                    messages=messages, rendered_response=rendered,
+                    phase=_mem_phase, budget=budget,
+                    qid=target_qid, reasoning=reasoning,
+                    reasoning_tokens=reasoning_tokens_turn, finish_reason=finish_reason,
+                    usage=usage, raw_stream=raw_stream,
+                    prompt_override=model_input_delta, **turn_log_extra,
+                )
+                if saw_next_day:
+                    break
                 continue
 
             before_len = len(messages)
-            if parsed.action_type == "query":
-                self._handle_query(
-                    messages,
-                    forecast_interface,
-                    rendered,
-                    parsed,
-                    budget,
-                    qid=target_qid,
-                    reasoning=reasoning,
-                    raw_stream=raw_stream,
-                    tool_call=tool_call,
-                )
-            elif parsed.action_type == "search":
-                self._handle_search(
-                    messages,
-                    forecast_interface,
-                    rendered,
-                    parsed,
-                    budget,
-                    qid=target_qid,
-                    reasoning=reasoning,
-                    raw_stream=raw_stream,
-                    tool_call=tool_call,
-                )
-            elif parsed.action_type in ("memory_retrieve", "memory_new", "memory_add", "memory_update", "memory_delete"):
-                self._handle_memory_action(
-                    messages,
-                    forecast_interface,
-                    rendered,
-                    parsed,
-                    budget,
-                    reasoning=reasoning,
-                    tool_call=tool_call,
-                )
-            elif parsed.action_type in ("mem_add", "mem_update", "mem_delete"):
-                self._handle_mem_action(
-                    messages,
-                    forecast_interface,
-                    rendered,
-                    parsed,
-                    budget,
-                    reasoning=reasoning,
-                    tool_call=tool_call,
-                )
-            elif parsed.action_type == "submit":
-                if target_qid is not None and parsed.forecasts:
-                    parsed.forecasts = [f for f in parsed.forecasts if f.get("qid") == target_qid]
-                forecasts = self._handle_submit(
-                    messages,
-                    forecast_interface,
-                    rendered,
-                    parsed,
-                    budget,
-                    qid=target_qid,
-                    reasoning=reasoning,
-                    raw_stream=raw_stream,
-                    tool_call=tool_call,
-                )
-                all_forecasts.extend(forecasts)
-                if target_qid is not None and forecasts:
-                    pending_input_delta.extend(messages[before_len:])
-                    break
+            break_outer = False
+            _turn_actions: List[str] = []
+            for tc in tool_calls:
+                tc_parsed, _ = single_call_to_parsed_action(tc)
+                if tc_parsed is None:
+                    continue
+                _turn_actions.append(tc_parsed.action_type)
+                if tc_parsed.action_type == "query":
+                    self._handle_query(
+                        messages, forecast_interface, rendered, tc_parsed,
+                        budget, qid=target_qid, reasoning=reasoning,
+                        raw_stream=raw_stream, tool_call=tc,
+                    )
+                    if tc_parsed.error:
+                        turn_log_extra["error"] = tc_parsed.error
+                elif tc_parsed.action_type == "search":
+                    self._handle_search(
+                        messages, forecast_interface, rendered, tc_parsed,
+                        budget, qid=target_qid, reasoning=reasoning,
+                        raw_stream=raw_stream, tool_call=tc,
+                    )
+                    if tc_parsed.error:
+                        turn_log_extra["error"] = tc_parsed.error
+                elif tc_parsed.action_type in ("memory_retrieve", "memory_new", "memory_add", "memory_update", "memory_delete"):
+                    self._handle_memory_action(
+                        messages, forecast_interface, rendered, tc_parsed,
+                        budget, reasoning=reasoning, tool_call=tc,
+                    )
+                elif tc_parsed.action_type in ("mem_add", "mem_update", "mem_delete"):
+                    self._handle_mem_action(
+                        messages, forecast_interface, rendered, tc_parsed,
+                        budget, reasoning=reasoning, tool_call=tc,
+                    )
+                elif tc_parsed.action_type == "submit":
+                    if target_qid is not None and tc_parsed.forecasts:
+                        tc_parsed.forecasts = [f for f in tc_parsed.forecasts if f.get("qid") == target_qid]
+                    n_before = len(tc_parsed.forecasts) if tc_parsed.forecasts else 0
+                    forecasts = self._handle_submit(
+                        messages, forecast_interface, rendered, tc_parsed,
+                        budget, qid=target_qid, reasoning=reasoning,
+                        raw_stream=raw_stream, tool_call=tc,
+                    )
+                    turn_log_extra["submitted_qids"] = [f["qid"] for f in forecasts]
+                    turn_log_extra["num_forecasts"] = len(forecasts)
+                    turn_log_extra["dropped_forecasts"] = n_before - len(forecasts)
+                    if tc_parsed.error:
+                        turn_log_extra["error"] = tc_parsed.error
+                    all_forecasts.extend(forecasts)
+                    if target_qid is not None and forecasts:
+                        break_outer = True
+                        break
+                else:
+                    self._handle_invalid(
+                        messages, forecast_interface, rendered, tc_parsed,
+                        budget, qid=target_qid, reasoning=reasoning,
+                        raw_stream=raw_stream, tool_call=tc,
+                    )
+                    if tc_parsed.error:
+                        turn_log_extra["error"] = tc_parsed.error
+            # Build phase from all action types seen this turn
+            if _turn_actions:
+                _log_phase = "+".join(_turn_actions) if len(_turn_actions) > 1 else _turn_actions[0]
+                turn_log_extra["actions"] = _turn_actions
             else:
-                self._handle_invalid(
-                    messages,
-                    forecast_interface,
-                    rendered,
-                    parsed,
-                    budget,
-                    qid=target_qid,
-                    reasoning=reasoning,
-                    raw_stream=raw_stream,
-                    tool_call=tool_call,
-                )
+                _log_phase = "llm"
+            self._log_chat_tools_action(
+                messages=messages, rendered_response=rendered,
+                phase=_log_phase, budget=budget, qid=target_qid,
+                reasoning=reasoning, reasoning_tokens=reasoning_tokens_turn,
+                finish_reason=finish_reason, usage=usage, raw_stream=raw_stream,
+                prompt_override=model_input_delta, **turn_log_extra,
+            )
             pending_input_delta.extend(messages[before_len:])
+            if break_outer:
+                break
 
         if memory_phase and self._memory is not None:
             self._memory._save(current_date)
@@ -1050,6 +1070,9 @@ class BasicAgent(BaseAgent):
         mem_budget.bootstrap_context({"messages": [{"role": "user", "content": tool_prompt}], "tools": tools})
         sampling_params = dict(self.config.sampling_params or {})
         sampling_params.setdefault("tool_choice", "auto")
+        if self.config.parallel_tool_calls:
+            sampling_params["parallel_tool_calls"] = True
+        consecutive_content_filters = 0
 
         while not mem_budget.is_exhausted():
             try:
@@ -1069,6 +1092,16 @@ class BasicAgent(BaseAgent):
             mem_budget.record_usage(usage)
             reasoning = usage.get("_reasoning_content") if usage else None
 
+            finish_reason = extract_finish_reason(resp_json)
+            if finish_reason == "content_filter":
+                consecutive_content_filters += 1
+                if consecutive_content_filters >= self.config.content_filter_circuit_breaker:
+                    print(f"  [{self.agent_id}] Circuit breaker: {consecutive_content_filters} "
+                          f"consecutive content_filter responses, ending memory phase")
+                    break
+            else:
+                consecutive_content_filters = 0
+
             parsed, assistant_text, tool_calls = chat_response_to_action(resp_json)
             assistant_message = extract_assistant_message(resp_json)
             appended = self._append_assistant_message(messages=messages, assistant_message=assistant_message)
@@ -1082,49 +1115,42 @@ class BasicAgent(BaseAgent):
                 {"phase": "memory_update", "current_memory_entries": self._memory.entry_count, "reasoning": reasoning},
             )
 
-            tool_call = tool_calls[0] if tool_calls else None
             if parsed is None:
                 mem_budget.consume_action()
                 self._append_feedback_message(
                     messages,
                     mem_budget,
-                    "No tool call detected. Call exactly one memory tool each turn.",
+                    "No tool call detected. Call at least one memory tool, or next_day() to finish.",
                 )
                 continue
 
-            if parsed.action_type == "next":
+            # Process all tool calls in the batch (parallel tool calls)
+            saw_next_day = False
+            for tc in tool_calls:
+                tc_parsed, _ = single_call_to_parsed_action(tc)
+                if tc_parsed is None:
+                    continue
+                if tc_parsed.action_type == "next":
+                    saw_next_day = True
+                    break
+                if tc_parsed.action_type in ("memory_retrieve", "memory_new", "memory_add",
+                                              "memory_update", "memory_delete"):
+                    self._handle_memory_action(
+                        messages, forecast_interface, rendered, tc_parsed,
+                        mem_budget, reasoning=reasoning, tool_call=tc,
+                    )
+                elif tc_parsed.action_type in ("mem_add", "mem_update", "mem_delete"):
+                    self._handle_mem_action(
+                        messages, forecast_interface, rendered, tc_parsed,
+                        mem_budget, reasoning=reasoning, tool_call=tc,
+                    )
+                else:
+                    self._handle_invalid(
+                        messages, forecast_interface, rendered, tc_parsed,
+                        mem_budget, reasoning=reasoning, tool_call=tc,
+                    )
+            if saw_next_day:
                 break
-
-            if parsed.action_type in ("memory_retrieve", "memory_new", "memory_add", "memory_update", "memory_delete"):
-                self._handle_memory_action(
-                    messages,
-                    forecast_interface,
-                    rendered,
-                    parsed,
-                    mem_budget,
-                    reasoning=reasoning,
-                    tool_call=tool_call,
-                )
-            elif parsed.action_type in ("mem_add", "mem_update", "mem_delete"):
-                self._handle_mem_action(
-                    messages,
-                    forecast_interface,
-                    rendered,
-                    parsed,
-                    mem_budget,
-                    reasoning=reasoning,
-                    tool_call=tool_call,
-                )
-            else:
-                self._handle_invalid(
-                    messages,
-                    forecast_interface,
-                    rendered,
-                    parsed,
-                    mem_budget,
-                    reasoning=reasoning,
-                    tool_call=tool_call,
-                )
 
         self._memory._save(current_date)
 
@@ -1161,14 +1187,12 @@ class BasicAgent(BaseAgent):
                 extra_ctx = {"mem_df": self._memory.get_mem_df()}
             with self._timer.track("df_query"):
                 result, error = self._query_handler.execute(parsed.code, extra_context=extra_ctx)
-            self._log_action(forecast_interface, messages, response, "query", budget, qid=qid, reasoning=reasoning, raw_stream=raw_stream)
-            
+
             if error:
                 feedback = f"QUERY ERROR: {error}"
             else:
                 feedback = f"QUERY RESULT:\n{result}"
         else:
-            self._log_action(forecast_interface, messages, response, "query_error", budget, qid=qid, error=parsed.error, reasoning=reasoning, raw_stream=raw_stream)
             feedback = f"ERROR: {parsed.error}"
 
         self._append_feedback_message(messages, budget, feedback, tool_call=tool_call, tool_name="query_df")
@@ -1189,7 +1213,6 @@ class BasicAgent(BaseAgent):
         budget.consume_action()
         
         if not self._search_handler.is_available:
-            self._log_action(forecast_interface, messages, response, "search_unavailable", budget, qid=qid, reasoning=reasoning, raw_stream=raw_stream)
             feedback = "SEARCH ERROR: Search is not available."
         elif parsed.query:
             min_date, max_date = optional_search_dates_from_parsed(parsed)
@@ -1202,10 +1225,8 @@ class BasicAgent(BaseAgent):
                     min_date=min_date,
                     max_date=max_date,
                 )
-            self._log_action(forecast_interface, messages, response, effect.phase, budget, qid=qid, reasoning=reasoning, raw_stream=raw_stream)
             feedback = effect.feedback
         else:
-            self._log_action(forecast_interface, messages, response, "search_error", budget, qid=qid, error=parsed.error, reasoning=reasoning, raw_stream=raw_stream)
             feedback = "SEARCH ERROR: No query provided."
 
         self._append_feedback_message(messages, budget, feedback, tool_call=tool_call, tool_name="search_news")
@@ -1232,17 +1253,14 @@ class BasicAgent(BaseAgent):
 
         if not isinstance(self._memory, (StructuredMemory, ActiveMemory)):
             feedback = "MEMORY ERROR: Structured memory is not enabled."
-            self._log_action(forecast_interface, messages, response, "memory_unavailable", budget, reasoning=reasoning)
         elif parsed.error:
             feedback = f"MEMORY ERROR: {parsed.error}"
-            self._log_action(forecast_interface, messages, response, f"{parsed.action_type}_error", budget, error=parsed.error, reasoning=reasoning)
         elif parsed.action_type == "memory_retrieve":
             entry = self._memory.retrieve(parsed.memory_entry_name)
             if entry is None:
                 feedback = f"MEMORY ERROR: No entry with name '{parsed.memory_entry_name}'."
             else:
                 feedback = f"MEMORY ENTRY:\n{entry}"
-            self._log_action(forecast_interface, messages, response, "memory_retrieve", budget, reasoning=reasoning)
         elif parsed.action_type in ("memory_new", "memory_add"):
             data = parsed.memory_new_data
             try:
@@ -1250,24 +1268,20 @@ class BasicAgent(BaseAgent):
                 feedback = f"MEMORY: Added entry [{entry_name}]. Total entries: {self._memory.entry_count}/{self._memory._max_entries if hasattr(self._memory, '_max_entries') else '?'}."
             except ValueError as exc:
                 feedback = f"MEMORY ERROR: {exc}"
-            self._log_action(forecast_interface, messages, response, "memory_new", budget, reasoning=reasoning)
         elif parsed.action_type == "memory_update":
             ok = self._memory.update_entry(parsed.memory_entry_name, **parsed.memory_update_data)
             if ok:
                 feedback = f"MEMORY: Updated [{parsed.memory_entry_name}]."
             else:
                 feedback = f"MEMORY ERROR: No entry with name '{parsed.memory_entry_name}'."
-            self._log_action(forecast_interface, messages, response, "memory_update", budget, reasoning=reasoning)
         elif parsed.action_type == "memory_delete":
             ok = self._memory.delete_entry(parsed.memory_entry_name)
             if ok:
                 feedback = f"MEMORY: Deleted [{parsed.memory_entry_name}]. Remaining: {self._memory.entry_count}."
             else:
                 feedback = f"MEMORY ERROR: No entry with name '{parsed.memory_entry_name}'."
-            self._log_action(forecast_interface, messages, response, "memory_delete", budget, reasoning=reasoning)
         else:
             feedback = f"MEMORY ERROR: Unknown memory action '{parsed.action_type}'."
-            self._log_action(forecast_interface, messages, response, "memory_unknown", budget, reasoning=reasoning)
 
         self._append_feedback_message(messages, budget, feedback, tool_call=tool_call, tool_name=tool_name)
 
@@ -1291,10 +1305,8 @@ class BasicAgent(BaseAgent):
 
         if not isinstance(self._memory, ActiveMemory):
             feedback = "MEM ERROR: Active memory is not enabled."
-            self._log_action(forecast_interface, messages, response, "mem_unavailable", budget, reasoning=reasoning)
         elif parsed.error:
             feedback = f"MEM ERROR: {parsed.error}"
-            self._log_action(forecast_interface, messages, response, f"{parsed.action_type}_error", budget, error=parsed.error, reasoning=reasoning)
         elif parsed.action_type == "mem_add":
             data = parsed.mem_data
             self._memory.mem_add(
@@ -1302,24 +1314,20 @@ class BasicAgent(BaseAgent):
                 memory=data["memory"], category=data.get("category", ""),
             )
             feedback = f"MEM: Added entry for Q{data['qid']}. Total: {self._memory.mem_count} entries."
-            self._log_action(forecast_interface, messages, response, "mem_add", budget, reasoning=reasoning)
         elif parsed.action_type == "mem_update":
             self._memory.mem_update(
                 qid=parsed.mem_qid, memory=parsed.mem_data["memory"],
                 category=parsed.mem_data.get("category"),
             )
             feedback = f"MEM: Updated entry for Q{parsed.mem_qid}."
-            self._log_action(forecast_interface, messages, response, "mem_update", budget, reasoning=reasoning)
         elif parsed.action_type == "mem_delete":
             ok = self._memory.mem_delete(parsed.mem_qid)
             if ok:
                 feedback = f"MEM: Deleted Q{parsed.mem_qid}. Remaining: {self._memory.mem_count}."
             else:
                 feedback = f"MEM ERROR: No entry for Q{parsed.mem_qid}."
-            self._log_action(forecast_interface, messages, response, "mem_delete", budget, reasoning=reasoning)
         else:
             feedback = f"MEM ERROR: Unknown mem action '{parsed.action_type}'."
-            self._log_action(forecast_interface, messages, response, "mem_unknown", budget, reasoning=reasoning)
 
         self._append_feedback_message(messages, budget, feedback, tool_call=tool_call, tool_name=tool_name)
 
@@ -1369,8 +1377,6 @@ class BasicAgent(BaseAgent):
             submitted_qids = [f['qid'] for f in submitted]
             if hasattr(self, '_day_qids'):
                 self._day_qids.update(str(q) for q in submitted_qids)
-            self._log_action(forecast_interface, messages, response, "submit", budget, qid=log_qid, submitted_qids=submitted_qids,
-                           num_forecasts=len(submitted), dropped_forecasts=dropped_forecasts, reasoning=reasoning, raw_stream=raw_stream)
             if submitted:
                 sub = submitted[0]
                 outcomes_str = ", ".join(f"{k}: {v:.2f}" for k, v in sub['outcomes'].items())
@@ -1383,7 +1389,6 @@ class BasicAgent(BaseAgent):
                 feedback = "SUBMIT ERROR: No valid forecast submitted."
         else:
             # Parse error - still consumed action
-            self._log_action(forecast_interface, messages, response, "submit_error", budget, qid=log_qid, error=parsed.error, reasoning=reasoning, raw_stream=raw_stream)
             feedback = f"SUBMIT ERROR: {parsed.error}"
 
         self._append_feedback_message(messages, budget, feedback, tool_call=tool_call, tool_name="submit_forecasts")
@@ -1403,7 +1408,6 @@ class BasicAgent(BaseAgent):
     ) -> None:
         """Handle invalid/unknown action."""
         budget.consume_action()
-        self._log_action(forecast_interface, messages, response, "invalid", budget, qid=qid, error=parsed.error, reasoning=reasoning, raw_stream=raw_stream)
 
         error_msg = parsed.error or "Call exactly one function tool."
         feedback = f"No valid action found. {error_msg}"
@@ -1414,17 +1418,6 @@ class BasicAgent(BaseAgent):
     # Helpers
     # =========================================================================
     
-    def _log_action(self, forecast_interface, messages, response, phase, 
-                   budget: BudgetTracker, qid: str = None, **extra) -> None:
-        """Log model output with metadata. qid indicates the question context if known."""
-        last_user = messages[-2]["content"] if len(messages) >= 2 else ""
-        metadata = {
-            "phase": phase, 
-            "qid": qid,
-            **budget.metadata(),
-            **extra
-        }
-        self._log_model_output(last_user, response, metadata)
 
     def _record_matcher_timing(self, duration: float, cost: float = 0) -> None:
         """Record answer matcher latency and cost in timing stats."""
@@ -1601,8 +1594,9 @@ Example tool arguments (if options are ["Candidate A", "Candidate B", "Candidate
                 meta_index = self._memory.get_index()
                 meta_block = f"Current meta-insight index:\n{meta_index}\n\n" if meta_index else ""
                 memory_section = f"""## YOUR MEMORY
-{meta_block}Question-specific notes live in `mem_df` ({self._memory.mem_count} rows) with columns:
-qid (str), question (str), last_updated (str), memory (str), category (str)
+{meta_block}`mem_df` holds your per-question notes (reasoning, evidence, calibration) — {self._memory.mem_count} rows.
+Columns: qid (str), question (str), last_updated (str), memory (str), category (str)
+Both `mem_df` and `df` are available in the same `query_df` sandbox; join them on qid to find questions worth revisiting.
 
 Use `query_df` to inspect `mem_df`, `mem_add` / `mem_update` / `mem_delete` to edit per-question notes,
 and `memory_retrieve` / `memory_new` / `memory_update` / `memory_delete` for meta-insights.
@@ -1683,7 +1677,7 @@ Your Python code runs in a sandbox with these variables pre-defined:
 {('- `mem_df`: your question-specific memory DataFrame (join with df on qid to decide what to revisit)' + chr(10)) if isinstance(self._memory, ActiveMemory) else ''}Import statements are not available. Standard builtins (len, str, int, float, min, max, sum, sorted, range, etc.) are available.
 
 ## RESPONSE FORMAT
-Use the function tools from the tool schema. Call exactly one tool per turn. Do not emit XML action blocks.
+Use the function tools from the tool schema. {'You may call multiple tools per turn.' if self.config.parallel_tool_calls else 'Call exactly one tool per turn.'} Do not emit XML action blocks.
 
 ## TOOLS YOU SHOULD USE
 - `query_df(code)`: inspect questions and your existing predictions. Use `print(...)` for outputs.
@@ -1704,6 +1698,8 @@ When ready to move on, call `next_day()`.
 - Outcome names must be REAL predicted answers (e.g. person names, locations, numbers)
 - NEVER use placeholders like "Unknown", "TBD", "Other", or "N/A"
 - Probabilities must sum to <= 1.0
+
+{('Tip: After submitting a forecast, consider saving your reasoning and key evidence for that QID using mem_add/mem_update. At end of day, you will get another opportunity to update your memory.' + chr(10)) if isinstance(self._memory, (StructuredMemory, ActiveMemory)) else ''}
 
 ---
 {budget_start_block}Begin."""
@@ -1809,9 +1805,10 @@ Delete stale entries (resolved questions with no useful lesson, outdated facts).
 - Do NOT just store general forecasting advice or easily searchable facts. You must include a reusable insight or reasoning chain.
 
 ## RESPONSE FORMAT
-Use the function tools from the tool schema. Call exactly one tool per turn.
+Use the function tools from the tool schema. {'You may call multiple tools per turn for efficiency.' if self.config.parallel_tool_calls else 'Call one tool per turn.'}
 Use `memory_retrieve`, `memory_new`, `memory_update`, and `memory_delete` for memory work.
-Call `next_day()` when you are finished.
+{chr(10) + 'To avoid read/write conflicts, batch your calls by type:' + chr(10) + '- First turn(s): batch all `memory_retrieve` calls to review entries you need' + chr(10) + '- Next turn(s): batch all write operations (`memory_new`, `memory_update`, `memory_delete`) based on what you read' + chr(10) if self.config.parallel_tool_calls else ''}
+You do NOT need to exhaust your remaining token budget — call `next_day()` as soon as your essential updates are complete.
 
 Start with Step 1. If questions resolved this session, create lesson entries first."""
 
@@ -1904,9 +1901,10 @@ Descriptions should answer: "Why would future-me read this?" — not just "What 
 - Do NOT just store general forecasting advice or easily searchable facts
 
 ## RESPONSE FORMAT
-Use the function tools from the tool schema. Call exactly one tool per turn.
+Use the function tools from the tool schema. {'You may call multiple tools per turn for efficiency.' if self.config.parallel_tool_calls else 'Call one tool per turn.'}
 Use `mem_add`, `mem_update`, and `mem_delete` for question-specific notes.
 Use `memory_retrieve`, `memory_new`, `memory_update`, and `memory_delete` for meta-insights.
-Call `next_day()` when you are finished.
+{chr(10) + 'To avoid read/write conflicts, batch your calls by type:' + chr(10) + '- First turn(s): batch all `memory_retrieve` calls to review entries you need' + chr(10) + '- Next turn(s): batch all write operations based on what you read' + chr(10) if self.config.parallel_tool_calls else ''}
+You do NOT need to exhaust your remaining token budget — call `next_day()` as soon as your essential updates are complete.
 
 Start with Step 1. If questions resolved this session, create lesson entries first."""

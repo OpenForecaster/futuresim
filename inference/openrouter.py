@@ -367,8 +367,9 @@ class OpenRouterInference:
                                 message["content"] = reasoning
                         return data
 
-                    # Log empty content without reasoning (unexpected)
-                    if not content or not content.strip():
+                    # Log empty content without reasoning (unexpected).
+                    # Suppress for finish_reason=tool_calls — normal for tool-only responses.
+                    if (not content or not content.strip()) and finish_reason != "tool_calls":
                         comp_tokens = usage.get("completion_tokens", "?")
                         print(
                             f"  [OpenRouter] Warning: empty content "
