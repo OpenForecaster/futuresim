@@ -1469,7 +1469,7 @@ class BasicAgent(BaseAgent):
         peer_text = ""
         if show_peer:
             peer_text = """
-- **Peer Score (relative ranking)**: `100 × (avg others' Brier - your Brier)` (baseline 0 if you are the only predictor). Positive means better than peers."""
+- **Time-Weighted Peer Score (TW-Peer)**: `100 × (avg others' Brier - your Brier)`, summed over each day a prediction is held. A positive TW-Peer indicates predictions that were consistently more accurate than the group average."""
 
         mechanics: Dict[str, str] = {
             "accuracy_calibration": "**Accuracy + Calibration**: Assign probabilities that reflect true likelihood.",
@@ -1509,7 +1509,7 @@ Key Mechanics:
         peer_text = ""
         if show_peer:
             peer_text = """
-- **Peer Score**: For each snapshot, your Brier Skill Score is compared to the crowd by subtracting the average of other agents' Brier Skill Scores (baseline 0 if you are the only predictor)."""
+- **Time-Weighted Peer Score (TW-Peer)**: On each day a prediction is held, your Brier Skill Score is compared to the mean of all other agents' scores for the same question. These daily differences are summed over the lifetime of the prediction. A positive TW-Peer indicates predictions that were consistently more accurate than the group average."""
 
         mechanics: Dict[str, str] = {
             "accuracy_calibration": "**Accuracy + Calibration**: Assign high probability to the TRUE outcome and keep probabilities well-calibrated.",
@@ -1546,13 +1546,26 @@ Key Mechanics:
     def _get_data_notes(self) -> str:
         """Get notes about DataFrame columns - conditional on agent mode."""
         if self.config.single_agent_mode:
-            # Single-agent: market_aggregate just reflects own predictions, don't mention it
             return "Note: `my_prediction` column contains your current forecast as a dict (or None if not yet predicted)."
         else:
-            # Multi-agent: market_aggregate is meaningful
             return """Note: `market_aggregate` and `my_prediction` columns contain Python dicts (or None). You can access them directly, e.g. `row['market_aggregate']['outcome_name']`.
-The `num_predictions` column shows how many predictions have been made on that question."""
+- `market_aggregate`: the mean probability distribution across all agents' latest predictions from the **previous day**. `None` on the first day (no predictions exist yet).
+- `my_prediction`: your own latest forecast (or None if you haven't predicted this question yet).
+- `num_predictions`: total number of prediction submissions made on this question across all agents and all days."""
     
+    def _get_multiagent_context(self) -> str:
+        """Multi-agent preamble describing the competitive setting."""
+        if self.config.single_agent_mode:
+            return ""
+        n = getattr(self._forecast_interface, "num_agents", 0)
+        if n < 2:
+            return ""
+        return f"""## MULTI-AGENT SETTING
+You are competing against {n - 1} other forecasting agent{"s" if n > 2 else ""} on the same set of questions.
+You each predict independently on every wakeup day. After each day, your predictions are averaged with the others' into a market aggregate (the `market_aggregate` column), which you can see starting the following day.
+You are scored relative to your competitors: to earn a positive time-weighted peer score, your predictions need to be more accurate than the group average.
+"""
+
     def _get_source_rules(self) -> str:
         """Get source-specific submission rules."""
         source_name = getattr(self._forecast_interface, 'source_name', 'openforesight')
@@ -1658,6 +1671,7 @@ Use the reasoning and insights above to inform today's forecasts.
 
 {self._get_source_rules()}
 
+{self._get_multiagent_context()}
 {cadence_section}{memory_section}{self._get_scoring_section()}
 {search_advice}
 ## AVAILABLE DATA

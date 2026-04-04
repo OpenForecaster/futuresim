@@ -181,10 +181,20 @@ class FeedbackHandler:
                         f"avg brier: {metrics['avg_brier']:.3f} | "
                         f"time weighted peer: {metrics['tw_peer_score']:.2f}"
                     )
+                    m_lines.append(
+                        "  accuracy = fraction of resolved questions where your top outcome matched the truth; "
+                        "avg brier = mean score across resolved questions; "
+                        "time weighted peer = cumulative peer comparison across all resolved questions, "
+                        "where positive indicates better-than-average performance"
+                    )
                 else:
                     m_lines.append(
                         f"- accuracy: {metrics['accuracy']:.1f}% | "
                         f"avg brier: {metrics['avg_brier']:.3f}"
+                    )
+                    m_lines.append(
+                        "  accuracy = fraction of resolved questions where your top outcome matched the truth; "
+                        "avg brier = mean score across resolved questions"
                     )
             else:
                 m_lines.append("- (Waiting for resolutions to compute scores)")

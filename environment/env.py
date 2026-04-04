@@ -431,10 +431,11 @@ class SimulationEnvironment:
             last_active_date=self._get_last_active_date(),
             next_active_date=self._get_next_active_date(),
             simulation_end_date=self.end_date,
+            num_agents=len(self.agents),
         )
         forecast_interface.source_name = getattr(self, 'source_name', 'openforesight')
         forecast_interface.source_context = getattr(self, 'source_context', '')
-        
+
         for agent in self.agents:
             forecast_interface.set_agent_context(agent.agent_id)
             agent.act(None, forecast_interface, self.current_date)
@@ -464,10 +465,11 @@ class SimulationEnvironment:
                 last_active_date=self._get_last_active_date(),
                 next_active_date=self._get_next_active_date(),
                 simulation_end_date=self.end_date,
+                num_agents=len(self.agents),
             )
             forecast_interface.source_name = getattr(self, 'source_name', 'openforesight')
             forecast_interface.source_context = getattr(self, 'source_context', '')
-            
+
             forecast_interface.set_agent_context(agent.agent_id)
             
             try:
@@ -630,7 +632,8 @@ class SimForecastInterface:
                  timegap_days: int = 1,
                  last_active_date: Optional[date] = None,
                  next_active_date: Optional[date] = None,
-                 simulation_end_date: Optional[date] = None):
+                 simulation_end_date: Optional[date] = None,
+                 num_agents: int = 1):
         self.questions = {q.qid: q for q in questions}
         self.aggregates = aggregates
         self.histories = histories
@@ -639,6 +642,7 @@ class SimForecastInterface:
         self.last_active_date = last_active_date
         self.next_active_date = next_active_date
         self.simulation_end_date = simulation_end_date
+        self.num_agents = num_agents
         self.logger = logger
         self.current_agent_id: Optional[str] = None
         self.resolved_questions = resolved_questions or []

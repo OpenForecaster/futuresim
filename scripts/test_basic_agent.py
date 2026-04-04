@@ -365,10 +365,10 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
     
     defaults = config.get('defaults', {})
     agents_list = config.get('agents', [])
-    
+
     if not agents_list:
         raise ValueError("No agents defined in config file")
-    
+
     print(f"  Found {len(agents_list)} agents in config", flush=True)
     
     # If any agent uses OpenRouter, size the shared HTTP connection pool to match
@@ -1492,6 +1492,7 @@ def main():
                 last_active_date=env._get_last_active_date(),
                 next_active_date=env._get_next_active_date(),
                 simulation_end_date=env.end_date,
+                num_agents=len(agents),
             )
             warmup_interface.source_name = getattr(env, 'source_name', 'openforesight')
             warmup_interface.source_context = getattr(env, 'source_context', '')
