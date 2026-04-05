@@ -115,7 +115,7 @@ training:
   use_sample_packing: false
 
   n_samples_per_prompt: 4
-  max_turns: 0
+  max_turns: 10
   use_conversation_multi_turn: true
   append_eos_token_after_stop_str_in_multi_turn: true
 

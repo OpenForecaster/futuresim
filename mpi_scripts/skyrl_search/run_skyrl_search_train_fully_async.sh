@@ -65,6 +65,9 @@ setup_core_dump_dir() {
 
 setup_core_dump_dir
 
+# Capture actual raylet/runtime-agent crashes instead of only the later heartbeat symptom.
+ulimit -c unlimited 2>/dev/null || true
+
 if [ -z "${WANDB_API_KEY:-}" ]; then
     USER_HOME="$(getent passwd "$(id -un)" | cut -d: -f6 || true)"
     WANDB_NETRC_PATH=""
@@ -153,19 +156,12 @@ export RAY_USE_MULTIPROCESSING_CPU_COUNT="${RAY_USE_MULTIPROCESSING_CPU_COUNT:-1
 export RAY_DISABLE_DOCKER_CPU_WARNING="${RAY_DISABLE_DOCKER_CPU_WARNING:-1}"
 export RAY_USAGE_STATS_ENABLED="${RAY_USAGE_STATS_ENABLED:-0}"
 export RAY_USAGE_STATS_PROMPT_ENABLED="${RAY_USAGE_STATS_PROMPT_ENABLED:-0}"
-# Some 8-GPU HTCondor nodes intermittently lose the local raylet during bootstrap before any
-# SkyRL actors or placement groups exist. Give Ray a gentler startup/reconnect window by default;
-# callers can still override these env vars explicitly when debugging.
-export RAY_health_check_initial_delay_ms="${RAY_health_check_initial_delay_ms:-240000}"
-export RAY_health_check_period_ms="${RAY_health_check_period_ms:-10000}"
-export RAY_health_check_timeout_ms="${RAY_health_check_timeout_ms:-120000}"
-export RAY_health_check_failure_threshold="${RAY_health_check_failure_threshold:-30}"
+# Keep the same lightweight health-check defaults as the simpler launcher. The fully-async Ray
+# bootstrap issue turned out to be missing optional Ray deps rather than an inherently slow
+# heartbeat path, so we do not need the much more liberal debugging values here by default.
+export RAY_health_check_initial_delay_ms="${RAY_health_check_initial_delay_ms:-60000}"
+export RAY_health_check_failure_threshold="${RAY_health_check_failure_threshold:-10}"
 export RAY_worker_register_timeout_seconds="${RAY_worker_register_timeout_seconds:-300}"
-export RAY_gcs_rpc_server_reconnect_timeout_s="${RAY_gcs_rpc_server_reconnect_timeout_s:-600}"
-export RAY_raylet_rpc_server_reconnect_timeout_base_s="${RAY_raylet_rpc_server_reconnect_timeout_base_s:-60}"
-export RAY_raylet_rpc_server_reconnect_timeout_max_s="${RAY_raylet_rpc_server_reconnect_timeout_max_s:-300}"
-export RAY_core_worker_rpc_server_reconnect_timeout_base_s="${RAY_core_worker_rpc_server_reconnect_timeout_base_s:-60}"
-export RAY_core_worker_rpc_server_reconnect_timeout_max_s="${RAY_core_worker_rpc_server_reconnect_timeout_max_s:-300}"
 export RAY_py_gcs_connect_timeout_s="${RAY_py_gcs_connect_timeout_s:-300}"
 export RAY_nums_py_gcs_reconnect_retry="${RAY_nums_py_gcs_reconnect_retry:-60}"
 
@@ -198,10 +194,6 @@ fi
 maybe_reserve_aux_gpu_for_async_embeddings() {
     local aux_cfg_value
     aux_cfg_value="$(sed -n 's/^  aux_cuda_visible_devices: //p' "${CONFIG_PATH}" | head -n1 | tr -d '[:space:]\"'\''')"
-    if [ -z "${aux_cfg_value}" ] || [ "${aux_cfg_value}" = "null" ]; then
-        return
-    fi
-
     local ray_gpu_budget="${FSIM_RAY_NUM_GPUS:-}"
     if ! [[ "${ray_gpu_budget}" =~ ^[0-9]+$ ]]; then
         return
@@ -210,9 +202,30 @@ maybe_reserve_aux_gpu_for_async_embeddings() {
     local -a all_gpu_rows=()
     mapfile -t all_gpu_rows < <(nvidia-smi --query-gpu=index,uuid --format=csv,noheader,nounits 2>/dev/null | sed '/^$/d')
     local total_visible_gpus="${#all_gpu_rows[@]}"
-    if [ "${total_visible_gpus}" -le "${ray_gpu_budget}" ] || [ "${ray_gpu_budget}" -le 0 ]; then
+    if [ "${ray_gpu_budget}" -le 0 ] || [ "${total_visible_gpus}" -le 0 ]; then
         return
     fi
+
+    local policy_gpus_per_node
+    local inference_num_engines
+    local inference_tensor_parallel_size
+    local run_engines_locally
+    local colocate_all
+    policy_gpus_per_node="$(sed -n 's/^    policy_num_gpus_per_node: //p' "${CONFIG_PATH}" | head -n1 | tr -d '[:space:]\"'\''')"
+    inference_num_engines="$(sed -n 's/^  inference_num_engines: //p' "${CONFIG_PATH}" | head -n1 | tr -d '[:space:]\"'\''')"
+    inference_tensor_parallel_size="$(sed -n 's/^  inference_tensor_parallel_size: //p' "${CONFIG_PATH}" | head -n1 | tr -d '[:space:]\"'\''')"
+    run_engines_locally="$(sed -n 's/^  run_engines_locally: //p' "${CONFIG_PATH}" | head -n1 | tr -d '[:space:]\"'\''')"
+    colocate_all="$(sed -n 's/^    colocate_all: //p' "${CONFIG_PATH}" | head -n1 | tr -d '[:space:]\"'\''')"
+    if ! [[ "${policy_gpus_per_node:-}" =~ ^[0-9]+$ ]]; then
+        policy_gpus_per_node=0
+    fi
+    if ! [[ "${inference_num_engines:-}" =~ ^[0-9]+$ ]]; then
+        inference_num_engines=0
+    fi
+    if ! [[ "${inference_tensor_parallel_size:-}" =~ ^[0-9]+$ ]]; then
+        inference_tensor_parallel_size=1
+    fi
+    local inference_gpu_budget=$((inference_num_engines * inference_tensor_parallel_size))
 
     local -a ray_gpu_uuids=()
     local -a aux_gpu_uuids=()
@@ -232,16 +245,39 @@ maybe_reserve_aux_gpu_for_async_embeddings() {
         i=$((i + 1))
     done
 
-    local ray_cuda_visible_devices
     local reserved_aux_cuda_visible_devices
-    ray_cuda_visible_devices="$(IFS=,; echo "${ray_gpu_uuids[*]}")"
-    reserved_aux_cuda_visible_devices="$(IFS=,; echo "${aux_gpu_uuids[*]}")"
+    reserved_aux_cuda_visible_devices=""
 
-    export CUDA_VISIBLE_DEVICES="${ray_cuda_visible_devices}"
-    export FSIM_RESERVED_AUX_CUDA_VISIBLE_DEVICES="${reserved_aux_cuda_visible_devices}"
-    export FSIM_RAY_NUM_GPUS="${#ray_gpu_uuids[@]}"
-    echo "Reserved aux embedding GPU(s): ${FSIM_RESERVED_AUX_CUDA_VISIBLE_DEVICES}"
-    echo "Ray-visible CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES}"
+    if [ -n "${aux_cfg_value}" ] && [ "${aux_cfg_value}" != "null" ]; then
+        if [ "${total_visible_gpus}" -le "${ray_gpu_budget}" ]; then
+            return
+        fi
+        local ray_cuda_visible_devices
+        ray_cuda_visible_devices="$(IFS=,; echo "${ray_gpu_uuids[*]}")"
+        reserved_aux_cuda_visible_devices="$(IFS=,; echo "${aux_gpu_uuids[*]}")"
+        export CUDA_VISIBLE_DEVICES="${ray_cuda_visible_devices}"
+        export FSIM_RESERVED_AUX_CUDA_VISIBLE_DEVICES="${reserved_aux_cuda_visible_devices}"
+        export FSIM_RAY_NUM_GPUS="${#ray_gpu_uuids[@]}"
+        echo "Reserved extra aux embedding GPU(s): ${FSIM_RESERVED_AUX_CUDA_VISIBLE_DEVICES}"
+        echo "Ray-visible CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES}"
+        return
+    fi
+
+    if [ "${total_visible_gpus}" -eq "${ray_gpu_budget}" ] \
+        && [ "${colocate_all:-false}" = "false" ] \
+        && [ "${run_engines_locally:-true}" = "true" ] \
+        && [ "${policy_gpus_per_node}" -gt 0 ] \
+        && [ "${inference_gpu_budget}" -gt 0 ] \
+        && [ $((policy_gpus_per_node + inference_gpu_budget)) -eq "${ray_gpu_budget}" ] \
+        && [ "${#ray_gpu_uuids[@]}" -ge "${inference_gpu_budget}" ]; then
+        # In the fully-async 4+4 local layout, inference engines are created before the trainer
+        # and packed into their own placement group. Reserve one GPU from that inference prefix for
+        # the search embedder instead of leaving it unpinned across all 8 visible devices.
+        reserved_aux_cuda_visible_devices="${ray_gpu_uuids[$((inference_gpu_budget - 1))]}"
+        export FSIM_RESERVED_AUX_CUDA_VISIBLE_DEVICES="${reserved_aux_cuda_visible_devices}"
+        echo "Pinned embedder to inference GPU UUID(s): ${FSIM_RESERVED_AUX_CUDA_VISIBLE_DEVICES}"
+        return
+    fi
 }
 
 maybe_reserve_aux_gpu_for_async_embeddings
@@ -283,6 +319,43 @@ run_python_with_ray_bootstrap_retries() {
     ray stop --force >/dev/null 2>&1 || true
     rm -rf "${RAY_TMPDIR:?}/"*
     mkdir -p "${RAY_TMPDIR}"
+
+    dump_ray_bootstrap_failure_context() {
+        local attempt_out_path="$1"
+        local ray_session_dir ray_logs_dir rel
+        ray_session_dir="$(find "${RAY_TMPDIR:-}" -maxdepth 2 -type d -name 'session_*' 2>/dev/null | sort | tail -n1)"
+        if [ -z "${ray_session_dir}" ] || [ ! -d "${ray_session_dir}/logs" ]; then
+            return
+        fi
+        ray_logs_dir="${ray_session_dir}/logs"
+        {
+            echo "--- Ray bootstrap diagnostics from ${ray_session_dir} ---"
+            for rel in \
+                raylet.err \
+                raylet.out \
+                gcs_server.err \
+                gcs_server.out \
+                dashboard.log \
+                dashboard.err \
+                dashboard_agent.log \
+                dashboard_agent.err \
+                runtime_env_agent.log \
+                runtime_env_agent.err \
+                debug_state.txt
+            do
+                if [ -f "${ray_logs_dir}/${rel}" ]; then
+                    echo "--- tail ${rel} ---"
+                    tail -n 80 "${ray_logs_dir}/${rel}" || true
+                fi
+            done
+            local new_cores
+            new_cores="$(find "${FSIM_CORE_DUMP_DIR:-.}" -maxdepth 1 -type f -name 'core*' -newer "${attempt_out_path}" 2>/dev/null | sort || true)"
+            if [ -n "${new_cores}" ]; then
+                echo "--- new core files ---"
+                printf '%s\n' "${new_cores}"
+            fi
+        } | tee -a "${attempt_out_path}" >&2
+    }
 
     for attempt in $(seq 1 "${max_attempts}"); do
         attempt_dir="${_CONDOR_SCRATCH_DIR:-${TMPDIR}}/skyrl_bootstrap_attempt_${attempt}"
@@ -354,6 +427,10 @@ run_python_with_ray_bootstrap_retries() {
                 mkdir -p "${attempt_artifacts_dir}/ray"
                 cp -a "${RAY_TMPDIR}/." "${attempt_artifacts_dir}/ray/" 2>/dev/null || true
             fi
+        fi
+
+        if [ "${saw_local_instance}" -eq 1 ]; then
+            dump_ray_bootstrap_failure_context "${attempt_out}"
         fi
 
         if [ "${saw_returned}" -eq 1 ]; then

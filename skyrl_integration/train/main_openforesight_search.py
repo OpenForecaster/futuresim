@@ -32,6 +32,10 @@ from pathing import load_repo_env
 
 from skyrl_integration.envs import OPENFORESIGHT_SEARCH_WARMUP_ENV_ID
 from skyrl_integration.matcher_cache import setup_core_dump_cwd
+from skyrl_integration.train.iteration_logging import (
+    get_run_artifact_logger,
+    parse_eval_step_from_dump_dir,
+)
 
 
 def _coerce_eval_float(value: Any) -> float | None:
@@ -519,6 +523,141 @@ def _patch_tracking_timing_to_stdout() -> None:
     tr_mod.Tracking._fsim_timing_stdout_patch = True
 
 
+def _patch_tracking_for_run_artifacts() -> None:
+    """Write Tinker-style run/iteration artifacts under the SkyRL run root."""
+
+    import skyrl.train.evaluate as eval_mod
+    import skyrl.train.entrypoints.main_base as base_mod
+    import skyrl.train.trainer as trainer_mod
+    import skyrl.train.utils.tracking as tr_mod
+    import skyrl.train.utils.trainer_utils as tu_mod
+
+    if getattr(tr_mod.Tracking, "_fsim_run_artifact_patch", False):
+        return
+
+    _orig_tracking_init = tr_mod.Tracking.__init__
+    _orig_tracking_log = tr_mod.Tracking.log
+    _orig_tracking_finish = tr_mod.Tracking.finish
+    _orig_get_generator = base_mod.BasePPOExp.get_generator
+    _orig_postprocess = trainer_mod.RayPPOTrainer.postprocess_generator_output
+    _orig_dump_eval_results = tu_mod.dump_per_dataset_eval_results
+
+    def _tracking_init(self, project_name, experiment_name, backends="console", config=None):
+        _orig_tracking_init(self, project_name, experiment_name, backends=backends, config=config)
+        artifact_logger = get_run_artifact_logger(config=config)
+        self._fsim_run_artifact_logger = artifact_logger
+        if artifact_logger is not None:
+            try:
+                artifact_logger.write_config(config)
+            except Exception:
+                logger.warning("[forecast-sim] Failed to write config.json for SkyRL run artifacts")
+
+    def _tracking_log(self, data, step, commit=False):
+        result = _orig_tracking_log(self, data, step, commit=commit)
+        artifact_logger = getattr(self, "_fsim_run_artifact_logger", None)
+        if artifact_logger is not None:
+            try:
+                artifact_logger.log_metrics(step, data, commit=commit)
+            except Exception:
+                logger.warning("[forecast-sim] Failed to append metrics.jsonl")
+        return result
+
+    def _tracking_finish(self):
+        artifact_logger = getattr(self, "_fsim_run_artifact_logger", None)
+        if artifact_logger is not None:
+            try:
+                artifact_logger.finish()
+            except Exception:
+                logger.warning("[forecast-sim] Failed to flush metrics.jsonl")
+        return _orig_tracking_finish(self)
+
+    def _get_generator(self, cfg, tokenizer, inference_engine_client):
+        generator = _orig_get_generator(self, cfg, tokenizer, inference_engine_client)
+        if getattr(generator, "_fsim_run_artifact_generate_patch", False):
+            return generator
+
+        _orig_generator_generate = generator.generate
+
+        async def _wrapped_generate(input_batch, *args, **kwargs):
+            generator_output = await _orig_generator_generate(input_batch, *args, **kwargs)
+            try:
+                response_count = len(generator_output.get("response_ids") or [])
+                env_extras = input_batch.get("env_extras") or []
+                env_classes = input_batch.get("env_classes") or []
+                input_trajectory_ids = input_batch.get("trajectory_ids") or []
+                if len(env_extras) == response_count:
+                    generator_output["fsim_env_extras"] = env_extras
+                if len(env_classes) == response_count:
+                    generator_output["fsim_env_classes"] = env_classes
+                if len(input_trajectory_ids) == response_count:
+                    generator_output["fsim_trajectory_ids"] = input_trajectory_ids
+            except Exception:
+                logger.warning("[forecast-sim] Failed to attach env metadata to generator output")
+            return generator_output
+
+        generator.generate = _wrapped_generate  # type: ignore[assignment]
+        generator._fsim_run_artifact_generate_patch = True
+        return generator
+
+    def _postprocess(self, generator_output, uids):
+        artifact_logger = get_run_artifact_logger(config=self.cfg)
+        if artifact_logger is not None:
+            try:
+                artifact_logger.append_train_rollout_summaries(
+                    tokenizer=self.tokenizer,
+                    step=self.global_step,
+                    generator_output=generator_output,
+                    uids=uids,
+                    env_extras=generator_output.get("fsim_env_extras"),
+                    env_classes=generator_output.get("fsim_env_classes"),
+                )
+            except Exception:
+                logger.warning("[forecast-sim] Failed to write train rollout summaries")
+        return _orig_postprocess(self, generator_output, uids)
+
+    def _dump_eval_results(
+        dump_dir_path,
+        tokenizer,
+        concat_generator_outputs,
+        concat_data_sources,
+        concat_all_envs,
+        concat_env_extras,
+        eval_metrics,
+    ):
+        _orig_dump_eval_results(
+            dump_dir_path,
+            tokenizer,
+            concat_generator_outputs,
+            concat_data_sources,
+            concat_all_envs,
+            concat_env_extras,
+            eval_metrics,
+        )
+        artifact_logger = get_run_artifact_logger()
+        if artifact_logger is not None:
+            try:
+                artifact_logger.write_eval_rollout_summaries(
+                    step=parse_eval_step_from_dump_dir(dump_dir_path),
+                    tokenizer=tokenizer,
+                    concat_generator_outputs=concat_generator_outputs,
+                    concat_data_sources=concat_data_sources,
+                    concat_all_envs=concat_all_envs,
+                    concat_env_extras=concat_env_extras,
+                    eval_metrics=eval_metrics,
+                )
+            except Exception:
+                logger.warning("[forecast-sim] Failed to write eval rollout summaries")
+
+    tr_mod.Tracking.__init__ = _tracking_init  # type: ignore[method-assign]
+    tr_mod.Tracking.log = _tracking_log  # type: ignore[method-assign]
+    tr_mod.Tracking.finish = _tracking_finish  # type: ignore[method-assign]
+    base_mod.BasePPOExp.get_generator = _get_generator  # type: ignore[method-assign]
+    trainer_mod.RayPPOTrainer.postprocess_generator_output = _postprocess  # type: ignore[method-assign]
+    tu_mod.dump_per_dataset_eval_results = _dump_eval_results  # type: ignore[assignment]
+    eval_mod.dump_per_dataset_eval_results = _dump_eval_results  # type: ignore[assignment]
+    tr_mod.Tracking._fsim_run_artifact_patch = True
+
+
 def _prepare_openforesight_entrypoint(cfg: SkyRLTrainConfig) -> None:
     """Shared OpenForesight worker setup for both sync and fully-async entrypoints."""
     setup_core_dump_cwd()
@@ -535,6 +674,7 @@ def _prepare_openforesight_entrypoint(cfg: SkyRLTrainConfig) -> None:
     _patch_concatenate_generator_outputs_for_forecast_env_metrics()
     _patch_skyrl_evaluate_for_forecast_metrics()
     _patch_tracking_timing_to_stdout()
+    _patch_tracking_for_run_artifacts()
 
 
 def _run_openforesight_entrypoint(cfg: SkyRLTrainConfig, *, exp_cls: Any) -> None:

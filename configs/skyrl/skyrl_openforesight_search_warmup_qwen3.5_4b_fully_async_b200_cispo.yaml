@@ -1,18 +1,17 @@
 # SkyRL fully async day-0 style warmup search training on OpenForesight train split.
-# B200-tuned copy of the tracked 4+4 async config.
+# B200-tuned CISPO copy of the tracked 4+4 async config.
 #
 # Goals for this variant:
 # - Keep the same async trainer semantics and 4 inference / 4 training split.
-# - Spend more of the B200's extra VRAM on rollout KV/cache and larger training micro-batches.
-# - Reduce the embedding server fraction because the same absolute embedding footprint needs a much
-#   smaller fraction of a 182632 MiB B200 than of an 80 GB H100.
-# - Shorten warmup/search trajectories so B200 tuning feedback arrives faster.
+# - Swap the policy loss from regular GRPO-style clipping to CISPO.
+# - Add a small entropy bonus while otherwise keeping the systems settings aligned with the base
+#   B200 4+4 config.
 #
 # Submit with:
 #   python mpi_scripts/skyrl_search/submit_skyrl_search_train.py \
-#     --config configs/skyrl/skyrl_openforesight_search_warmup_qwen3.5_4b_fully_async_b200.yaml --runs 1
+#     --config configs/skyrl/skyrl_openforesight_search_warmup_qwen3.5_4b_fully_async_b200_cispo.yaml --runs 1
 
-sim_name: "skyrl_of_search_warmup_qwen3.5_4b_fully_async_b200"
+sim_name: "skyrl_of_search_warmup_qwen3.5_4b_fully_async_b200_cispo"
 run_script: "run_skyrl_search_train_fully_async.sh"
 mode: "train"
 
@@ -79,7 +78,7 @@ matcher_cache:
 training:
   model_path: "${FSIM_SKYRL_MODEL_PATH}"
   project_name: "skyrl-search-agent"
-  run_name: "skyrl_of_search_warmup_qwen3.5_4b_fully_async_b200"
+  run_name: "skyrl_of_search_warmup_qwen3.5_4b_fully_async_b200_cispo"
   ckpt_path: "${FSIM_SKYRL_CKPT_BASE}/{run_name}"
   export_path: "${FSIM_SKYRL_CKPT_BASE}/{run_name}/exports"
   log_path: "${FSIM_SKYRL_LOG_BASE}/{run_name}/infra"
@@ -121,7 +120,7 @@ training:
   use_conversation_multi_turn: true
   append_eos_token_after_stop_str_in_multi_turn: true
 
-  temperature: 0.7
+  temperature: 1.0
   top_p: 0.95
   top_k: 20
   min_p: 0.0
@@ -136,6 +135,7 @@ training:
   max_grad_norm: 0.5
   use_kl_loss: false
   kl_loss_coef: 0.001
+  use_entropy_loss: true
   grpo_norm_by_std: false
   tis_ratio_type: token
   token_tis_ratio_clip_high: 2.0
@@ -163,5 +163,9 @@ training:
   max_ckpts_to_keep: 5
 
 hydra_overrides:
+  - "trainer.algorithm.policy_loss_type=cispo"
+  - "trainer.algorithm.cispo.cispo_eps_clip_low=0"
+  - "trainer.algorithm.cispo.cispo_eps_clip_high=5"
+  - "trainer.algorithm.entropy_loss_coef=0.01"
   - "generator.inference_engine.engine_init_kwargs.language_model_only=true"
   - "generator.inference_engine.engine_init_kwargs.skip_mm_profiling=true"
