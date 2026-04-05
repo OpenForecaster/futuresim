@@ -1688,7 +1688,7 @@ Your Python code runs in a sandbox with these variables pre-defined:
 - `pd`: pandas module
 - `today`: date object for {current_date}
 - `date`, `datetime`, `timedelta`: from datetime module
-{('- `mem_df`: your question-specific memory DataFrame (join with df on qid to decide what to revisit)' + chr(10)) if isinstance(self._memory, ActiveMemory) else ''}Import statements are not available. Standard builtins (len, str, int, float, min, max, sum, sorted, range, etc.) are available.
+{('- `mem_df`: your question-specific memory DataFrame (join with df on qid to decide what to revisit)' + chr(10)) if isinstance(self._memory, ActiveMemory) else ''}Standard builtins (len, str, int, float, min, max, sum, sorted, range, etc.) are available. A small safe subset of stdlib imports (for example datetime, json, math, re, ast) is allowed. External file, network, process, and private-attribute access is blocked; stay within in-memory DataFrame/pandas operations.
 
 ## RESPONSE FORMAT
 Use the function tools from the tool schema. {'You may call multiple tools per turn.' if self.config.parallel_tool_calls else 'Call exactly one tool per turn.'} Do not emit XML action blocks.

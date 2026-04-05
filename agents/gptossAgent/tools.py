@@ -34,7 +34,10 @@ def build_action_tools(
                     "Run Python code to inspect the questions DataFrame before forecasting. "
                     "Use print(...) to show results because plain .head() previews can be unreliable "
                     "outside notebooks. The sandbox predefines df, pd, today, date, datetime, "
-                    "timedelta, and standard builtins; import statements are unavailable. "
+                    "timedelta, and standard builtins. A small safe subset of stdlib imports "
+                    "(for example datetime, json, math, re, ast) is allowed. "
+                    "External file, network, process, and private-attribute access is blocked; "
+                    "use only in-memory DataFrame/pandas operations. "
                     "Example: print(df[df['is_resolved'] == False][['qid','title','answer_type']].head())"
                 ),
                 "strict": True,
