@@ -9,21 +9,27 @@ Usage:
     python deduplicate_news_jsonl.py --jsonl_path /path/to/jsonl --num_workers 16
 """
 
+import argparse
 import json
 import os
-import argparse
-from pathlib import Path
+import sys
+import tempfile
 from concurrent.futures import ProcessPoolExecutor
-from typing import Set
+from pathlib import Path
+
 from tqdm import tqdm
-import hashlib
-import random
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from scripts.news_article_dedup import article_identity_key, merge_article_records
 
 
 def deduplicate_jsonl_file(file_path: str, output_dir: str) -> int:
     """
-    Deduplicate a single JSONL file based on title and maintext using in-memory processing.
-    If output file already exists, append new unique articles to it.
+    Deduplicate a single JSONL file using stable article identity keys.
+    The output file is rewritten atomically on every run.
     
     Args:
         file_path: Path to the JSONL file
@@ -37,55 +43,46 @@ def deduplicate_jsonl_file(file_path: str, output_dir: str) -> int:
     
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     
-    seen_content: Set[str] = set()
-    
-    # If output file exists, read it first to build the set of existing content
-    if os.path.exists(output_path):
-        with open(output_path, 'r', encoding='utf-8') as existing_file:
-            for line in tqdm(existing_file, desc=f"Reading existing {file_name}", leave=False, position=1):
-                try:
-                    article = json.loads(line)
-                    title = article.get('title', '') or ''
-                    maintext = article.get('maintext', '') or ''
-                    content_key = hashlib.md5((title + maintext).encode('utf-8')).hexdigest()
-                    seen_content.add(content_key)
-                except json.JSONDecodeError:
-                    continue
-    
-    # Read new file
+    articles_by_key: dict[str, dict] = {}
+    ordered_keys: list[str] = []
+    duplicates_removed = 0
+    anonymous_counter = 0
+
     with open(file_path, 'r', encoding='utf-8') as input_file:
         lines = input_file.readlines()
-    
-    # Process all lines with a progress bar
-    new_unique_articles = []
-    duplicates_removed = 0
-    
+
     for line in tqdm(lines, desc=f"Processing {file_name}", leave=False, position=1):
         try:
             article = json.loads(line)
-            
-            title = article.get('title', '') or ''
-            maintext = article.get('maintext', '') or ''
-            
-            # Debug print occasionally
-            if random.random() < 0.001:
-                print(f"Title: {title[:80]}...")
-                print(f"Date: {article.get('date_publish', '')}")
-            
-            content_key = hashlib.md5((title + maintext).encode('utf-8')).hexdigest()
-            
-            if content_key not in seen_content:
-                seen_content.add(content_key)
-                new_unique_articles.append(line)
+
+            content_key = article_identity_key(article)
+            if content_key is None:
+                content_key = f"anonymous:{anonymous_counter}"
+                anonymous_counter += 1
+
+            if content_key not in articles_by_key:
+                articles_by_key[content_key] = article
+                ordered_keys.append(content_key)
             else:
+                articles_by_key[content_key] = merge_article_records(articles_by_key[content_key], article)
                 duplicates_removed += 1
-                
         except json.JSONDecodeError:
             continue
-    
-    # Append new unique articles to the output file
-    with open(output_path, 'a', encoding='utf-8') as output_file:
-        output_file.writelines(new_unique_articles)
+
+    fd, tmp_path = tempfile.mkstemp(
+        dir=os.path.dirname(output_path),
+        prefix=f".{file_name}.",
+        suffix=".tmp",
+        text=True,
+    )
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as output_file:
+            for content_key in ordered_keys:
+                output_file.write(json.dumps(articles_by_key[content_key], ensure_ascii=False) + '\n')
+        os.replace(tmp_path, output_path)
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
     
     return duplicates_removed
 

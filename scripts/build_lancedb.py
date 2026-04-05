@@ -37,6 +37,7 @@ import lancedb
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from agents.search_tools.chunking import chunk_article
+from scripts.news_article_dedup import dedupe_articles
 
 
 # Default paths
@@ -203,12 +204,10 @@ def load_articles_for_date(articles_dir: str, target_date: date) -> List[Dict]:
         return []
     
     articles = []
-    for parquet_file in date_dir.glob("articles_*.parquet"):
+    for parquet_file in sorted(date_dir.glob("articles_*.parquet")):
         try:
             table = pq.read_table(parquet_file)
-            df = table.to_pandas()
-            
-            for _, row in df.iterrows():
+            for row in table.to_pylist():
                 articles.append({
                     'id': row.get('id', ''),
                     'title': row.get('title', ''),
@@ -221,8 +220,8 @@ def load_articles_for_date(articles_dir: str, target_date: date) -> List[Dict]:
                 })
         except Exception as e:
             print(f"Error reading {parquet_file}: {e}")
-    
-    return articles
+
+    return dedupe_articles(articles)
 
 
 def create_chunks_with_embeddings(

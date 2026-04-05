@@ -20,7 +20,8 @@ Use this skill for `data/news/`, search DB maintenance, and search-enabled simul
 
 - `data/news/scripts/setup_news_pipeline.sh` prepares the patched `news-please` setup and related Python deps.
 - Stage 1 builds the LanceDB table plus scalar date index.
-- Stage 2 builds FTS; vector indexing is optional.
+- Stage 2 builds FTS and can also build the IVF-PQ vector index used to speed up semantic and hybrid search.
+- Reusing a prebuilt LanceDB table and rebuilding only Stage 2 locally is often the simplest collaborator path.
 - Keep repo wrapper defaults aligned unless the user explicitly wants to change retrieval behavior.
 
 ## Ask The User When

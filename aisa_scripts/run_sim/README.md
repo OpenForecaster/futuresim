@@ -9,10 +9,59 @@ Submit forecasting simulation jobs to HTCondor.
 echo 'OPENROUTER_API_KEY=your-key-here' > /home/sgoel/forecast-sim/.env
 ```
 
-2. Make sure LanceDB Stage 2 indices are built (for search mode):
+2. Make sure `FSIM_SEARCH_DB` and `FSIM_EMBEDDING_MODEL` point at the shared AISA paths from `.env.aisa.example`.
+
+3. Download the news search artifacts from Hugging Face if those paths are not populated yet.
+
+Prebuilt LanceDB table for search:
+
+- Dataset: `https://huggingface.co/datasets/shash42/forecast-news-embeddings`
+- Note: despite the repo name, this currently ships the prebuilt LanceDB table (`config.json` + `articles.lance/...`), not raw per-day `embeddings.npz`
+
 ```bash
-python scripts/build_lancedb_index.py --build_fts --fts_with_position --force
+hf download shash42/forecast-news-embeddings \
+  --repo-type dataset \
+  --local-dir /mnt/nfs/datasets_ac/news/deduped_articles/lance/Qwen3-Embedding-8B \
+  --max-workers 8
 ```
+
+Canonical parquet corpus for rebuilds or inspection:
+
+- Dataset: `https://huggingface.co/datasets/shash42/forecast-news`
+
+```bash
+hf download shash42/forecast-news \
+  --repo-type dataset \
+  --local-dir /mnt/nfs/datasets_ac/news/deduped_articles/data \
+  --max-workers 8
+```
+
+4. Make sure the LanceDB search DB is ready for hybrid search.
+
+If you already have a prebuilt LanceDB table at `FSIM_SEARCH_DB`, do not rebuild Stage 1. Run Stage 2 only to create the local search-serving indices needed for keyword/hybrid search:
+
+- rebuild the Tantivy FTS sidecar on AISA
+- optionally refresh the IVF-PQ serving index
+- keep the shipped LanceDB table itself unchanged
+
+```bash
+sbatch aisa_scripts/build_lancedb/build_index_aisa.sh
+```
+
+If you only have parquet + embeddings, then you must build Stage 1 and then Stage 2:
+
+```bash
+sbatch --cpus-per-task=8 --mem=128G --tmp=50G \
+  aisa_scripts/build_lancedb/build_lancedb_aisa.sh
+
+sbatch aisa_scripts/build_lancedb/build_index_aisa.sh
+```
+
+Stage 2 defaults are the recommended hybrid-search setup:
+
+- Tantivy-backed FTS with positions
+- IVF-PQ vector index enabled
+- external/shared Tantivy root under `/mnt/nfs/datasets_ac/lancedb_tantivy_indices`
 
 ## Usage
 

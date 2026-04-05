@@ -26,8 +26,18 @@ def _is_fts_index(idx_obj) -> bool:
 
 
 def _tantivy_likely_unsupported(db_path: str) -> bool:
-    """Heuristic: /is filesystem lacks required lockfile semantics for Tantivy."""
-    return db_path.startswith("/is/")
+    """Heuristic: the shared fast filesystems lack required lockfile semantics for Tantivy."""
+    candidates = [db_path]
+    try:
+        candidates.append(os.path.realpath(db_path))
+    except OSError:
+        pass
+    unsupported_prefixes = (
+        "/is/cluster/fast/",
+        "/fast/",
+        "/lustre/fast/",
+    )
+    return any(path.startswith(unsupported_prefixes) for path in candidates)
 
 
 def _build_tantivy_index_external(

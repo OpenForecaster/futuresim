@@ -38,6 +38,7 @@ def process_directory(base_dir, subdir, output_dir, verify_sample, delete_jsons,
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
         json_files = result.stdout.strip().split('\n')
         json_files = [f for f in json_files if f]
+        json_files.sort()
         
         if not json_files:
             return 0, 0, 0
@@ -50,13 +51,7 @@ def process_directory(base_dir, subdir, output_dir, verify_sample, delete_jsons,
         
         os.makedirs(os.path.dirname(jsonl_file), exist_ok=True)
         
-        file_exists = os.path.exists(jsonl_file)
-        mode = 'a' if file_exists else 'w'
-        
-        if file_exists:
-            log_message(log_file, f"Appending to existing file: {jsonl_file}")
-        
-        with open(jsonl_file, mode, encoding='utf-8') as outfile:
+        with open(jsonl_file, 'w', encoding='utf-8') as outfile:
             for file_path in tqdm(json_files, desc=f"Processing {subdir}", leave=False):
                 try:
                     with open(file_path, 'r', encoding='utf-8') as f:
@@ -139,8 +134,9 @@ def verify_jsonl(jsonl_file, doc_ids_to_verify, log_file):
         return 0
 
 
-def parallel_convert_to_jsonl(json_dir, output_dir, max_workers=48, 
-                             verify_sample=0.01, delete_jsons=False):
+def parallel_convert_to_jsonl(json_dir, output_dir, max_workers=48,
+                             verify_sample=0.01, delete_jsons=False,
+                             resume_processed_dirs=False):
     """Convert JSON files to JSONL files in parallel"""
     start_time = time.time()
     
@@ -164,10 +160,12 @@ def parallel_convert_to_jsonl(json_dir, output_dir, max_workers=48,
     processed_dirs_path = os.path.join(output_dir, "processed_dirs.txt")
     
     already_processed = set()
-    if os.path.exists(processed_dirs_path):
+    if resume_processed_dirs and os.path.exists(processed_dirs_path):
         with open(processed_dirs_path, 'r') as f:
             already_processed = set(line.strip() for line in f)
         log_message(log_file, f"Resuming conversion. {len(already_processed)} subdirectories already processed.")
+    elif os.path.exists(processed_dirs_path):
+        log_message(log_file, f"Ignoring previous processed_dirs file and rebuilding JSONL outputs.")
     
     subdirs_to_process = [d for d in subdirs if d not in already_processed]
     
@@ -189,7 +187,8 @@ def parallel_convert_to_jsonl(json_dir, output_dir, max_workers=48,
             ): subdir for subdir in subdirs_to_process
         }
         
-        with open(processed_dirs_path, 'a') as processed_file:
+        mode = 'a' if resume_processed_dirs else 'w'
+        with open(processed_dirs_path, mode) as processed_file:
             for future in tqdm(concurrent.futures.as_completed(future_to_subdir), total=len(subdirs_to_process)):
                 subdir = future_to_subdir[future]
                 try:
@@ -234,6 +233,9 @@ if __name__ == "__main__":
     
     parser.add_argument('--delete', action='store_true',
                        help="Delete JSON files after successful conversion")
+
+    parser.add_argument('--resume_processed_dirs', action='store_true',
+                       help="Skip subdirectories already listed in processed_dirs.txt")
     
     args = parser.parse_args()
     
@@ -245,5 +247,6 @@ if __name__ == "__main__":
         args.output_dir,
         max_workers=args.workers,
         verify_sample=args.verify,
-        delete_jsons=args.delete
+        delete_jsons=args.delete,
+        resume_processed_dirs=args.resume_processed_dirs,
     )

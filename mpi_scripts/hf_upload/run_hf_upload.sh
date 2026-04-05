@@ -144,6 +144,8 @@ for path in root.rglob("*"):
     if not path.is_file():
         continue
     rel = path.relative_to(root).as_posix()
+    if rel == ".cache" or rel.startswith(".cache/"):
+        continue
     if not fnmatch.fnmatch(rel, include_glob):
         continue
     if exclude_glob and fnmatch.fnmatch(rel, exclude_glob):

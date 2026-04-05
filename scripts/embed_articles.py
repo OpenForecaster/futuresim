@@ -22,8 +22,10 @@ Usage:
 """
 
 import argparse
+import hashlib
 import os
 import sys
+import zipfile
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional
@@ -38,6 +40,7 @@ import pyarrow.parquet as pq
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from agents.search_tools.chunking import chunk_article
+from scripts.news_article_dedup import dedupe_articles
 
 
 # Default paths
@@ -134,12 +137,10 @@ def load_articles_for_date(articles_dir: str, target_date: date) -> List[Dict]:
         return []
     
     articles = []
-    for parquet_file in date_dir.glob("articles_*.parquet"):
+    for parquet_file in sorted(date_dir.glob("articles_*.parquet")):
         try:
             table = pq.read_table(parquet_file)
-            df = table.to_pandas()
-            
-            for _, row in df.iterrows():
+            for row in table.to_pylist():
                 articles.append({
                     'id': row.get('id', ''),
                     'title': row.get('title', ''),
@@ -151,8 +152,8 @@ def load_articles_for_date(articles_dir: str, target_date: date) -> List[Dict]:
                 })
         except Exception as e:
             print(f"Error reading {parquet_file}: {e}")
-    
-    return articles
+
+    return dedupe_articles(articles)
 
 
 def create_chunks_for_articles(
@@ -225,6 +226,7 @@ def save_embeddings(
     model_name: str,
     target_date: date,
     chunk_ids: List[str],
+    chunk_texts: List[str],
     embeddings: np.ndarray,
     chunk_metadata: List[Dict]
 ):
@@ -234,13 +236,16 @@ def save_embeddings(
     date_dir.mkdir(parents=True, exist_ok=True)
     
     output_path = date_dir / "embeddings.npz"
+    tmp_output_path = date_dir / f".embeddings.{os.getpid()}.tmp.npz"
     
     np.savez_compressed(
-        output_path,
+        tmp_output_path,
         chunk_ids=np.array(chunk_ids),
+        chunk_text_hashes=np.array([hashlib.md5(text.encode("utf-8")).hexdigest() for text in chunk_texts]),
         embeddings=embeddings,
         metadata=json.dumps(chunk_metadata)
     )
+    os.replace(tmp_output_path, output_path)
     
     print(f"Saved {len(chunk_ids)} embeddings to {output_path}")
 
@@ -250,6 +255,16 @@ def check_existing(output_dir: str, model_name: str, target_date: date) -> bool:
     model_dirname = get_model_dirname(model_name)
     output_path = Path(output_dir) / model_dirname / target_date.strftime("%Y/%m/%d") / "embeddings.npz"
     return output_path.exists()
+
+
+def load_existing_chunk_state(output_dir: str, model_name: str, target_date: date) -> Tuple[List[str], Optional[List[str]]]:
+    """Load the existing chunk IDs and optional chunk-text hashes for a day."""
+    model_dirname = get_model_dirname(model_name)
+    output_path = Path(output_dir) / model_dirname / target_date.strftime("%Y/%m/%d") / "embeddings.npz"
+    with np.load(output_path, allow_pickle=False) as data:
+        chunk_ids = data["chunk_ids"].tolist()
+        chunk_hashes = data["chunk_text_hashes"].tolist() if "chunk_text_hashes" in data else None
+    return chunk_ids, chunk_hashes
 
 
 def save_config(
@@ -293,23 +308,15 @@ def main():
     print(f"Model: {args.model}")
     print(f"Output: {args.output_dir}/{get_model_dirname(args.model)}/")
     
-    # Load model
-    print("Loading embedding model...")
-    model = load_embedding_model(args.model_path or args.model)
-    print(f"Model loaded")
-    
     # Save config (worker 0 only to avoid race)
     # Note: embedding_dim will be determined from first batch and saved later
     config_saved = False
+    model = None
     
     # Process each date
     for target_date in worker_dates:
         print(f"\n{'='*60}")
         print(f"Processing {target_date}")
-        
-        if args.resume and check_existing(args.output_dir, args.model, target_date):
-            print(f"  Skipping (already exists)")
-            continue
         
         articles = load_articles_for_date(args.articles_dir, target_date)
         if not articles:
@@ -323,6 +330,28 @@ def main():
         
         if not chunk_ids:
             continue
+
+        if args.resume and check_existing(args.output_dir, args.model, target_date):
+            try:
+                existing_chunk_ids, existing_chunk_hashes = load_existing_chunk_state(
+                    args.output_dir, args.model, target_date
+                )
+            except (OSError, ValueError, zipfile.BadZipFile) as exc:
+                print(f"  Existing embeddings are unreadable ({exc}); rebuilding")
+                existing_chunk_ids, existing_chunk_hashes = [], None
+            current_chunk_hashes = [hashlib.md5(text.encode("utf-8")).hexdigest() for text in chunk_texts]
+            if existing_chunk_hashes is None and existing_chunk_ids == chunk_ids:
+                print(f"  Skipping (legacy embeddings match current chunk IDs)")
+                continue
+            if existing_chunk_ids == chunk_ids and existing_chunk_hashes == current_chunk_hashes:
+                print(f"  Skipping (existing embeddings match current chunks)")
+                continue
+            print(f"  Existing embeddings are stale; rebuilding")
+
+        if model is None:
+            print("Loading embedding model...")
+            model = load_embedding_model(args.model_path or args.model)
+            print("Model loaded")
         
         print(f"  Embedding...")
         embeddings = embed_texts(chunk_texts, model)
@@ -336,7 +365,7 @@ def main():
         # Save
         save_embeddings(
             args.output_dir, args.model, target_date,
-            chunk_ids, embeddings, chunk_metadata
+            chunk_ids, chunk_texts, embeddings, chunk_metadata
         )
     
     print(f"\nDone! Worker {args.worker_id} complete.")
