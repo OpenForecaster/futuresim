@@ -1,0 +1,54 @@
+# Claude Code eval on validation20 split (20 questions, ~6 weeks)
+# Usage: python scripts/test_basic_agent.py --config configs/claude_code_validation20.yaml
+#
+# This is the full-featured integration test config. Every feature is enabled:
+# search (hybrid), article file access, answer matching, scoring.
+
+sim_name: "claude_code_validation20"
+
+# Resolution window covers all 20 questions: 2025-07-01 to 2025-07-04
+start_date: "2025-07-01"
+end_date: "2025-07-04"
+resolution_start: "2025-07-01"
+resolution_end: "2025-07-04"
+lookback_days: 7          # Sim starts 7 days before first resolution
+search_cutoff_days: 0
+timegap_days: 1
+
+# Dataset
+dataset: "openforesight"
+dataset_path: "${FSIM_DATASET_PATH}"
+split: "validation20"
+resolved_only: false      # Include all questions regardless of resolution status
+min_forecasters: 0        # No filtering
+output_base: "${FSIM_OUTPUT_BASE}"
+
+# Search — full hybrid (semantic + keyword)
+search_db: "${FSIM_SEARCH_DB}"
+embedding_model: "${FSIM_EMBEDDING_MODEL}"
+
+# Article file access for Claude Code
+articles_base: "/fast/sgoel/forecasting/news/deduped_articles/data"
+
+# Answer matching via OpenRouter
+matching: "openrouter"
+matcher: "deepseek/deepseek-v3.2"
+
+# Agent
+defaults:
+  provider: "none"
+  scaffold: "claudecode"
+
+# HTCondor resources — 1 GPU for embedding model only
+resources:
+  gpus: 1
+  cpus: 16
+  memory_gb: 80
+  disk_gb: 50
+  bid: 35
+
+agents:
+  - model: "claude-sonnet-4-6"
+    timeout_seconds: 900     # 15 min per day
+    claude_code_path: "/home/nchandak/.local/bin/claude"
+    # max_budget_usd: 100   # Uncomment to cap cost

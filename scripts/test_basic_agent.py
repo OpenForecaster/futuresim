@@ -406,7 +406,37 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
             raise ValueError("Each agent must specify a 'model'")
         
         print(f"  [{i+1}/{len(agents_list)}] Creating {scaffold}:{provider}:{model}...", flush=True)
-        
+
+        # Claude Code agent doesn't need an inference provider — skip the LLM setup
+        # and jump straight to agent creation.
+        if scaffold == 'claudecode':
+            from agents.claudeCodeAgent.agent import ClaudeCodeAgent, ClaudeCodeConfig
+            agent_id = f"claudecode_{model.replace('/', '_').replace('.', '')}_{i+1:03d}"
+            cc_search_cutoff = agent_def.get('search_cutoff_days', defaults.get('search_cutoff_days', getattr(args, 'search_cutoff_days', 0)))
+            cc_config = ClaudeCodeConfig(
+                model=model,
+                search_db=getattr(args, 'search_db', '') or '',
+                embedding_model=getattr(args, 'embedding_model', '') or '',
+                search_type=agent_def.get('search_type', defaults.get('search_type', 'hybrid')),
+                search_cutoff_days=cc_search_cutoff,
+                articles_base=config.get('articles_base', os.environ.get('FSIM_ARTICLES_BASE', '')),
+                start_date=args.sim_start_date,
+                end_date=getattr(args, 'end_date', None),
+                timeout_seconds=int(agent_def.get('timeout_seconds', defaults.get('timeout_seconds', 7200))),
+                max_budget_usd=agent_def.get('max_budget_usd', defaults.get('max_budget_usd')),
+                claude_code_path=agent_def.get('claude_code_path', defaults.get('claude_code_path', 'claude')),
+            )
+            agent = ClaudeCodeAgent(
+                agent_id=agent_id,
+                config=cc_config,
+                search_tool=search_tool,
+                agent_dir=os.path.join(output_dir, 'agents', agent_id),
+                articles_base=config.get('articles_base', os.environ.get('FSIM_ARTICLES_BASE', '')),
+            )
+            agents.append(agent)
+            print(f"  Created agent: {agent_id} (Claude Code) [Scaffold: claudecode]")
+            continue
+
         # Create inference provider
         openrouter_provider_order = agent_def.get('openrouter_provider_order', defaults.get('openrouter_provider_order', None))
         inference_provider = create_inference_provider(provider, model, args, openrouter_provider_order=openrouter_provider_order)
@@ -650,8 +680,8 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
         else:
             raise ValueError(
                 f"Unknown scaffold: {scaffold}. Only 'basic', 'allQ', 'allqd', 'og', "
-                "'qwenbasic', 'qwenallq', 'mirobasic', 'miroallq', 'gptossbasic', and "
-                "'gptossallq' are supported."
+                "'qwenbasic', 'qwenallq', 'mirobasic', 'miroallq', 'gptossbasic', "
+                "'gptossallq', and 'claudecode' are supported."
             )
         
         agents.append(agent)
@@ -1403,11 +1433,29 @@ def main():
                 search_tool=search_tool,
                 start_date=sim_start
             )
+        elif args.scaffold == 'claudecode':
+            from agents.claudeCodeAgent.agent import ClaudeCodeAgent, ClaudeCodeConfig
+            cc_config = ClaudeCodeConfig(
+                model=model_name,
+                search_db=getattr(args, 'search_db', '') or '',
+                embedding_model=getattr(args, 'embedding_model', '') or '',
+                search_cutoff_days=getattr(args, 'search_cutoff_days', 0),
+                articles_base=getattr(args, 'articles_base', os.environ.get('FSIM_ARTICLES_BASE', '')),
+                start_date=sim_start,
+                end_date=getattr(args, 'end_date', None),
+            )
+            agent = ClaudeCodeAgent(
+                agent_id=agent_id,
+                config=cc_config,
+                search_tool=search_tool,
+                agent_dir=os.path.join(output_dir, 'agents', agent_id),
+                articles_base=getattr(args, 'articles_base', os.environ.get('FSIM_ARTICLES_BASE', '')),
+            )
         else:
             raise ValueError(
                 f"Unknown scaffold: {args.scaffold}. Only 'basic', 'allQ', 'allqd', 'og', "
-                "'qwenbasic', 'qwenallq', 'mirobasic', 'miroallq', 'gptossbasic', and "
-                "'gptossallq' are supported."
+                "'qwenbasic', 'qwenallq', 'mirobasic', 'miroallq', 'gptossbasic', "
+                "'gptossallq', and 'claudecode' are supported."
             )
         agents.append(agent)
         print(f"  Created agent: {agent_id}")
