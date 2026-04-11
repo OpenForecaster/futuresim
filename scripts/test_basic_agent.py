@@ -486,6 +486,12 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
             )
         )
         warmup_parallelism = agent_def.get('warmup_parallelism', defaults.get('warmup_parallelism', getattr(args, 'warmup_parallelism', 20)))
+        max_outcomes_per_question = int(
+            agent_def.get(
+                'max_outcomes_per_question',
+                defaults.get('max_outcomes_per_question', 5),
+            )
+        )
         max_retries = agent_def.get('max_retries', defaults.get('max_retries', args.max_retries))
         temperature = agent_def.get('temperature', defaults.get('temperature', args.temperature))
         top_p = agent_def.get('top_p', defaults.get('top_p', getattr(args, 'top_p', None)))
@@ -560,6 +566,7 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
             warmup_force_submit_threshold_tokens=warmup_force_submit_threshold_tokens,
             warmup_parallelism=warmup_parallelism,
             max_submit_retries=max_retries,
+            max_outcomes_per_question=max_outcomes_per_question,
             memory_dir=agent_dir,  # Per-agent memory directory
             enable_memory=enable_memory,
             memory_format=memory_format,
@@ -1323,6 +1330,7 @@ def main():
             warmup_force_submit_threshold_tokens=args.warmup_force_submit_threshold_tokens,
             warmup_parallelism=args.warmup_parallelism,
             max_submit_retries=args.max_retries,
+            max_outcomes_per_question=int(getattr(args, 'max_outcomes_per_question', 5) or 5),
             memory_dir=agent_dir,
             enable_memory=True,
             append_model_output_logs=bool(args.resume),
@@ -1464,6 +1472,14 @@ def main():
     
     # Note: matcher_provider was already initialized before embedding model (see above)
     
+    env_max_outcomes_per_question = max(
+        (
+            int(getattr(getattr(agent, "config", None), "max_outcomes_per_question", 5) or 5)
+            for agent in agents
+        ),
+        default=5,
+    )
+
     # Initialize environment with resolution date filter
     print(f"\nLoading dataset: {args.dataset}")
     env = SimulationEnvironment(
@@ -1484,6 +1500,7 @@ def main():
         timegap_days=args.timegap_days,
         resume_dir=args.resume if args.resume else None,
         matcher_cache_path=matcher_cache_path,
+        max_outcomes_per_question=env_max_outcomes_per_question,
     )
     
     # Add all agents
@@ -1541,6 +1558,7 @@ def main():
                 next_active_date=env._get_next_active_date(),
                 simulation_end_date=env.end_date,
                 num_agents=len(agents),
+                max_outcomes_per_question=env.max_outcomes_per_question,
             )
             warmup_interface.source_name = getattr(env, 'source_name', 'openforesight')
             warmup_interface.source_context = getattr(env, 'source_context', '')

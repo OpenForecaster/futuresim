@@ -50,7 +50,8 @@ class SimulationEnvironment:
                  resume_dir: str = None,
                  min_forecasters: int = 0,
                  resolved_only: bool = False,
-                 matcher_cache_path: Optional[str] = None):
+                 matcher_cache_path: Optional[str] = None,
+                 max_outcomes_per_question: int = 5):
         
         # Handle positional args shift if someone called with positional args (unlikely in this codebase but safe)
         # We'll rely on kwargs mostly.
@@ -71,6 +72,7 @@ class SimulationEnvironment:
         self.prepend_train_resolution_end = prepend_train_resolution_end
         self.subsample_per_month = subsample_per_month
         self.timegap_days = max(1, int(timegap_days or 1))
+        self.max_outcomes_per_question = max(1, int(max_outcomes_per_question or 1))
         
         # Logging and market state
         self.resume_dir = resume_dir
@@ -432,6 +434,7 @@ class SimulationEnvironment:
             next_active_date=self._get_next_active_date(),
             simulation_end_date=self.end_date,
             num_agents=len(self.agents),
+            max_outcomes_per_question=self.max_outcomes_per_question,
         )
         forecast_interface.source_name = getattr(self, 'source_name', 'openforesight')
         forecast_interface.source_context = getattr(self, 'source_context', '')
@@ -466,6 +469,7 @@ class SimulationEnvironment:
                 next_active_date=self._get_next_active_date(),
                 simulation_end_date=self.end_date,
                 num_agents=len(self.agents),
+                max_outcomes_per_question=self.max_outcomes_per_question,
             )
             forecast_interface.source_name = getattr(self, 'source_name', 'openforesight')
             forecast_interface.source_context = getattr(self, 'source_context', '')
@@ -633,7 +637,8 @@ class SimForecastInterface:
                  last_active_date: Optional[date] = None,
                  next_active_date: Optional[date] = None,
                  simulation_end_date: Optional[date] = None,
-                 num_agents: int = 1):
+                 num_agents: int = 1,
+                 max_outcomes_per_question: int = 5):
         self.questions = {q.qid: q for q in questions}
         self.aggregates = aggregates
         self.histories = histories
@@ -643,6 +648,7 @@ class SimForecastInterface:
         self.next_active_date = next_active_date
         self.simulation_end_date = simulation_end_date
         self.num_agents = num_agents
+        self.max_outcomes_per_question = max(1, int(max_outcomes_per_question or 1))
         self.logger = logger
         self.current_agent_id: Optional[str] = None
         self.resolved_questions = resolved_questions or []
@@ -674,6 +680,15 @@ class SimForecastInterface:
             raise ValueError("No agent context set")
         if prediction.question_id not in self.questions:
             raise ValueError(f"Question {prediction.question_id} not active")
+        if not prediction.outcomes:
+            raise ValueError("Prediction must include at least one outcome")
+
+        prediction.outcomes = dict(
+            sorted(
+                prediction.outcomes.items(),
+                key=lambda item: (-float(item[1]), item[0]),
+            )[: self.max_outcomes_per_question]
+        )
         
         # Validate probabilities
         total = sum(prediction.outcomes.values())
