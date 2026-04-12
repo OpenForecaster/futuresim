@@ -15,6 +15,8 @@ from typing import Dict, Any, Optional, Tuple
 from environment.safe_executor import QueryExecutor
 
 
+## SHOULD ADD COLUMN DESCRIPTIONS TO THE DATAFRAME
+
 class DfInterface:
     """
     DataFrame interface for exploring forecasting questions.
@@ -122,8 +124,15 @@ class DfInterface:
         columns_desc = []
         for col in df.columns:
             dtype = str(df[col].dtype)
+            # hardcoded few column descriptions
             if col == 'qid':
                 dtype = 'str'  # Explicitly tell agent it's a string
+                columns_desc.append(f"- {col} ({dtype}) (Question ID)")
+                continue 
+            elif col == 'title':
+                dtype = 'str'  # Explicitly tell agent it's a string
+                columns_desc.append(f"- {col} ({dtype}) (Question Content)")
+                continue 
             columns_desc.append(f"- {col} ({dtype})")
         
         n_active = len(df[df['is_resolved'] == False]) if 'is_resolved' in df.columns else len(df)

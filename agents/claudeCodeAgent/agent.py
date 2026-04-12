@@ -55,12 +55,15 @@ class ClaudeCodeAgent(BaseAgent):
         super().__init__(agent_id)
         self.config = config
         self.search_tool = search_tool
-        self.workspace = Path(agent_dir)
+        # agent_dir is the top-level agent directory.
+        # _internal_dir: driver/MCP coordination (signals, mcp_config, logs) — CC doesn't see this.
+        # workspace: CC's working directory (--add-dir) — only what CC needs.
+        self._internal_dir = Path(agent_dir)
+        self.workspace = self._internal_dir / "workspace"
         self.articles_base = Path(articles_base or config.articles_base)
         self._cc_process: Optional[subprocess.Popen] = None
         self._started = False
         self._last_symlink_date: Optional[date] = None
-        # Track the date so we know which signal files to look for.
         self._current_date: Optional[date] = None
 
     # ── BaseAgent contract ─────────────────────────────────────────────
@@ -73,8 +76,15 @@ class ClaudeCodeAgent(BaseAgent):
     ) -> List[Dict[str, Any]]:
         self._current_date = current_date
 
-        # Ensure workspace dirs exist.
-        for d in ("signals", "predictions", "memory", "articles"):
+        # Internal dirs (driver/MCP coordination — CC doesn't see these).
+        for d in ("signals",):
+            (self._internal_dir / d).mkdir(parents=True, exist_ok=True)
+
+        # Internal dirs (driver/MCP coordination — CC doesn't see these).
+        (self._internal_dir / "predictions").mkdir(parents=True, exist_ok=True)
+
+        # Workspace dirs (CC's working directory — only what CC needs).
+        for d in ("memory", "articles"):
             (self.workspace / d).mkdir(parents=True, exist_ok=True)
 
         # 1. Write state.json for MCP server to read.
@@ -143,6 +153,22 @@ class ClaudeCodeAgent(BaseAgent):
                 "options": q.options,
             })
 
+        # Include agent's prediction distributions so the MCP server can show
+        # the full distribution in resolution feedback (matching BasicAgent).
+        agent_predictions = {}
+        get_preds = getattr(forecast_interface, "get_agent_predictions", None)
+        if callable(get_preds):
+            try:
+                raw = get_preds(self.agent_id) or {}
+                for qid, record in raw.items():
+                    if isinstance(record, dict) and record.get("outcomes"):
+                        agent_predictions[qid] = record["outcomes"]
+            except Exception:
+                pass
+
+        # Count total active predictions.
+        total_predictions = len(agent_predictions)
+
         state = {
             "current_date": current_date.isoformat(),
             "start_date": self._to_iso(self.config.start_date or current_date),
@@ -155,8 +181,10 @@ class ClaudeCodeAgent(BaseAgent):
             "timeout_seconds": self.config.timeout_seconds,
             "questions": questions,
             "resolution_events": forecast_interface.resolution_events,
+            "agent_predictions": agent_predictions,
+            "total_predictions": total_predictions,
         }
-        state_path = self.workspace / "state.json"
+        state_path = self._internal_dir / "state.json"
         with open(state_path, "w") as f:
             json.dump(state, f, indent=2, default=str)
 
@@ -190,6 +218,7 @@ class ClaudeCodeAgent(BaseAgent):
         mcp_args = [
             mcp_server_script,
             "--workspace", str(self.workspace),
+            "--internal-dir", str(self._internal_dir),
             "--repo-root", repo_root,
             "--search-db", self.config.search_db or "",
             "--embedding-model", self.config.embedding_model or "",
@@ -205,7 +234,7 @@ class ClaudeCodeAgent(BaseAgent):
                 }
             }
         }
-        config_path = self.workspace / "mcp_config.json"
+        config_path = self._internal_dir / "mcp_config.json"
         with open(config_path, "w") as f:
             json.dump(config, f, indent=2)
 
@@ -238,7 +267,7 @@ class ClaudeCodeAgent(BaseAgent):
             num_resolved=num_resolved,
             single_agent_mode=(num_agents <= 1),
         )
-        prompt_path = self.workspace / "system_prompt.md"
+        prompt_path = self._internal_dir / "system_prompt.md"
         with open(prompt_path, "w") as f:
             f.write(prompt)
 
@@ -300,10 +329,10 @@ class ClaudeCodeAgent(BaseAgent):
             "--model", self.config.model,
             "--output-format", "stream-json",
             "--dangerously-skip-permissions",
-            "--mcp-config", str(self.workspace / "mcp_config.json"),
+            "--mcp-config", str(self._internal_dir / "mcp_config.json"),
             "--strict-mcp-config",
             "--disallowedTools", "WebSearch,WebFetch",
-            "--system-prompt-file", str(self.workspace / "system_prompt.md"),
+            "--system-prompt-file", str(self._internal_dir / "system_prompt.md"),
             "--add-dir", str(self.workspace),
         ]
 
@@ -312,8 +341,8 @@ class ClaudeCodeAgent(BaseAgent):
 
         cmd.extend(self.config.extra_flags)
 
-        log_stdout = open(self.workspace / "claude_code_stdout.jsonl", "w")
-        log_stderr = open(self.workspace / "claude_code_stderr.log", "w")
+        log_stdout = open(self._internal_dir / "claude_code_stdout.jsonl", "w")
+        log_stderr = open(self._internal_dir / "claude_code_stderr.log", "w")
 
         logger.info("Starting Claude Code: %s", " ".join(cmd))
         self._cc_process = subprocess.Popen(
@@ -329,8 +358,13 @@ class ClaudeCodeAgent(BaseAgent):
     # ── signal coordination ────────────────────────────────────────────
 
     def _wait_for_next_day(self, current_date: date) -> List[Dict[str, Any]]:
-        """Poll for the MCP server's next_day signal, then return predictions."""
-        signal_path = self.workspace / "signals" / f"next_day_{current_date.isoformat()}.json"
+        """Poll for the MCP server's next_day signal, then return predictions.
+
+        Reads predictions from the signal file (authoritative snapshot from
+        _today_predictions at the moment next_day was called), falling back to
+        the predictions/{date}.json file if the signal doesn't contain them.
+        """
+        signal_path = self._internal_dir / "signals" / f"next_day_{current_date.isoformat()}.json"
         poll_interval = 1.0
         timeout = self.config.timeout_seconds
         start = time.time()
@@ -348,19 +382,28 @@ class ClaudeCodeAgent(BaseAgent):
                 return self._read_predictions(current_date)
             time.sleep(poll_interval)
 
+        # Read predictions from the predictions file — this is the durable record
+        # of all submit_forecast MCP calls. Each call writes to this file immediately,
+        # so it survives MCP server restarts (unlike the in-memory _today_predictions).
         return self._read_predictions(current_date)
 
     def _read_predictions(self, current_date: date) -> List[Dict[str, Any]]:
-        pred_path = self.workspace / "predictions" / f"{current_date.isoformat()}.json"
+        pred_path = self._internal_dir / "predictions" / f"{current_date.isoformat()}.json"
         if not pred_path.exists():
             logger.warning("No predictions file for %s", current_date)
             return []
         with open(pred_path) as f:
-            return json.load(f)
+            preds = json.load(f)
+        # Normalize: CC may use "question_id" or "qid" depending on whether
+        # predictions were submitted via MCP or written directly via Bash.
+        for p in preds:
+            if "qid" in p and "question_id" not in p:
+                p["question_id"] = p["qid"]
+        return preds
 
     def _write_continue_signal(self, current_date: date) -> None:
         """Tell the MCP server's next_day poll that a new day is ready."""
-        signal_dir = self.workspace / "signals"
+        signal_dir = self._internal_dir / "signals"
         # Clean up old signals to avoid confusion.
         for old in signal_dir.glob("continue_*.json"):
             old.unlink(missing_ok=True)
@@ -376,7 +419,7 @@ class ClaudeCodeAgent(BaseAgent):
         next_day poll unblocks and tells Claude Code the sim is over."""
         if not self._started:
             return
-        signal_dir = self.workspace / "signals"
+        signal_dir = self._internal_dir / "signals"
         signal_dir.mkdir(parents=True, exist_ok=True)
         # Clean old signals.
         for old in signal_dir.glob("continue_*.json"):
@@ -391,7 +434,7 @@ class ClaudeCodeAgent(BaseAgent):
             "questions": [],
             "resolution_events": [],
         }
-        with open(self.workspace / "state.json", "w") as f:
+        with open(self._internal_dir / "state.json", "w") as f:
             json.dump(end_state, f, default=str)
         cur = self._to_iso(self._current_date or date.today())
         signal_path = signal_dir / f"continue_{cur}.json"

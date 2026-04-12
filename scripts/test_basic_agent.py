@@ -434,7 +434,7 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
                 articles_base=config.get('articles_base', os.environ.get('FSIM_ARTICLES_BASE', '')),
             )
             agents.append(agent)
-            print(f"  Created agent: {agent_id} (Claude Code) [Scaffold: claudecode]")
+            print(f"  Created agent: {agent_id} (Claude Code) [Scaffold: {scaffold}]")
             continue
 
         # Create inference provider

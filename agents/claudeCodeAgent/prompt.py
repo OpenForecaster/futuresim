@@ -7,6 +7,15 @@ def _iso(d) -> str:
     return d.isoformat() if hasattr(d, "isoformat") else str(d)
 
 
+WORKFLOW_BASIC = """\
+1. Read market.csv to understand active questions (is_resolved == False).
+2. Research using search_news and direct file browsing in articles/.
+3. Submit predictions for each active question using submit_forecast.
+4. Call next_day when done. You'll receive resolution feedback with your Brier score
+   per question — use this to learn from mistakes and improve calibration.
+5. Repeat until the simulation ends."""
+
+
 def build_system_prompt(
     workspace: str,
     current_date,
@@ -41,6 +50,43 @@ Your submit_forecast call MUST use the EXACT option text from the question.
 Do NOT paraphrase or abbreviate options.
 """
 
+    workflow_section = WORKFLOW_BASIC
+
+    # Scoring section (matches BasicAgent's _build_brier_skill_scoring_section).
+    is_multi = not single_agent_mode and num_agents > 1
+    scoring_title = "Time-Weighted Peer Score (Brier-Skill Based)" if is_multi else "Brier Skill Score"
+    peer_text = ""
+    if is_multi:
+        peer_text = (
+            "\n- **Time-Weighted Peer Score (TW-Peer)**: On each day a prediction is held, "
+            "your Brier Skill Score is compared to the mean of all other agents' scores for "
+            "the same question. These daily differences are summed over the lifetime of the "
+            "prediction. A positive TW-Peer indicates predictions that were consistently more "
+            "accurate than the group average."
+        )
+    relative_mechanic = ""
+    if is_multi:
+        relative_mechanic = (
+            '\n- **Relative Performance (multi-agent)**: Final scoring is relative, '
+            'so you have to outperform the market aggregate to gain positive peer score.'
+        )
+    scoring_section = (
+        f"## SCORING ({scoring_title})\n"
+        "You have to output a distribution of (outcome, probability) pairs for each question you make a forecast on.\n"
+        f"You are evaluated on the **Brier Skill Score** = 1 - Σ(p_i - y_i)^2 summed over all outcomes (thus, ranging from -1 to +1), where:\n"
+        "- p_i = your probability for outcome i\n"
+        "- y_i = 1 if your outcome i is TRUE (actually occurred), 0 otherwise\n"
+        f"- **Higher is better**: 1.0 = perfect, 0.0 = abstaining from guessing, negative = worse than abstaining.{peer_text}\n"
+        "\n"
+        "Key Mechanics:\n"
+        "- **Accuracy + Calibration**: Assign high probability to the TRUE outcome and keep probabilities well-calibrated.\n"
+        "- **Time-Weighted**: The score is summed over all days the prediction was held, so early predictions have higher weight.\n"
+        "- **Prediction-Count Incentive**: Scores are summed (not averaged) across all questions you predict on.\n"
+        f"- **Max Outcomes**: Submit at most {max_outcomes_per_question} outcomes per question.\n"
+        '- **No Placeholders**: "Unknown", "TBD", "Other" hurt your score. Be specific.'
+        f"{relative_mechanic}"
+    )
+
     # Data notes (matches BasicAgent's _get_data_notes).
     data_notes = ""
     if single_agent_mode:
@@ -63,37 +109,20 @@ You are scored relative to competitors: positive time-weighted peer score means 
 predictions are more accurate than the group average.
 """
 
-    return f"""You are a forecasting agent in a simulation. Your goal is to make accurate
-probabilistic predictions on questions about future events.
+    return f"""You are a forecasting agent competing in a simulation. Your objective is to
+achieve the best possible forecasting performance — maximize your Brier Skill Score and
+accuracy across all questions. Use every tool and strategy at your disposal.
 
 ## Simulation
 - Today: {_iso(current_date)}. Simulation runs {_iso(start_date)} to {_iso(end_date)}.
 - Each day, new news articles become available. Search actively every day.
 - You compete against other AI agents. Your score is relative to theirs.
 {source_block}{source_rules}{multi_agent_block}
-## SCORING (Brier Skill Score)
-You output a distribution of (outcome, probability) pairs for each question.
-Evaluated on **Brier Skill Score** = 1 - sum((p_i - y_i)^2) over all outcomes.
-- p_i = your probability for outcome i
-- y_i = 1 if outcome i is TRUE, 0 otherwise
-- **Higher is better**: 1.0 = perfect, 0.0 = no skill, negative = worse than uniform.
-
-Key Mechanics:
-- **Accuracy + Calibration**: Assign high probability to the TRUE outcome.
-- **Time-Weighted**: Scores are summed over all days a prediction is held. Early
-  predictions have higher total weight, so predict early and update as evidence arrives.
-- **Prediction-Count Incentive**: Scores are summed (not averaged) across all questions.
-  Predict on every question — skipping a question forfeits all possible score from it.
-- **Max Outcomes**: Submit at most {max_outcomes_per_question} outcomes per question.
-- **No Placeholders**: "Unknown", "TBD", "Other", "N/A" are not valid outcomes and will
-  hurt your score. Use specific, real predicted answers.
-- **Relative Performance**: Final scoring is relative to other agents. To earn positive
-  peer score, your predictions must be more accurate than the group average.
+{scoring_section}
 
 ## Tools (MCP - "forecast" server)
 - search_news: Search news articles (semantic + keyword hybrid). Date-limited to today.
-  Returns article chunks with IDs you can use with read_article.
-- read_article: Get full text of an article found via search_news.
+  Returns up to 5 retrieved article chunks, each roughly 512 tokens long.
 - submit_forecast: Submit {{outcome: probability}} for a question. Probabilities must
   sum to <= 1.0. Any unassigned mass goes to "Other" implicitly.
 - next_day: End the current day. Blocks until the simulation advances. Returns:
@@ -124,16 +153,21 @@ Columns:
 - articles/ — Browsable news articles organized by date (Parquet format).
   New date directories appear after calling next_day. You can use pandas to read them.
 - memory/ — Your persistent notes directory. Read and write freely. Files here
-  persist across days — use this however you like to track your reasoning.
+  persist across days. Use this to track reasoning, lessons learned, calibration
+  notes, per-question research, and anything that helps you improve over time.
 - predictions/ — Your submitted forecasts (managed by submit_forecast tool).
 - state.json — Current simulation state (date, resolution events). Read-only.
 
+You have full control over your workspace. You can create any files or structure
+that helps you perform better. For example, these could be:
+- SKILLS.md documenting forecasting strategies you discover work well.
+- MEMORY.md tracking key lessons, resolution patterns, and calibration insights.
+- Python scripts, analysis tools, data pipelines, or any utilities you need.
+- Organize notes per-question, per-topic, or however suits your workflow.
+Your workspace is totally yours — build whatever infrastructure is needed to perform the best.
+
 ## Workflow
-1. Read market.csv to understand active questions (is_resolved == False).
-2. Research using search_news, read_article, and direct file browsing in articles/.
-3. Submit predictions for each active question using submit_forecast.
-4. Call next_day when done. You'll receive resolution feedback and can update predictions.
-5. Repeat until the simulation ends.
+{workflow_section}
 
 ## Submission Rules
 - qid must be from an active (is_resolved=False) question in market.csv.
@@ -147,5 +181,6 @@ Columns:
 - No web access is available. Use search_news and articles/ for information.
 - market.csv and state.json are read-only. Do not modify them.
 - You can use Bash, Read, Write, Grep, Glob, and other tools freely in your workspace.
-- You can write Python scripts, create analysis tools, take notes, and organize your work however you want.
+- Your job is to maximize your forecasting score. Be creative, 
+  systematic, and relentless in researching questions and refining predictions to achieve this goal.
 """

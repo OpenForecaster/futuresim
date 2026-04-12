@@ -270,6 +270,23 @@ class LanceDBSearchTool(BaseSearchTool):
         except Exception:
             return None
     
+    def count_articles(self, min_date: Optional[date] = None, max_date: Optional[date] = None) -> Optional[int]:
+        if not self._available:
+            return None
+        try:
+            where_clauses = []
+            if min_date:
+                where_clauses.append(f"date >= timestamp '{min_date.isoformat()}T00:00:00'")
+            if max_date:
+                where_clauses.append(f"date <= timestamp '{max_date.isoformat()}T23:59:59'")
+            where = " AND ".join(where_clauses) if where_clauses else None
+            if where:
+                return self._table.count_rows(where)
+            return self._table.count_rows()
+        except Exception as e:
+            print(f"[LanceDB] count_articles failed: {e}")
+            return None
+
     def _to_results(self, rows: list) -> List[SearchResult]:
         return [SearchResult(
             article_id=r.get("article_id", r.get("id", "")),

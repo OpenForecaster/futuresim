@@ -40,14 +40,15 @@ def build_action_tools(
     enable_mem_df: bool = False,
 ) -> List[Dict[str, Any]]:
     tools: List[Dict[str, Any]] = []
+    extra_search_info = "The search tool uses a hybrid approach to retrieve articles, combining both semantic similarity (through an embedding model) and keyword matching." 
     if search_chunk_tokens is None:
         search_results_description = (
-            f"Search returns up to {max_search_results} retrieved article chunks."
+            f"Search returns up to {max_search_results} retrieved article chunks. {extra_search_info}"
         )
     else:
         search_results_description = (
             f"Search returns up to {max_search_results} retrieved article chunks, "
-            f"each roughly {search_chunk_tokens} tokens long."
+            f"each roughly {search_chunk_tokens} tokens long. {extra_search_info}"
         )
 
     if enable_query:

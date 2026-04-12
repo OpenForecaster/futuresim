@@ -46,7 +46,8 @@ mcp = FastMCP("forecast-sim")
 
 # Global state — set in main(), lazily initialized on first tool call.
 _state: dict = {}
-_workspace: Path = Path(".")
+_workspace: Path = Path(".")     # CC's workspace (market.csv, articles/, memory/)
+_internal_dir: Path = Path(".")  # Driver coordination (state.json, signals/)
 _search_handler = None       # Set by _ensure_search()
 _search_tool = None           # Set by _ensure_search()
 _today_predictions: list = []
@@ -65,9 +66,9 @@ _cumulative = {
 
 
 def _reload_state() -> None:
-    """Re-read workspace/state.json and update search handler date."""
+    """Re-read state.json from internal dir and update search handler date."""
     global _state, _today_predictions
-    _state = _read_json(_workspace / "state.json")
+    _state = _read_json(_internal_dir / "state.json")
     _today_predictions = []
     if _search_handler is not None:
         _search_handler.set_date(_parse_date(_state["current_date"]))
@@ -185,40 +186,6 @@ def search_news(
 
 
 @mcp.tool()
-def read_article(article_id: str) -> str:
-    """Retrieve the full text of an article found via search_news.
-
-    Args:
-        article_id: The article ID returned by search_news results.
-    """
-    _ensure_search()
-
-    if _search_tool is None or not _search_tool.is_available:
-        return "Search is not available."
-
-    article = _search_tool.get_article(article_id)
-    if article is None:
-        return f"Article '{article_id}' not found."
-
-    sim_date = _parse_date(_state["current_date"])
-    if article.date and sim_date and article.date > sim_date:
-        return f"Article '{article_id}' is not yet available (published after current simulation date)."
-
-    parts = [
-        f"TITLE: {article.title}",
-        f"SOURCE: {article.source}",
-        f"DATE: {article.date}",
-    ]
-    if article.url:
-        parts.append(f"URL: {article.url}")
-    if article.description:
-        parts.append(f"DESCRIPTION: {article.description}")
-    parts.append("")
-    parts.append(article.content)
-    return "\n".join(parts)
-
-
-@mcp.tool()
 def submit_forecast(question_id: str, outcomes: dict[str, float]) -> str:
     """Submit a probabilistic prediction for a forecasting question.
 
@@ -239,11 +206,30 @@ def submit_forecast(question_id: str, outcomes: dict[str, float]) -> str:
     pred = {"question_id": question_id, "outcomes": outcomes}
     _today_predictions.append(pred)
 
+    # Merge with any predictions already in the file (e.g. written via Bash).
+    # Later submissions for the same qid overwrite earlier ones.
     cur_date = _state["current_date"]
-    pred_path = _workspace / "predictions" / f"{cur_date}.json"
+    pred_path = _internal_dir / "predictions" / f"{cur_date}.json"
     pred_path.parent.mkdir(parents=True, exist_ok=True)
+    existing = []
+    if pred_path.exists():
+        try:
+            existing = json.loads(pred_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            existing = []
+    # Build merged list: existing + _today_predictions, last write wins per qid.
+    by_qid = {}
+    for p in existing:
+        qid_key = p.get("question_id", p.get("qid", ""))
+        if qid_key:
+            by_qid[qid_key] = p
+    for p in _today_predictions:
+        qid_key = p.get("question_id", p.get("qid", ""))
+        if qid_key:
+            by_qid[qid_key] = p
+    merged = list(by_qid.values())
     with open(pred_path, "w") as f:
-        json.dump(_today_predictions, f, default=str)
+        json.dump(merged, f, default=str)
 
     return f"Prediction recorded for question {question_id}: {outcomes}"
 
@@ -257,7 +243,7 @@ def next_day() -> str:
     """
     cur_date = _state["current_date"]
 
-    signal_dir = _workspace / "signals"
+    signal_dir = _internal_dir / "signals"
     signal_dir.mkdir(parents=True, exist_ok=True)
     _write_json(signal_dir / f"next_day_{cur_date}.json", {
         "predictions": _today_predictions,
@@ -288,7 +274,9 @@ def next_day() -> str:
                 if ev.get("qid") not in _cumulative["processed_qids"]
             ]
             if new_events:
-                response_parts.append(f"\n## RESOLUTIONS ({len(new_events)} question(s) resolved)")
+                response_parts.append(
+                    f"\n## RESULTS SINCE YOUR LAST WAKEUP ({cur_date} -> {new_date})\n"
+                )
                 for ev in new_events:
                     qid = ev.get("qid", ev.get("question_id", "?"))
                     title = ev.get("title", "")
@@ -316,25 +304,40 @@ def next_day() -> str:
                         if is_accurate:
                             _cumulative["accuracy_count"] += 1
 
+                        # Show full prediction distribution (matching BasicAgent).
+                        agent_preds = _state.get("agent_predictions", {})
+                        pred_dist = agent_preds.get(str(qid), {})
+                        if pred_dist:
+                            dist_items = sorted(pred_dist.items(), key=lambda kv: -kv[1])
+                            dist_str = ", ".join(f"{o}: {p:.2f}" for o, p in dist_items)
+                            dist_str = "{" + dist_str + "}"
+                        else:
+                            dist_str = f"{{{best_outcome}: {best_prob:.2f}}}"
+
                         verdict = "✓ CORRECT" if is_accurate else "✗ WRONG"
                         response_parts.append(
-                            f"  - {qid}: \"{title[:60]}\"\n"
-                            f"    Your top prediction: {best_outcome} ({best_prob:.0%}) | "
-                            f"Truth: {gt} | {verdict}\n"
-                            f"    Brier: {brier:+.3f} | TW-Peer: {tw_peer:+.2f}"
+                            f"- \"{title}\"\n"
+                            f"  Your prediction distribution: {dist_str} | Truth: {gt}\n"
+                            f"  Brier: {brier:+.2f} | TW-Peer: {tw_peer:+.2f}"
                         )
                     else:
-                        response_parts.append(f"  - {qid}: \"{title[:60]}\" → {gt}")
+                        response_parts.append(f"- \"{title}\" → {gt}")
 
                 # --- Cumulative performance summary ---
                 rc = _cumulative["resolved_count"]
+                total_preds = _state.get("total_predictions", 0)
                 if rc > 0:
                     avg_brier = _cumulative["brier_sum"] / rc
                     accuracy = _cumulative["accuracy_count"] / rc * 100
                     response_parts.append(
                         f"\n## YOUR CUMULATIVE PERFORMANCE\n"
-                        f"  Resolved: {rc} | Accuracy: {accuracy:.1f}% | "
-                        f"Avg Brier: {avg_brier:.3f} | TW-Peer: {_cumulative['tw_peer_sum']:+.2f}"
+                        f"- Total Predictions: {total_preds} ({rc} resolved)\n"
+                        f"- accuracy: {accuracy:.1f}% | avg brier: {avg_brier:.3f} | "
+                        f"time weighted peer: {_cumulative['tw_peer_sum']:.2f}\n"
+                        f"  accuracy = fraction of resolved questions where your top outcome "
+                        f"matched the truth; avg brier = mean score across resolved questions; "
+                        f"time weighted peer = cumulative peer comparison across all resolved "
+                        f"questions, where positive indicates better-than-average performance"
                     )
 
             if status == "simulation_complete":
@@ -350,10 +353,11 @@ def next_day() -> str:
 # ── main ───────────────────────────────────────────────────────────────
 
 def main():
-    global _workspace, _search_cutoff_days, _cli_args
+    global _workspace, _internal_dir, _search_cutoff_days, _cli_args
 
     parser = argparse.ArgumentParser(description="Forecast-sim MCP server")
-    parser.add_argument("--workspace", required=True, help="Path to agent workspace directory")
+    parser.add_argument("--workspace", required=True, help="Path to CC workspace (predictions/)")
+    parser.add_argument("--internal-dir", default="", help="Path to internal dir (state.json, signals/)")
     parser.add_argument("--repo-root", default="", help="Repo root to add to sys.path")
     parser.add_argument("--search-db", default="", help="Path to LanceDB search index")
     parser.add_argument("--embedding-model", default="", help="Path to embedding model")
@@ -368,6 +372,9 @@ def main():
         sys.path.insert(0, args.repo_root)
 
     _workspace = Path(args.workspace).resolve()
+    # Internal dir for state.json and signals — defaults to workspace for backward compat.
+    _internal_dir = Path(args.internal_dir).resolve() if args.internal_dir else _workspace
+    _internal_dir.mkdir(parents=True, exist_ok=True)
 
     # Load state (lightweight — just reads a JSON file).
     _reload_state()

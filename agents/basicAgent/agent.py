@@ -364,11 +364,12 @@ class BasicAgent(BaseAgent):
 
     def _search_results_description(self) -> str:
         chunk_tokens = self._search_handler.chunk_tokens
+        extra_info = "The search tool uses a hybrid approach to retrieve articles, combining both semantic similarity (through an embedding model) and keyword matching."
         if chunk_tokens is None:
-            return f"Search returns up to {self.config.max_search_results} retrieved article chunks."
+            return f"You have access to a search tool that returns up to {self.config.max_search_results} retrieved article chunks. {extra_info}"
         return (
-            f"Search returns up to {self.config.max_search_results} retrieved article chunks, "
-            f"each roughly {chunk_tokens} tokens long."
+            f"You have access to a search tool that returns up to {self.config.max_search_results} retrieved article chunks, "
+            f"each roughly {chunk_tokens} tokens long. {extra_info}"
         )
 
     def _estimate_budget_tokens(self, payload: Any) -> int:
@@ -409,9 +410,19 @@ class BasicAgent(BaseAgent):
             if last_active
             else "This is your first update. "
         )
+        articles_text = ""
+        if last_active and self._search_handler.is_available:
+            count = self._search_handler.count_articles(
+                min_date=last_active,
+                max_date=current_date - timedelta(days=self.config.search_cutoff_days),
+            )
+            if count is not None:
+                articles_text = f"{count:,} new articles have been published since your last update and you can access them using the search tool. "
+        if not articles_text:
+            articles_text = "New articles have been published since your last update and you can access them using the search tool. "
         return (
             "## UPDATE CADENCE\n"
-            f"You make updates every {self._get_timegap_days()} days. "
+            f"You have the chance to update your predictions every {self._get_timegap_days()} day(s). Your context is cleared after every session and your memory (along with past predictions) is the only information retained between sessions. {articles_text}"
             f"{last_text}Current date: {current_date}. {next_text}\n\n"
         )
 
@@ -1474,7 +1485,7 @@ class BasicAgent(BaseAgent):
         mechanics: Dict[str, str] = {
             "accuracy_calibration": "**Accuracy + Calibration**: Assign probabilities that reflect true likelihood.",
             "binary_outcomes": "**Binary Outcomes**: Use exact outcomes \"Yes\" and \"No\".",
-            "time_weighted": "**Time-Weighted**: The score is summed over all days the prediction was held, so early predictions have higher weight.",
+            "time_weighted": "**Time-Weighted**: Your final score = sum(daily_score * days_held) / total_question_days. Each prediction's Brier Skill Score (1 minus squared error) is weighted by how many days it was active before you updated it. Predictions made earlier carry more weight since they cover more days, so act on your best information as soon as possible rather than waiting.",
             "question_count": "**Prediction-Count Incentive**: Scores are summed (not averaged) across all questions you predict on.",
         }
         if show_peer:
@@ -1512,9 +1523,9 @@ Key Mechanics:
 - **Time-Weighted Peer Score (TW-Peer)**: On each day a prediction is held, your Brier Skill Score is compared to the mean of all other agents' scores for the same question. These daily differences are summed over the lifetime of the prediction. A positive TW-Peer indicates predictions that were consistently more accurate than the group average."""
 
         mechanics: Dict[str, str] = {
-            "accuracy_calibration": "**Accuracy + Calibration**: Assign high probability to the TRUE outcome and keep probabilities well-calibrated.",
-            "time_weighted": "**Time-Weighted**: The score is summed over all days the prediction was held, so early predictions have higher weight.",
-            "question_count": "**Prediction-Count Incentive**: Scores are summed (not averaged) across all questions you predict on.",
+            "accuracy_calibration": "**Accuracy + Calibration**: Try to guess the most likely outcome(s) and assign calibrated probabilities which reflect the likelihood of the outcome(s) occurring.",
+            "time_weighted": "**Time-Weighted Score**: Your final score = sum(daily_score * days_held) / total_question_days. Each prediction's Brier Skill Score (1 minus squared error) is weighted by how many days it was active before you updated it. Predictions made earlier carry more weight since they cover more days, so act on your best information as soon as possible rather than waiting.",
+            "question_count": "**Prediction-Count Incentive**: Your score for each of the metrics like accuracy, brier skill score, time-weighted score is summed (NOT averaged) across all questions you predict on and higher score is better.",
             "max_outcomes": f"**Max Outcomes**: Submit at most {self.config.max_outcomes_per_question} outcomes per question.",
             "no_placeholders": "**No Placeholders**: \"Unknown\", \"TBD\", \"Other\" hurt your score. Be specific.",
         }
@@ -1527,10 +1538,10 @@ Key Mechanics:
         mechanics_text = self._render_key_mechanics(mechanics, drop_mechanics)
         return f"""## SCORING ({section_title})
 You have to output a distribution of (outcome, probability) pairs for each question you make a forecast on.
-You are evaluated on **Brier Skill Score** = 1 - Σ(pᵢ - yᵢ)² summed over all outcomes.
-- pᵢ = your probability for outcome i
-- yᵢ = 1 if outcome i is TRUE, 0 otherwise
-- **Higher is better**: 1.0 = perfect, 0.0 = no skill, negative = worse than uniform.{peer_text}
+You are evaluated on the **Brier Skill Score** = 1 - Σ(p_i - y_i)^2 summed over all outcomes (thus, ranging from -1 to +1), where:
+- p_i = your probability for outcome i
+- y_i = 1 if your outcome i is TRUE (actually occurred), 0 otherwise
+- **Higher is better**: 1.0 = perfect, 0.0 = abstaining from guessing, negative = worse than abstaining.{peer_text}
 
 Key Mechanics:
 {mechanics_text}
@@ -1605,15 +1616,14 @@ Example tool arguments (if options are ["Candidate A", "Candidate B", "Candidate
             memory_content = self._memory.get()
             if isinstance(self._memory, ActiveMemory):
                 meta_index = self._memory.get_index()
-                meta_block = f"Current meta-insight index:\n{meta_index}\n\n" if meta_index else ""
+                meta_block = f"Current meta-insights with their indices:\n{meta_index}\n\n" if meta_index else ""
                 memory_section = f"""## YOUR MEMORY
-{meta_block}`mem_df` holds your per-question notes (reasoning, evidence, calibration) — {self._memory.mem_count} rows.
+{meta_block}`mem_df` holds your per-question notes (reasoning, evidence, calibration) — 1 row per question.
 Columns: qid (str), question (str), last_updated (str), memory (str), category (str)
-Both `mem_df` and `df` are available in the same `query_df` sandbox; join them on qid to find questions worth revisiting.
+Both `mem_df` and `df` are available in the same `query_df` sandbox. You can join them on qid to find questions worth revisiting.
 
-Use `query_df` to inspect `mem_df`, `mem_add` / `mem_update` / `mem_delete` to edit per-question notes,
-and `memory_retrieve` / `memory_new` / `memory_update` / `memory_delete` for meta-insights.
-
+Inspect `mem_df` via `query_df`. Edit per-question notes with `mem_add`, `mem_update`, `mem_delete`. 
+Manage meta-insights with `memory_retrieve` (using the indices), `memory_new`, `memory_update`, `memory_delete`. 
 """
             elif isinstance(self._memory, StructuredMemory):
                 memory_index = self._memory.get_index()
@@ -1633,7 +1643,7 @@ Use the reasoning and insights above to inform today's forecasts.
 
             if isinstance(self._memory, (StructuredMemory, ActiveMemory)):
                 memory_flow_note = (
-                    "When you finish forecasting, call `next_day()` to transition into the memory update phase. "
+                    "When you finish forecasting and are ready to move on, call `next_day()` to transition into the memory update phase. "
                     "The transition can also happen automatically if tokens run low."
                 )
             else:
@@ -1650,20 +1660,20 @@ Use the reasoning and insights above to inform today's forecasts.
                 "- `search_news(query, from_date?, to_date?)`: search the news corpus for evidence. "
                 f"`to_date` is capped at {cutoff_desc}. {self._search_results_description()}\n"
             )
-            search_advice = f"\nYou have access to a news article database. {self._search_results_description()}"
+            search_advice = f"\nYou have access to a news article database which is updated **daily**. {self._search_results_description()}."
 
         memory_tools_section = ""
         if isinstance(self._memory, ActiveMemory):
             memory_tools_section = (
                 "- `memory_retrieve` / `memory_new` / `memory_update` / `memory_delete`: manage meta-insight entries.\n"
-                "- `mem_add` / `mem_update` / `mem_delete`: manage `mem_df` question notes.\n"
+                "- `mem_add` / `mem_update` / `mem_delete`: manage question-specific notes in `mem_df`.\n"
             )
         elif isinstance(self._memory, StructuredMemory):
             memory_tools_section = (
                 "- `memory_retrieve` / `memory_new` / `memory_update` / `memory_delete`: manage reusable memory entries.\n"
             )
 
-        return f"""You are a forecasting agent. Today is {current_date}. Your goal is to make accurate probability predictions.
+        return f"""You are a forecasting agent. Today is {current_date}. Your goal is to make accurate and calibrated predictions.
 
 {self._format_and_cache_feedback(current_date)}
 
@@ -1673,43 +1683,41 @@ Use the reasoning and insights above to inform today's forecasts.
 
 {self._get_multiagent_context()}
 {cadence_section}{memory_section}{self._get_scoring_section()}
-{search_advice}
 ## AVAILABLE DATA
-DataFrame `df` with {df_info['n_rows']} questions ({df_info['n_active']} active/unresolved, {df_info['n_resolved']} resolved).
+{search_advice}
+You also have access to a pandas DataFrame `df` with {df_info['n_rows']} questions ({df_info['n_active']} active/unresolved, {df_info['n_resolved']} resolved).
 
-Column descriptions:
+Column descriptions of the DataFrame:
 {df_info['columns_desc']}
 
 {self._get_data_notes()}
 
 ## CODE EXECUTION ENVIRONMENT
-Your Python code runs in a sandbox with these variables pre-defined:
-- `df`: the pandas DataFrame
+You have access to a Python code execution environment where your code runs in a sandbox with these variables pre-defined:
+- `df`: the DataFrame with the questions and your predictions
 - `pd`: pandas module
 - `today`: date object for {current_date}
 - `date`, `datetime`, `timedelta`: from datetime module
-{('- `mem_df`: your question-specific memory DataFrame (join with df on qid to decide what to revisit)' + chr(10)) if isinstance(self._memory, ActiveMemory) else ''}Standard builtins (len, str, int, float, min, max, sum, sorted, range, etc.) are available. A small safe subset of stdlib imports (for example datetime, json, math, re, ast) is allowed. External file, network, process, and private-attribute access is blocked; stay within in-memory DataFrame/pandas operations.
+{('- `mem_df`: your question-specific memory DataFrame (you can join with df on qid to decide what to revisit)' + chr(10)) if isinstance(self._memory, ActiveMemory) else ''}Standard builtins (len, str, int, float, min, max, sum, sorted, range, etc.) are available. A small safe subset of stdlib imports (for example datetime, json, math, re, ast) is allowed. External file, network, process, and private-attribute access is blocked; stay within in-memory DataFrame/pandas operations.
 
 ## RESPONSE FORMAT
-Use the function tools from the tool schema. {'You may call multiple tools per turn.' if self.config.parallel_tool_calls else 'Call exactly one tool per turn.'} Do not emit XML action blocks.
+Use the function tools from the tool schema. {'You may call multiple tools per turn.' if self.config.parallel_tool_calls else 'Call exactly one tool per turn.'} 
 
-## TOOLS YOU SHOULD USE
+## TOOLS AVAILABLE FOR YOUR USE
 - `query_df(code)`: inspect questions and your existing predictions. Use `print(...)` for outputs.
-{search_tool_line}{memory_tools_section}- `submit_forecasts(forecasts)`: submit exactly one forecast for exactly one qid.
-- `next_day()`: end the forecasting phase or finish the memory-update phase.
+{search_tool_line}{memory_tools_section}- `submit_forecasts(forecasts)`: submit exactly one forecast for exactly one question ID (`qid`).
+- `next_day()`: end the current session and proceed to the next one.
 
 ## INTERACTION FLOW
 {self._build_budget_overview()}
 You can interleave queries, searches, memory operations, and submissions as needed. Consider using `mem_df` early to recall prior reasoning and identify which questions need attention.
-When ready to move on, call `next_day()`.
-{memory_flow_note}
 
 ## SUBMISSION RULES
 - qid must be from an active (`is_resolved=False`) question you identified from `df`
-- Each `submit_forecasts` call must contain exactly one forecast for one qid
-- You may submit again later in the same session to update that qid
-- Max {self.config.max_outcomes_per_question} outcomes per question
-- Outcome names must be REAL predicted answers (e.g. person names, locations, numbers)
+- Each `submit_forecasts` call must contain exactly one forecast for one question ID (`qid`).
+- You may submit again later in the same session to update that `qid`.
+- Maximum of {self.config.max_outcomes_per_question} outcomes allowed per question.
+- Outcome names must be REAL predicted answers (e.g. person names, locations, dates, etc.)
 - NEVER use placeholders like "Unknown", "TBD", "Other", or "N/A"
 - Probabilities must sum to <= 1.0
 

@@ -47,6 +47,10 @@ class BaseSearchTool(ABC):
     def get_article(self, article_id: str) -> Optional[Article]:
         pass
     
+    def count_articles(self, min_date: Optional[date] = None, max_date: Optional[date] = None) -> Optional[int]:
+        """Count articles in a date range. Returns None if not supported."""
+        return None
+
     @property
     @abstractmethod
     def is_available(self) -> bool:

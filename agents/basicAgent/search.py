@@ -37,6 +37,11 @@ class SearchHandler:
             return None
         return getattr(self._search_tool, "chunk_tokens", None)
     
+    def count_articles(self, min_date: Optional[date] = None, max_date: Optional[date] = None) -> Optional[int]:
+        if not self.is_available:
+            return None
+        return self._search_tool.count_articles(min_date=min_date, max_date=max_date)
+
     def set_date(self, current_date: date) -> None:
         self._current_date = current_date
 
