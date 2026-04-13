@@ -12,6 +12,30 @@ from agents.utils.forecast_parser import ParsedAction
 
 from .search import SearchHandler
 
+import re
+
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _validate_date_arg(val: Any) -> Optional[str]:
+    """Return a YYYY-MM-DD string if *val* looks like a valid date, else None.
+
+    When the LLM puts non-date text (e.g. keywords) into from_date / to_date,
+    this silently drops it to None so the search runs unfiltered rather than
+    with a broken filter.
+    """
+    if not isinstance(val, str) or not val.strip():
+        return None
+    val = val.strip()
+    if not _DATE_RE.match(val):
+        return None
+    from datetime import datetime as _datetime
+    try:
+        _datetime.strptime(val, "%Y-%m-%d")
+    except ValueError:
+        return None
+    return val
+
 
 def _as_chat_function_tool(
     *,
@@ -108,13 +132,17 @@ def build_action_tools(
                         },
                         "from_date": {
                             "type": ["string", "null"],
-                            "description": "Optional minimum date filter (YYYY-MM-DD).",
+                            "description": (
+                                "Optional earliest date for articles (YYYY-MM-DD format ONLY, "
+                                "e.g. '2024-06-01'). Must be a valid date, not keywords."
+                            ),
                         },
                         "to_date": {
                             "type": ["string", "null"],
                             "description": (
-                                "Optional maximum date filter (YYYY-MM-DD). If provided, it "
-                                "cannot be after today's date."
+                                "Optional latest date for articles (YYYY-MM-DD format ONLY, "
+                                "e.g. '2025-03-15'). Must be a valid date, not keywords. "
+                                "Cannot be after today's date."
                             ),
                         },
                     },
@@ -560,16 +588,16 @@ def tool_calls_to_parsed_action(
                 assistant_text,
                 calls,
             )
-        frm = args.get("from_date")
-        to = args.get("to_date")
+        frm = _validate_date_arg(args.get("from_date"))
+        to = _validate_date_arg(args.get("to_date"))
         return (
             ParsedAction(
                 action_type="search",
                 code=None,
                 forecasts=None,
                 query=query.strip(),
-                search_from=frm if isinstance(frm, str) and frm.strip() else None,
-                search_to=to if isinstance(to, str) and to.strip() else None,
+                search_from=frm,
+                search_to=to,
                 error=None,
             ),
             assistant_text,

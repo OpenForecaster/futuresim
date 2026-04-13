@@ -87,14 +87,16 @@ def build_action_tools(
                         "from_date": {
                             "type": ["string", "null"],
                             "description": (
-                                "Optional minimum date filter (YYYY-MM-DD)."
+                                "Optional earliest date for articles (YYYY-MM-DD format ONLY, "
+                                "e.g. '2024-06-01'). Must be a valid date, not keywords."
                             ),
                         },
                         "to_date": {
                             "type": ["string", "null"],
                             "description": (
-                                "Optional maximum date filter (YYYY-MM-DD). If provided, it "
-                                "cannot be after today's date."
+                                "Optional latest date for articles (YYYY-MM-DD format ONLY, "
+                                "e.g. '2025-03-15'). Must be a valid date, not keywords. "
+                                "Cannot be after today's date."
                             ),
                         },
                     },
