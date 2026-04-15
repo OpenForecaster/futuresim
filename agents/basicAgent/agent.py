@@ -411,15 +411,16 @@ class BasicAgent(BaseAgent):
             else "This is your first update. "
         )
         articles_text = ""
-        if last_active and self._search_handler.is_available:
-            count = self._search_handler.count_articles(
-                min_date=last_active,
-                max_date=current_date - timedelta(days=self.config.search_cutoff_days),
-            )
-            if count is not None:
-                articles_text = f"{count:,} new articles have been published since your last update and you can access them using the search tool. "
-        if not articles_text:
-            articles_text = "New articles have been published since your last update and you can access them using the search tool. "
+        if last_active:
+            if self._search_handler.is_available:
+                count = self._search_handler.count_articles(
+                    min_date=last_active,
+                    max_date=current_date - timedelta(days=self.config.search_cutoff_days),
+                )
+                if count is not None:
+                    articles_text = f"{count:,} new articles have been published since your last update and you can access them using the search tool. "
+            if not articles_text:
+                articles_text = "New articles have been published since your last update and you can access them using the search tool. "
         return (
             "## UPDATE CADENCE\n"
             f"You have the chance to update your predictions every {self._get_timegap_days()} day(s). Your context is cleared after every session and your memory (along with past predictions) is the only information retained between sessions. {articles_text}"
