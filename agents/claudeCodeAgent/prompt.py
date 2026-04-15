@@ -1,11 +1,20 @@
-"""System prompt builder for Claude Code forecasting agent."""
+"""System prompt builder for Claude Code forecasting agent.
 
-from datetime import date
+Mirrors BasicAgent._build_instructions as closely as possible.
+Sections that are structurally different for Claude Code (MCP tools instead of
+chat-tool function calling, persistent session instead of context-per-day,
+workspace files instead of structured memory, no budget system, no DataFrame
+sandbox) are marked with "CC-SPECIFIC" comments.
+"""
+
+from datetime import date, timedelta
 
 
 def _iso(d) -> str:
     return d.isoformat() if hasattr(d, "isoformat") else str(d)
 
+
+# ── CC-SPECIFIC: workflow and handholding ──────────────────────────────
 
 WORKFLOW_BASIC = """\
 1. Read market.csv to understand active questions (is_resolved == False).
@@ -16,6 +25,133 @@ WORKFLOW_BASIC = """\
 5. Repeat until the simulation ends."""
 
 
+HANDHOLDING_SECTION = """\
+You have full control over your workspace. You can create any files or directories
+that help you perform better. For example, these could be:
+- SKILLS.md documenting forecasting strategies you discover work well.
+- MEMORY.md tracking key lessons, resolution patterns, and calibration insights.
+- Python scripts, analysis tools, data pipelines, or any utilities you need.
+- Organize notes per-question, per-topic, or however suits your workflow.
+Your workspace is totally yours — build whatever infrastructure is needed to perform the best."""
+
+
+# ── Matches BasicAgent._get_source_rules (tool name adapted for MCP) ──
+
+def _get_source_rules(source_name: str) -> str:
+    """Source-specific submission rules."""
+    # Matches BasicAgent._get_source_rules verbatim, except:
+    # - `submit_forecasts` → `submit_forecast` (CC MCP tool name)
+    # - JSON tool-args example → MCP function-call example
+    if source_name == "metaculus_binary":
+        return """
+## BINARY QUESTION RULES
+All questions are Yes/No binary. Your `submit_forecast` tool call MUST use exactly:
+- **"Yes"** for the affirmative outcome
+- **"No"** for the negative outcome
+
+Example tool arguments:
+submit_forecast(question_id="12345", outcomes={"Yes": 0.7, "No": 0.3})
+"""
+    elif source_name == "metaculus_mcq":
+        return """
+## MULTIPLE CHOICE RULES
+Each question has enumerated options shown in the 'options' column.
+Your `submit_forecast` tool call MUST use the EXACT option text from the question.
+Do NOT paraphrase or abbreviate options.
+
+Example tool arguments (if options are ["Candidate A", "Candidate B", "Candidate C"]):
+submit_forecast(question_id="12345", outcomes={"Candidate A": 0.5, "Candidate B": 0.3, "Candidate C": 0.2})
+"""
+    return ""
+
+
+# ── Matches BasicAgent._build_binary_brier_scoring_section (single agent) ──
+
+def _build_binary_brier_scoring_section() -> str:
+    return """\
+## SCORING (Brier Score, Binary)
+You are evaluated on **Brier Score** for binary Yes/No questions.
+- Let p = your predicted probability for **Yes**.
+- Let y = 1 if the resolved outcome is **Yes**, else 0.
+- **Brier Score = (p - y)^2**.
+- **Lower is better** (0 is perfect, 1 is worst).
+
+Key Mechanics:
+1. **Accuracy + Calibration**: Assign probabilities that reflect true likelihood.
+2. **Binary Outcomes**: Use exact outcomes "Yes" and "No".
+3. **Time-Weighted Score**: For each question, your time-weighted score = sum(daily_score) / total_question_days where daily_score is the Brier Skill Score for that day (0 if you have no active prediction on that question) and total_question_days is the number of days the question was active. Each prediction's Brier Skill Score (1 minus sum of squared errors) is weighted by how many days it was active before you updated it. Predictions made earlier carry more weight since they cover more days, so act on your best information as soon as possible rather than waiting.
+4. **Prediction-Count Incentive**: Scores are summed (not averaged) across all questions you predict on.
+"""
+
+
+# ── Matches BasicAgent._build_brier_skill_scoring_section (single agent) ──
+
+def _build_brier_skill_scoring_section(max_outcomes_per_question: int) -> str:
+    return f"""\
+## SCORING (Brier Skill Score)
+You have to output a distribution of (outcome, probability) pairs for each question you make a forecast on.
+You are evaluated on the **Brier Skill Score** = 1 - Σ(p_i - y_i)^2 summed over all outcomes (thus, ranging from -1 to +1), where:
+- p_i = your probability for outcome i
+- y_i = 1 if your outcome i is TRUE (actually occurred), 0 otherwise
+- **Higher is better**: 1.0 = perfect, 0.0 = abstaining from guessing, negative = worse than abstaining.
+
+Key Mechanics:
+1. **Accuracy + Calibration**: Try to guess the most likely outcome(s) and assign calibrated probabilities which reflect the likelihood of the outcome(s) occurring.
+2. **Time-Weighted Score**: For each question, your time-weighted score = sum(daily_score) / total_question_days where daily_score is the Brier Skill Score for that day (0 if you have no active prediction on that question) and total_question_days is the number of days the question was active. Each prediction's Brier Skill Score (1 minus sum of squared errors) is weighted by how many days it was active before you updated it. Predictions made earlier carry more weight since they cover more days, so act on your best information as soon as possible rather than waiting.
+3. **Prediction-Count Incentive**: Your score for each of the metrics like accuracy, brier skill score, time-weighted score is summed (NOT averaged) across all questions you predict on and higher score is better.
+4. **Max Outcomes**: Submit at most {max_outcomes_per_question} outcomes per question.
+5. **No Placeholders**: "Unknown", "TBD", "Other" hurt your score. Be specific.
+"""
+
+
+def _get_scoring_section(source_name: str, max_outcomes_per_question: int) -> str:
+    """Matches BasicAgent._get_scoring_section for single agent."""
+    if source_name == "metaculus_binary":
+        return _build_binary_brier_scoring_section()
+    return _build_brier_skill_scoring_section(max_outcomes_per_question)
+
+
+# ── Matches BasicAgent._build_cadence_section ──
+
+def _build_cadence_section(current_date, start_date, end_date, timegap_days: int = 1) -> str:
+    """Matches BasicAgent._build_cadence_section template.
+    CC-SPECIFIC: The system prompt is written once at startup so we cannot
+    compute last_active_date / next_active_date / article counts dynamically.
+    The "context is cleared" sentence is replaced because CC keeps full LLM
+    context across days (persistent session)."""
+    # Matches BasicAgent: articles_text fallback when count is unavailable.
+    articles_text = "New articles have been published since your last update and you can access them using the search tool. "
+    return (
+        "## UPDATE CADENCE\n"
+        f"You have the chance to update your predictions every {timegap_days} day(s). "
+        # CC-SPECIFIC: replaces BasicAgent's "Your context is cleared after every
+        # session and your memory (along with past predictions) is the only
+        # information retained between sessions."
+        "Your workspace files (memory/, scripts, notes) persist across days — use them to track reasoning and lessons learned. "
+        f"{articles_text}"
+        f"This is your first update. Current date: {_iso(current_date)}. "
+        f"Simulation runs {_iso(start_date)} to {_iso(end_date)}.\n\n"
+    )
+
+
+# ── Matches BasicAgent._search_results_description ──
+
+def _search_results_description(max_search_results: int = 5, chunk_tokens: int = 512) -> str:
+    extra_info = "The search tool uses a hybrid approach to retrieve articles, combining both semantic similarity (through an embedding model) and keyword matching."
+    return (
+        f"You have access to a search tool that returns up to {max_search_results} retrieved article chunks, "
+        f"each roughly {chunk_tokens} tokens long. {extra_info}"
+    )
+
+
+# ── Matches BasicAgent._get_data_notes (single agent mode) ──
+
+def _get_data_notes() -> str:
+    return "Note: `my_prediction` column contains your current forecast as a dict (or None if not yet predicted)."
+
+
+# ── Main prompt builder ───────────────────────────────────────────────
+
 def build_system_prompt(
     workspace: str,
     current_date,
@@ -23,131 +159,91 @@ def build_system_prompt(
     end_date,
     source_context: str = "",
     source_name: str = "openforesight",
-    num_agents: int = 1,
     num_questions: int = 0,
     num_active: int = 0,
     num_resolved: int = 0,
     max_outcomes_per_question: int = 5,
-    single_agent_mode: bool = False,
+    search_cutoff_days: int = 0,
+    timegap_days: int = 1,
 ) -> str:
-    source_block = f"\n{source_context}\n" if source_context else ""
+    # ── Section ordering matches BasicAgent._build_instructions ──
+    #
+    # BasicAgent order:
+    #   1. Opening line
+    #   2. Feedback (resolutions + cumulative perf)    ← CC-SPECIFIC: omitted,
+    #                                                     delivered via MCP next_day
+    #   3. Source context
+    #   4. Source rules
+    #   5. Multi-agent context                         ← CC is always single agent
+    #   6. Cadence section
+    #   7. Memory section                              ← CC-SPECIFIC: HANDHOLDING_SECTION
+    #   8. Scoring section
+    #   9. AVAILABLE DATA (search + DataFrame + notes) ← CC-SPECIFIC: market.csv
+    #                                                     instead of DataFrame
+    #  10. CODE EXECUTION ENVIRONMENT                  ← CC-SPECIFIC: omitted,
+    #                                                     CC has native Bash/tools
+    #  11. RESPONSE FORMAT                             ← CC-SPECIFIC: omitted,
+    #                                                     CC uses MCP tools natively
+    #  12. TOOLS AVAILABLE FOR YOUR USE                ← CC-SPECIFIC: MCP tool format
+    #  13. INTERACTION FLOW (budget)                   ← CC-SPECIFIC: no budget system
+    #  14. SUBMISSION RULES
+    #  15. Begin
 
-    # Source-specific submission rules (matches BasicAgent's _get_source_rules).
-    source_rules = ""
-    if source_name == "metaculus_binary":
-        source_rules = """
-## BINARY QUESTION RULES
-All questions are Yes/No binary. Your submit_forecast call MUST use exactly:
-- "Yes" for the affirmative outcome
-- "No" for the negative outcome
-Example: submit_forecast(question_id="123", outcomes={"Yes": 0.7, "No": 0.3})
-"""
-    elif source_name == "metaculus_mcq":
-        source_rules = """
-## MULTIPLE CHOICE RULES
-Each question has enumerated options shown in the 'options' column of market.csv.
-Your submit_forecast call MUST use the EXACT option text from the question.
-Do NOT paraphrase or abbreviate options.
-"""
+    source_rules = _get_source_rules(source_name)
+    scoring_section = _get_scoring_section(source_name, max_outcomes_per_question)
+    cadence_section = _build_cadence_section(current_date, start_date, end_date, timegap_days)
+    data_notes = _get_data_notes()
 
-    workflow_section = WORKFLOW_BASIC
+    # Matches BasicAgent search_advice text verbatim.
+    search_results_desc = _search_results_description()
+    search_advice = f"\nYou have access to a news article database which is updated **daily**. {search_results_desc}."
 
-    # Scoring section (matches BasicAgent's _build_brier_skill_scoring_section).
-    is_multi = not single_agent_mode and num_agents > 1
-    scoring_title = "Time-Weighted Peer Score (Brier-Skill Based)" if is_multi else "Brier Skill Score"
-    peer_text = ""
-    if is_multi:
-        peer_text = (
-            "\n- **Time-Weighted Peer Score (TW-Peer)**: On each day a prediction is held, "
-            "your Brier Skill Score is compared to the mean of all other agents' scores for "
-            "the same question. These daily differences are summed over the lifetime of the "
-            "prediction. A positive TW-Peer indicates predictions that were consistently more "
-            "accurate than the group average."
-        )
-    relative_mechanic = ""
-    if is_multi:
-        relative_mechanic = (
-            '\n- **Relative Performance (multi-agent)**: Final scoring is relative, '
-            'so you have to outperform the market aggregate to gain positive peer score.'
-        )
-    scoring_section = (
-        f"## SCORING ({scoring_title})\n"
-        "You have to output a distribution of (outcome, probability) pairs for each question you make a forecast on.\n"
-        f"You are evaluated on the **Brier Skill Score** = 1 - Σ(p_i - y_i)^2 summed over all outcomes (thus, ranging from -1 to +1), where:\n"
-        "- p_i = your probability for outcome i\n"
-        "- y_i = 1 if your outcome i is TRUE (actually occurred), 0 otherwise\n"
-        f"- **Higher is better**: 1.0 = perfect, 0.0 = abstaining from guessing, negative = worse than abstaining.{peer_text}\n"
-        "\n"
-        "Key Mechanics:\n"
-        "- **Accuracy + Calibration**: Assign high probability to the TRUE outcome and keep probabilities well-calibrated.\n"
-        "- **Time-Weighted**: The score is summed over all days the prediction was held, so early predictions have higher weight.\n"
-        "- **Prediction-Count Incentive**: Scores are summed (not averaged) across all questions you predict on.\n"
-        f"- **Max Outcomes**: Submit at most {max_outcomes_per_question} outcomes per question.\n"
-        '- **No Placeholders**: "Unknown", "TBD", "Other" hurt your score. Be specific.'
-        f"{relative_mechanic}"
+    # Matches BasicAgent search_tool_line cutoff description.
+    cutoff_desc = "today's date"
+    if search_cutoff_days > 0:
+        cutoff_date = current_date - timedelta(days=search_cutoff_days) if hasattr(current_date, '__sub__') else current_date
+        cutoff_desc = f"{_iso(cutoff_date)} (today - {search_cutoff_days} days)"
+
+    # Matches BasicAgent search_tool_line text verbatim.
+    search_tool_line = (
+        f"- `search_news(query, from_date?, to_date?)`: search the news corpus for evidence. "
+        f"`to_date` is capped at {cutoff_desc}. {search_results_desc}\n"
     )
 
-    # Data notes (matches BasicAgent's _get_data_notes).
-    data_notes = ""
-    if single_agent_mode:
-        data_notes = "Note: `my_prediction` column contains your current forecast as a dict (or None if not yet predicted)."
-    else:
-        data_notes = """Note on market.csv dict columns:
-- `market_aggregate`: the mean probability distribution across all agents' latest predictions
-  from the **previous day** (None on the first day). Access like: row['market_aggregate']['outcome_name'].
-- `my_prediction`: your own latest forecast as a dict (or None if you haven't predicted yet).
-- `num_predictions`: total prediction submissions on this question across all agents and days."""
+    # ── Assemble prompt (matches BasicAgent._build_instructions order) ──
 
-    multi_agent_block = ""
-    if num_agents > 1:
-        multi_agent_block = f"""
-## MULTI-AGENT SETTING
-You are competing against {num_agents - 1} other forecasting agent{"s" if num_agents > 2 else ""}.
-You each predict independently on every day. After each day, predictions are averaged
-into a market aggregate (the `market_aggregate` column in market.csv), visible the next day.
-You are scored relative to competitors: positive time-weighted peer score means your
-predictions are more accurate than the group average.
-"""
+    return f"""\
+You are a forecasting agent. Today is {current_date}. Your goal is to make accurate and calibrated predictions.
 
-    return f"""You are a forecasting agent competing in a simulation. Your objective is to
-achieve the best possible forecasting performance — maximize your Brier Skill Score and
-accuracy across all questions. Use every tool and strategy at your disposal.
+{source_context}
 
-## Simulation
-- Today: {_iso(current_date)}. Simulation runs {_iso(start_date)} to {_iso(end_date)}.
-- Each day, new news articles become available. Search actively every day.
-- You compete against other AI agents. Your score is relative to theirs.
-{source_block}{source_rules}{multi_agent_block}
+{source_rules}
+
+{cadence_section}\
+{HANDHOLDING_SECTION}
+
 {scoring_section}
-
-## Tools (MCP - "forecast" server)
-- search_news: Search news articles (semantic + keyword hybrid). Date-limited to today.
-  Returns up to 5 retrieved article chunks, each roughly 512 tokens long.
-- submit_forecast: Submit {{outcome: probability}} for a question. Probabilities must
-  sum to <= 1.0. Any unassigned mass goes to "Other" implicitly.
-- next_day: End the current day. Blocks until the simulation advances. Returns:
-  - Resolution feedback: which questions resolved, your prediction vs ground truth,
-    your Brier score and peer score per question.
-  - Cumulative performance metrics: accuracy, avg Brier, total peer score.
-  - Reminder that new articles are available.
-
 ## AVAILABLE DATA
-market.csv at {workspace}/market.csv (READ-ONLY) — {num_questions} questions ({num_active} active, {num_resolved} resolved).
+{search_advice}
+market.csv at {workspace}/market.csv (READ-ONLY) — {num_questions} questions ({num_active} active/unresolved, {num_resolved} resolved).
 Columns:
-- qid (str): unique question identifier
-- title (str): question text
-- background (str): context and background information
-- resolution_criteria (str): how the question will be resolved
-- answer_type (str): type of answer expected (e.g. "string (name)", "binary")
-- is_resolved (bool): whether the question has been resolved
-- resolution_date (str): when the question resolves
-- options (str/json): enumerated answer options if applicable
-- market_aggregate (str/json): mean probability distribution from all agents (None on day 1)
-- num_predictions (int): total prediction submissions across all agents
-- my_prediction (str/json): your latest forecast (None if not yet predicted)
-- my_prediction_date (str): date of your latest prediction
+- qid (str) (Question ID)
+- title (str) (Question Content)
+- background (str)
+- resolution_criteria (str)
+- answer_type (str)
+- is_resolved (bool)
+- resolution_date (str)
+- options (object)
+- my_prediction (object)
+- my_prediction_date (object)
 
 {data_notes}
+
+## TOOLS AVAILABLE FOR YOUR USE
+{search_tool_line}\
+- `submit_forecast(question_id, outcomes)`: submit exactly one forecast for one question ID (`qid`).
+- `next_day()`: end the current session and proceed to the next one.
 
 ## Workspace: {workspace}/
 - articles/ — Browsable news articles organized by date (Parquet format).
@@ -156,31 +252,27 @@ Columns:
   persist across days. Use this to track reasoning, lessons learned, calibration
   notes, per-question research, and anything that helps you improve over time.
 - predictions/ — Your submitted forecasts (managed by submit_forecast tool).
-- state.json — Current simulation state (date, resolution events). Read-only.
-
-You have full control over your workspace. You can create any files or structure
-that helps you perform better. For example, these could be:
-- SKILLS.md documenting forecasting strategies you discover work well.
-- MEMORY.md tracking key lessons, resolution patterns, and calibration insights.
-- Python scripts, analysis tools, data pipelines, or any utilities you need.
-- Organize notes per-question, per-topic, or however suits your workflow.
-Your workspace is totally yours — build whatever infrastructure is needed to perform the best.
 
 ## Workflow
-{workflow_section}
+{WORKFLOW_BASIC}
 
-## Submission Rules
-- qid must be from an active (is_resolved=False) question in market.csv.
-- Each submit_forecast call submits one prediction for one qid.
-- You may submit again later to update a prediction for the same qid.
-- Outcome names must be REAL predicted answers (e.g. person names, locations, numbers).
-- NEVER use placeholders like "Unknown", "TBD", "Other", or "N/A".
-- Probabilities must sum to <= 1.0.
+## INTERACTION FLOW
+You can interleave searches and submissions as needed.
+
+## SUBMISSION RULES
+- qid must be from an active (`is_resolved=False`) question you identified from market.csv
+- Each `submit_forecast` call must contain exactly one forecast for one question ID (`qid`).
+- You may submit again later in the same session to update that `qid`.
+- Maximum of {max_outcomes_per_question} outcomes allowed per question.
+- Outcome names must be REAL predicted answers (e.g. person names, locations, dates, etc.)
+- NEVER use placeholders like "Unknown", "TBD", "Other", or "N/A"
+- Probabilities must sum to <= 1.0
 
 ## Rules
 - No web access is available. Use search_news and articles/ for information.
-- market.csv and state.json are read-only. Do not modify them.
+- market.csv is read-only. Do not modify it.
 - You can use Bash, Read, Write, Grep, Glob, and other tools freely in your workspace.
-- Your job is to maximize your forecasting score. Be creative, 
-  systematic, and relentless in researching questions and refining predictions to achieve this goal.
-"""
+- Your job is to maximize performance across metrics: accuracy, brier skill score, and time weighted brier score.
+
+---
+Begin."""

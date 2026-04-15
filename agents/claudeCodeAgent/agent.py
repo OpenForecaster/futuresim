@@ -241,15 +241,12 @@ class ClaudeCodeAgent(BaseAgent):
     def _write_system_prompt(self, forecast_interface: Any = None) -> None:
         source_context = ""
         source_name = "openforesight"
-        num_agents = 1
         num_questions = 0
         num_active = 0
         num_resolved = 0
-        timegap_days = 1
         if forecast_interface is not None:
             source_context = getattr(forecast_interface, "source_context", "")
             source_name = getattr(forecast_interface, "source_name", "openforesight")
-            num_agents = getattr(forecast_interface, "num_agents", 1)
             questions = forecast_interface.list_questions()
             num_active = len(questions)
             num_resolved = len(getattr(forecast_interface, "resolved_questions", []))
@@ -261,11 +258,10 @@ class ClaudeCodeAgent(BaseAgent):
             end_date=self.config.end_date or self._current_date,
             source_context=source_context,
             source_name=source_name,
-            num_agents=num_agents,
             num_questions=num_questions,
             num_active=num_active,
             num_resolved=num_resolved,
-            single_agent_mode=(num_agents <= 1),
+            search_cutoff_days=self.config.search_cutoff_days,
         )
         prompt_path = self._internal_dir / "system_prompt.md"
         with open(prompt_path, "w") as f:

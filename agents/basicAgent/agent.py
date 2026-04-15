@@ -1485,7 +1485,7 @@ class BasicAgent(BaseAgent):
         mechanics: Dict[str, str] = {
             "accuracy_calibration": "**Accuracy + Calibration**: Assign probabilities that reflect true likelihood.",
             "binary_outcomes": "**Binary Outcomes**: Use exact outcomes \"Yes\" and \"No\".",
-            "time_weighted": "**Time-Weighted**: Your final score = sum(daily_score * days_held) / total_question_days. Each prediction's Brier Skill Score (1 minus squared error) is weighted by how many days it was active before you updated it. Predictions made earlier carry more weight since they cover more days, so act on your best information as soon as possible rather than waiting.",
+            "time_weighted": "**Time-Weighted Score**: For each question, your time-weighted score = sum(daily_score) / total_question_days where daily_score is the Brier Skill Score for that day (0 if you have no active prediction on that question) and total_question_days is the number of days the question was active. Each prediction's Brier Skill Score (1 minus sum of squared errors) is weighted by how many days it was active before you updated it. Predictions made earlier carry more weight since they cover more days, so act on your best information as soon as possible rather than waiting.",
             "question_count": "**Prediction-Count Incentive**: Scores are summed (not averaged) across all questions you predict on.",
         }
         if show_peer:
@@ -1524,7 +1524,7 @@ Key Mechanics:
 
         mechanics: Dict[str, str] = {
             "accuracy_calibration": "**Accuracy + Calibration**: Try to guess the most likely outcome(s) and assign calibrated probabilities which reflect the likelihood of the outcome(s) occurring.",
-            "time_weighted": "**Time-Weighted Score**: Your final score = sum(daily_score * days_held) / total_question_days. Each prediction's Brier Skill Score (1 minus squared error) is weighted by how many days it was active before you updated it. Predictions made earlier carry more weight since they cover more days, so act on your best information as soon as possible rather than waiting.",
+            "time_weighted": "**Time-Weighted Score**: For each question, your time-weighted score = sum(daily_score) / total_question_days where daily_score is the Brier Skill Score for that day (0 if you have no active prediction on that question) and total_question_days is the number of days the question was active. Each prediction's Brier Skill Score (1 minus sum of squared errors) is weighted by how many days it was active before you updated it. Predictions made earlier carry more weight since they cover more days, so act on your best information as soon as possible rather than waiting.",
             "question_count": "**Prediction-Count Incentive**: Your score for each of the metrics like accuracy, brier skill score, time-weighted score is summed (NOT averaged) across all questions you predict on and higher score is better.",
             "max_outcomes": f"**Max Outcomes**: Submit at most {self.config.max_outcomes_per_question} outcomes per question.",
             "no_placeholders": "**No Placeholders**: \"Unknown\", \"TBD\", \"Other\" hurt your score. Be specific.",
