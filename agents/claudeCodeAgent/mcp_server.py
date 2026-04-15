@@ -14,7 +14,7 @@ import json
 import os
 import sys
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -72,6 +72,33 @@ def _reload_state() -> None:
     _today_predictions = []
     if _search_handler is not None:
         _search_handler.set_date(_parse_date(_state["current_date"]))
+
+
+def _build_new_articles_message(previous_date: Optional[date], current_date: Optional[date]) -> str:
+    """Match BasicAgent's article-count wording when search can provide a count."""
+    if previous_date is None or current_date is None:
+        return (
+            "New articles may be available in articles/ or via the search_news MCP tool."
+        )
+
+    _ensure_search()
+    if _search_handler is not None and _search_handler.is_available:
+        max_date = current_date - timedelta(days=_search_cutoff_days)
+        count = _search_handler.count_articles(
+            min_date=previous_date,
+            max_date=max_date,
+        )
+        if count is not None:
+            return (
+                f"{count:,} new articles have been published since your last update "
+                "and are available via the search_news tool. New date "
+                "directories are also now present in articles/."
+            )
+
+    return (
+        f"New articles may be available for {current_date.isoformat()} in articles/ "
+        "or via the search_news tool."
+    )
 
 
 def _ensure_search() -> None:
@@ -261,10 +288,11 @@ def next_day() -> str:
             _reload_state()
             status = cont.get("status", "day_advanced")
             new_date = _state.get("current_date", "unknown")
+            new_date_obj = _parse_date(new_date)
 
             response_parts = [
                 f"Day advanced to {new_date}.",
-                f"New articles may be available for {new_date} in articles/ or via the search_news MCP tool.",
+                _build_new_articles_message(_parse_date(cur_date), new_date_obj),
             ]
 
             # --- Per-question resolution feedback with scores ---
@@ -275,7 +303,7 @@ def next_day() -> str:
             ]
             if new_events:
                 response_parts.append(
-                    f"\n## RESULTS SINCE YOUR LAST WAKEUP ({cur_date} -> {new_date})\n"
+                    f"\n## RESULTS SINCE YOUR LAST SESSION ({cur_date} -> {new_date})\n"
                 )
                 for ev in new_events:
                     qid = ev.get("qid", ev.get("question_id", "?"))
@@ -330,14 +358,13 @@ def next_day() -> str:
                     avg_brier = _cumulative["brier_sum"] / rc
                     accuracy = _cumulative["accuracy_count"] / rc * 100
                     response_parts.append(
-                        f"\n## YOUR CUMULATIVE PERFORMANCE\n"
+                        f"\n## YOUR CUMULATIVE PERFORMANCE TILL TODAY\n"
                         f"- Total Predictions: {total_preds} ({rc} resolved)\n"
-                        f"- accuracy: {accuracy:.1f}% | avg brier: {avg_brier:.3f} | "
-                        f"time weighted peer: {_cumulative['tw_peer_sum']:.2f}\n"
+                        f"- accuracy: {accuracy:.1f}% | brier skill score: {avg_brier:.3f} | "
+                        f"time weighted score: {_cumulative['tw_peer_sum']:.2f}\n"
                         f"  accuracy = fraction of resolved questions where your top outcome "
-                        f"matched the truth; avg brier = mean score across resolved questions; "
-                        f"time weighted peer = cumulative peer comparison across all resolved "
-                        f"questions, where positive indicates better-than-average performance"
+                        f"matched the truth; brier skill score = mean brier skill score across resolved questions; "
+                        f"time weighted score = sum of brier skill scores across all resolved questions, across all days you held your respective predictions"
                     )
 
             if status == "simulation_complete":

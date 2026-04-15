@@ -8,6 +8,7 @@ sandbox) are marked with "CC-SPECIFIC" comments.
 """
 
 from datetime import date, timedelta
+from typing import Optional
 
 
 def _iso(d) -> str:
@@ -20,14 +21,12 @@ WORKFLOW_BASIC = """\
 1. Read market.csv to understand active questions (is_resolved == False).
 2. Research using search_news and direct file browsing in articles/.
 3. Submit predictions for each active question using submit_forecast.
-4. Call next_day when done. You'll receive resolution feedback with your Brier score
-   per question — use this to learn from mistakes and improve calibration.
+4. Call next_day when done. You'll receive resolution feedback with your Brier score per question — use this to learn from mistakes and improve calibration.
 5. Repeat until the simulation ends."""
 
 
 HANDHOLDING_SECTION = """\
-You have full control over your workspace. You can create any files or directories
-that help you perform better. For example, these could be:
+You have full control over your workspace. You are free to create any files or directories that help you perform better. For example, these could be:
 - SKILLS.md documenting forecasting strategies you discover work well.
 - MEMORY.md tracking key lessons, resolution patterns, and calibration insights.
 - Python scripts, analysis tools, data pipelines, or any utilities you need.
@@ -113,14 +112,32 @@ def _get_scoring_section(source_name: str, max_outcomes_per_question: int) -> st
 
 # ── Matches BasicAgent._build_cadence_section ──
 
-def _build_cadence_section(current_date, start_date, end_date, timegap_days: int = 1) -> str:
+def _build_new_articles_text(new_articles_count: Optional[int] = None) -> str:
+    """Match BasicAgent's article-update wording when a count is available."""
+    if new_articles_count is not None:
+        return (
+            f"{new_articles_count:,} new articles have been published since your "
+            "last update and you can access them using the search tool. "
+        )
+    return (
+        "New articles have been published since your last update and you can "
+        "access them using the search tool. "
+    )
+
+
+def _build_cadence_section(
+    current_date,
+    start_date,
+    end_date,
+    timegap_days: int = 1,
+    new_articles_count: Optional[int] = None,
+) -> str:
     """Matches BasicAgent._build_cadence_section template.
     CC-SPECIFIC: The system prompt is written once at startup so we cannot
-    compute last_active_date / next_active_date / article counts dynamically.
+    update article counts dynamically across future wakeups.
     The "context is cleared" sentence is replaced because CC keeps full LLM
     context across days (persistent session)."""
-    # Matches BasicAgent: articles_text fallback when count is unavailable.
-    articles_text = "New articles have been published since your last update and you can access them using the search tool. "
+    articles_text = _build_new_articles_text(new_articles_count)
     return (
         "## UPDATE CADENCE\n"
         f"You have the chance to update your predictions every {timegap_days} day(s). "
@@ -128,7 +145,7 @@ def _build_cadence_section(current_date, start_date, end_date, timegap_days: int
         # session and your memory (along with past predictions) is the only
         # information retained between sessions."
         "Your workspace files (memory/, scripts, notes) persist across days — use them to track reasoning and lessons learned. "
-        f"{articles_text}"
+        "Articles are available via the search tool and in the articles/ directory. "
         f"This is your first update. Current date: {_iso(current_date)}. "
         f"Simulation runs {_iso(start_date)} to {_iso(end_date)}.\n\n"
     )
@@ -165,6 +182,7 @@ def build_system_prompt(
     max_outcomes_per_question: int = 5,
     search_cutoff_days: int = 0,
     timegap_days: int = 1,
+    new_articles_count: Optional[int] = None,
 ) -> str:
     # ── Section ordering matches BasicAgent._build_instructions ──
     #
@@ -191,12 +209,18 @@ def build_system_prompt(
 
     source_rules = _get_source_rules(source_name)
     scoring_section = _get_scoring_section(source_name, max_outcomes_per_question)
-    cadence_section = _build_cadence_section(current_date, start_date, end_date, timegap_days)
+    cadence_section = _build_cadence_section(
+        current_date,
+        start_date,
+        end_date,
+        timegap_days,
+        new_articles_count=new_articles_count,
+    )
     data_notes = _get_data_notes()
 
     # Matches BasicAgent search_advice text verbatim.
     search_results_desc = _search_results_description()
-    search_advice = f"\nYou have access to a news article database which is updated **daily**. {search_results_desc}."
+    search_advice = f"\nYou have access to a news article database which is updated **daily**. {search_results_desc}. You can also access the articles directly in the articles/ directory."
 
     # Matches BasicAgent search_tool_line cutoff description.
     cutoff_desc = "today's date"
@@ -225,7 +249,7 @@ You are a forecasting agent. Today is {current_date}. Your goal is to make accur
 {scoring_section}
 ## AVAILABLE DATA
 {search_advice}
-market.csv at {workspace}/market.csv (READ-ONLY) — {num_questions} questions ({num_active} active/unresolved, {num_resolved} resolved).
+You can access the market.csv file at {workspace}/market.csv (READ-ONLY) containing {num_questions} questions ({num_active} active/unresolved, {num_resolved} resolved).
 Columns:
 - qid (str) (Question ID)
 - title (str) (Question Content)
@@ -246,18 +270,9 @@ Columns:
 - `next_day()`: end the current session and proceed to the next one.
 
 ## Workspace: {workspace}/
-- articles/ — Browsable news articles organized by date (Parquet format).
-  New date directories appear after calling next_day. You can use pandas to read them.
-- memory/ — Your persistent notes directory. Read and write freely. Files here
-  persist across days. Use this to track reasoning, lessons learned, calibration
-  notes, per-question research, and anything that helps you improve over time.
+- articles/ — Browsable news articles organized by date (Parquet format). New date directories appear after calling next_day.
+- memory/ — Your persistent notes directory. Read and write freely. Files here persist across days. Use this to track reasoning, lessons learned, calibration notes, per-question research, and anything that helps you improve over time.
 - predictions/ — Your submitted forecasts (managed by submit_forecast tool).
-
-## Workflow
-{WORKFLOW_BASIC}
-
-## INTERACTION FLOW
-You can interleave searches and submissions as needed.
 
 ## SUBMISSION RULES
 - qid must be from an active (`is_resolved=False`) question you identified from market.csv
@@ -272,7 +287,7 @@ You can interleave searches and submissions as needed.
 - No web access is available. Use search_news and articles/ for information.
 - market.csv is read-only. Do not modify it.
 - You can use Bash, Read, Write, Grep, Glob, and other tools freely in your workspace.
-- Your job is to maximize performance across metrics: accuracy, brier skill score, and time weighted brier score.
+- Your job is to maximize performance across metrics: accuracy, brier skill score, and time weighted score.
 
 ---
 Begin."""

@@ -132,9 +132,9 @@ class FeedbackHandler:
         
         last_active_date = getattr(forecast_interface, "last_active_date", None)
         if last_active_date:
-            resolved_header = f"## RESULTS SINCE YOUR LAST WAKEUP ({last_active_date} -> {current_date})"
+            resolved_header = f"## RESULTS SINCE YOUR LAST SESSION ({last_active_date} -> {current_date})"
         else:
-            resolved_header = "## RESULTS SINCE YOUR LAST WAKEUP"
+            resolved_header = "## RESULTS SINCE YOUR LAST SESSION"
 
         return {
             'resolved_today': resolved_today,
@@ -171,30 +171,29 @@ class FeedbackHandler:
         # Only show if we have at least one resolved question or prediction
         metrics = feedback_data.get('metrics', {})
         if metrics.get('total_predictions', 0) > 0:
-            m_lines = ["## YOUR CUMULATIVE PERFORMANCE"]
+            m_lines = ["## YOUR CUMULATIVE PERFORMANCE TILL TODAY"]
             m_lines.append(f"- Total Predictions: {metrics['total_predictions']} ({metrics['num_resolved']} resolved)")
             
             if metrics['num_resolved'] > 0:
                 if show_tw_peer:
                     m_lines.append(
                         f"- accuracy: {metrics['accuracy']:.1f}% | "
-                        f"avg brier: {metrics['avg_brier']:.3f} | "
-                        f"time weighted peer: {metrics['tw_peer_score']:.2f}"
+                        f"brier skill score: {metrics['avg_brier']:.3f} | "
+                        f"time weighted score: {metrics['tw_peer_score']:.2f}"
                     )
                     m_lines.append(
-                        "  accuracy = fraction of resolved questions where your top outcome matched the truth; "
-                        "avg brier = mean score across resolved questions; "
-                        "time weighted peer = cumulative peer comparison across all resolved questions, "
-                        "where positive indicates better-than-average performance"
+                        " accuracy = fraction of resolved questions where your top outcome matched the truth; "
+                        "brier skill score = mean brier skill score across resolved questions; "
+                        "time weighted score = sum of brier skill scores across all resolved questions, across all days you held your respective predictions"
                     )
                 else:
                     m_lines.append(
                         f"- accuracy: {metrics['accuracy']:.1f}% | "
-                        f"avg brier: {metrics['avg_brier']:.3f}"
+                        f"brier skill score: {metrics['avg_brier']:.3f}"
                     )
                     m_lines.append(
-                        "  accuracy = fraction of resolved questions where your top outcome matched the truth; "
-                        "avg brier = mean score across resolved questions"
+                        " accuracy = fraction of resolved questions where your top outcome matched the truth; "
+                        "brier skill score = mean brier skill score across resolved questions"
                     )
             else:
                 m_lines.append("- (Waiting for resolutions to compute scores)")

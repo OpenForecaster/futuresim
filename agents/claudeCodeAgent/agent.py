@@ -244,6 +244,7 @@ class ClaudeCodeAgent(BaseAgent):
         num_questions = 0
         num_active = 0
         num_resolved = 0
+        new_articles_count = None
         if forecast_interface is not None:
             source_context = getattr(forecast_interface, "source_context", "")
             source_name = getattr(forecast_interface, "source_name", "openforesight")
@@ -251,6 +252,9 @@ class ClaudeCodeAgent(BaseAgent):
             num_active = len(questions)
             num_resolved = len(getattr(forecast_interface, "resolved_questions", []))
             num_questions = num_active + num_resolved
+            last_active_date = getattr(forecast_interface, "last_active_date", None)
+            prompt_date = self.config.start_date or self._current_date
+            new_articles_count = self._count_new_articles(last_active_date, prompt_date)
         prompt = build_system_prompt(
             workspace=str(self.workspace),
             current_date=self.config.start_date or self._current_date,
@@ -262,10 +266,33 @@ class ClaudeCodeAgent(BaseAgent):
             num_active=num_active,
             num_resolved=num_resolved,
             search_cutoff_days=self.config.search_cutoff_days,
+            new_articles_count=new_articles_count,
         )
         prompt_path = self._internal_dir / "system_prompt.md"
         with open(prompt_path, "w") as f:
             f.write(prompt)
+
+    def _count_new_articles(
+        self,
+        last_active_date: Optional[date],
+        current_date: Optional[date],
+    ) -> Optional[int]:
+        """Match BasicAgent's article-count window when search supports it."""
+        if (
+            self.search_tool is None
+            or not getattr(self.search_tool, "is_available", False)
+            or last_active_date is None
+            or current_date is None
+        ):
+            return None
+        max_date = current_date - timedelta(days=self.config.search_cutoff_days)
+        try:
+            return self.search_tool.count_articles(
+                min_date=last_active_date,
+                max_date=max_date,
+            )
+        except Exception:
+            return None
 
     def _detect_embedding_server(self) -> str:
         """Check if a vLLM embedding server is already running (started by the driver).
