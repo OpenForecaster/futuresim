@@ -90,7 +90,6 @@ class AllQAgent(BasicAgent):
         return f"""You just finished forecasting question {qid}: "{question_title}".
 
 Call exactly one tool now: `mem_add`.
-Do not answer with plain text.
 
 Requirements:
 - qid must be exactly "{qid}"
@@ -104,7 +103,6 @@ Requirements:
         return f"""You just finished forecasting question {qid}: "{question_title}".
 
 Call exactly one tool now: `memory_new`.
-Do not answer with plain text.
 
 Requirements:
 - store only question-specific reasoning, evidence, calibration, and update triggers
@@ -605,22 +603,25 @@ Requirements:
 
         if self.warmed_up or (self.start_date and current_date > self.start_date):
             reminder = (
-                "\n\nIMPORTANT: You have predictions on "
+                "IMPORTANT: You have predictions on "
                 f"{predicted_count} out of {active_count} active questions.\n"
-                "You can check your existing predictions by making the following query:\n"
-                "  df[df['my_prediction'].notna()][['qid','title','my_prediction']]\n\n"
+                "Tip: You can check your existing predictions by making the following query - `df[df['my_prediction'].notna()][['qid','title','my_prediction']]`\n\n"
                 "UPDATE RULES:\n"
                 "- Do NOT re-predict questions from scratch unless you find specific new evidence.\n"
-                "- Only update a prediction if you find SPECIFIC NEW evidence (news, data) that updates your view.\n"
+                "- Only update a prediction if you find SPECIFIC NEW evidence (news, data) that updates your view.\n\n"
                 "PRIORITIES FOR UPDATES:\n"
                 "1. Questions without predictions (if any)\n"
                 "2. Questions where today's news search reveals new information\n"
                 "3. Questions approaching resolution date that you haven't checked recently\n"
                 "4. Skip questions where nothing has changed"
             )
-            # Insert before "You have {max_actions} actions..."
-            if "You have" in base_instructions:
-                base_instructions = base_instructions.replace("You have", reminder + "\n\nYou have", 1)
+            cadence_section = self._build_cadence_section(current_date)
+            if cadence_section in base_instructions:
+                base_instructions = base_instructions.replace(
+                    cadence_section,
+                    cadence_section + reminder + "\n\n",
+                    1,
+                )
             else:
                 base_instructions += reminder
                 
@@ -734,7 +735,8 @@ Key Mechanics:
                 f"{self._search_results_description()}\n"
             )
 
-        return f"""You are a forecasting agent. Today is {current_date}.
+        return f"""You are a forecasting agent. Your goal is to make accurate and calibrated predictions. Today is {current_date}.
+
 Target Question: {q.title} (ID: {q.qid})
 
 Background: {q.background}
@@ -748,12 +750,12 @@ Answer Type: {q.answer_type}
 {self._build_budget_overview(warmup=True, per_question=True)}
 This is per-question warmup mode, so `query_df` is unavailable.
 
-## RESPONSE FORMAT
-Use the function tools from the tool schema. Call exactly one tool per turn. Do not emit XML action blocks.
 
 ## TOOLS YOU SHOULD USE
+Use the function tools from the tool schema. Call exactly one tool per turn.
 {search_block}- `submit_forecasts(forecasts)`: submit exactly one forecast for qid `{q.qid}`.
 - `next_day()`: skip this question only if you truly have no forecast to submit.
+
 
 ## SUBMISSION RULES
 - qid must be {q.qid}
@@ -764,6 +766,8 @@ Use the function tools from the tool schema. Call exactly one tool per turn. Do 
 - A successful `submit_forecasts` call ends this question's warmup interaction.
 
 {budget_start_block}
+
+Begin.
 """
 
 

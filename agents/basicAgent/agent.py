@@ -1661,7 +1661,10 @@ Use the reasoning and insights above to inform today's forecasts.
                 "- `search_news(query, from_date?, to_date?)`: search the news corpus for evidence. "
                 f"`to_date` is capped at {cutoff_desc}. {self._search_results_description()}\n"
             )
-            search_advice = f"\nYou have access to a news article database which is updated **daily**. {self._search_results_description()}."
+            search_advice = (
+                f"You have access to a news article database which is updated **daily**. "
+                f"{self._search_results_description()}"
+            )
 
         memory_tools_section = ""
         if isinstance(self._memory, ActiveMemory):
@@ -1674,58 +1677,88 @@ Use the reasoning and insights above to inform today's forecasts.
                 "- `memory_retrieve` / `memory_new` / `memory_update` / `memory_delete`: manage reusable memory entries.\n"
             )
 
-        return f"""You are a forecasting agent. Today is {current_date}. Your goal is to make accurate and calibrated predictions.
+        intro_sections = [
+            self._format_and_cache_feedback(current_date).strip(),
+            str(getattr(self._forecast_interface, 'source_context', '') or '').strip(),
+            self._get_source_rules().strip(),
+            self._get_multiagent_context().strip(),
+            f"{cadence_section}{memory_section}{self._get_scoring_section()}".strip(),
+        ]
+        intro_block = "\n\n".join(section for section in intro_sections if section)
 
-{self._format_and_cache_feedback(current_date)}
+        available_data_lines = ["## AVAILABLE DATA"]
+        if search_advice:
+            available_data_lines.append(search_advice)
+        available_data_lines.extend(
+            [
+                f"You also have access to a pandas DataFrame `df` with {df_info['n_rows']} questions ({df_info['n_active']} active/unresolved, {df_info['n_resolved']} resolved).",
+                "",
+                "Column descriptions of the DataFrame:",
+                str(df_info['columns_desc']),
+                "",
+                self._get_data_notes(),
+            ]
+        )
+        available_data_section = "\n".join(available_data_lines)
 
-{getattr(self._forecast_interface, 'source_context', '')}
+        code_env_lines = [
+            "## CODE EXECUTION ENVIRONMENT",
+            "You have access to a Python code execution environment where your code runs in a sandbox with these variables pre-defined:",
+            "- `df`: the DataFrame with the questions and your predictions",
+            "- `pd`: pandas module",
+            f"- `today`: date object for {current_date}",
+            "- `date`, `datetime`, `timedelta`: from datetime module",
+        ]
+        if isinstance(self._memory, ActiveMemory):
+            code_env_lines.append(
+                "- `mem_df`: your question-specific memory DataFrame (you can join with df on qid to decide what to revisit)"
+            )
+        code_env_lines.append(
+            "Standard builtins (len, str, int, float, min, max, sum, sorted, range, etc.) are available. "
+            "A small safe subset of stdlib imports (for example datetime, json, math, re, ast) is allowed. "
+            "External file, network, process, and private-attribute access is blocked; stay within in-memory DataFrame/pandas operations."
+        )
+        code_env_section = "\n".join(code_env_lines)
 
-{self._get_source_rules()}
+        tip_line = ""
+        if isinstance(self._memory, (StructuredMemory, ActiveMemory)):
+            tip_line = (
+                "Tip: After submitting a forecast, consider saving your reasoning and key evidence for that QID using mem_add/mem_update. "
+                "At end of day, you will get another opportunity to update your memory."
+            )
 
-{self._get_multiagent_context()}
-{cadence_section}{memory_section}{self._get_scoring_section()}
-## AVAILABLE DATA
-{search_advice}
-You also have access to a pandas DataFrame `df` with {df_info['n_rows']} questions ({df_info['n_active']} active/unresolved, {df_info['n_resolved']} resolved).
-
-Column descriptions of the DataFrame:
-{df_info['columns_desc']}
-
-{self._get_data_notes()}
-
-## CODE EXECUTION ENVIRONMENT
-You have access to a Python code execution environment where your code runs in a sandbox with these variables pre-defined:
-- `df`: the DataFrame with the questions and your predictions
-- `pd`: pandas module
-- `today`: date object for {current_date}
-- `date`, `datetime`, `timedelta`: from datetime module
-{('- `mem_df`: your question-specific memory DataFrame (you can join with df on qid to decide what to revisit)' + chr(10)) if isinstance(self._memory, ActiveMemory) else ''}Standard builtins (len, str, int, float, min, max, sum, sorted, range, etc.) are available. A small safe subset of stdlib imports (for example datetime, json, math, re, ast) is allowed. External file, network, process, and private-attribute access is blocked; stay within in-memory DataFrame/pandas operations.
-
-## RESPONSE FORMAT
-Use the function tools from the tool schema. {'You may call multiple tools per turn.' if self.config.parallel_tool_calls else 'Call exactly one tool per turn.'} 
-
-## TOOLS AVAILABLE FOR YOUR USE
-- `query_df(code)`: inspect questions and your existing predictions. Use `print(...)` for outputs.
-{search_tool_line}{memory_tools_section}- `submit_forecasts(forecasts)`: submit exactly one forecast for exactly one question ID (`qid`).
-- `next_day()`: end the current session and proceed to the next one.
-
-## INTERACTION FLOW
-{self._build_budget_overview()}
-You can interleave queries, searches, memory operations, and submissions as needed. Consider using `mem_df` early to recall prior reasoning and identify which questions need attention.
-
-## SUBMISSION RULES
-- qid must be from an active (`is_resolved=False`) question you identified from `df`
-- Each `submit_forecasts` call must contain exactly one forecast for one question ID (`qid`).
-- You may submit again later in the same session to update that `qid`.
-- Maximum of {self.config.max_outcomes_per_question} outcomes allowed per question.
-- Outcome names must be REAL predicted answers (e.g. person names, locations, dates, etc.)
-- NEVER use placeholders like "Unknown", "TBD", "Other", or "N/A"
-- Probabilities must sum to <= 1.0
-
-{('Tip: After submitting a forecast, consider saving your reasoning and key evidence for that QID using mem_add/mem_update. At end of day, you will get another opportunity to update your memory.' + chr(10)) if isinstance(self._memory, (StructuredMemory, ActiveMemory)) else ''}
-
----
-{budget_start_block}Begin."""
+        sections = [
+            f"You are a forecasting agent. Today is {current_date}. Your goal is to make accurate and calibrated predictions.",
+            intro_block,
+            available_data_section,
+            code_env_section,
+            (
+                "## TOOLS AVAILABLE FOR YOUR USE\n"
+                "Use the function tools from the tool schema. Call exactly one tool per turn.\n"
+                "- `query_df(code)`: inspect questions and your existing predictions. Use `print(...)` for outputs.\n"
+                f"{search_tool_line}{memory_tools_section}"
+                "- `submit_forecasts(forecasts)`: submit exactly one forecast for exactly one question ID (`qid`).\n"
+                "- `next_day()`: end the current session and proceed to the next one."
+            ),
+            (
+                "## INTERACTION FLOW\n"
+                f"{self._build_budget_overview()}"
+                "You can interleave queries, searches, memory operations, and submissions as needed. Consider using `mem_df` early to recall prior reasoning and identify which questions need attention."
+            ),
+            (
+                "## SUBMISSION RULES\n"
+                "- qid must be from an active (`is_resolved=False`) question you identified from `df`\n"
+                "- Each `submit_forecasts` call must contain exactly one forecast for one question ID (`qid`).\n"
+                "- You may submit again later in the same session to update that `qid`.\n"
+                f"- Maximum of {self.config.max_outcomes_per_question} outcomes allowed per question.\n"
+                "- Outcome names must be REAL predicted answers (e.g. person names, locations, dates, etc.)\n"
+                "- NEVER use placeholders like \"Unknown\", \"TBD\", \"Other\", or \"N/A\"\n"
+                "- Probabilities must sum to <= 1.0"
+            ),
+            tip_line,
+            f"---\n{budget_start_block}Begin.",
+        ]
+        return "\n\n".join(section for section in sections if section)
     
     def _prompt_memory_update(self, messages: List[Dict[str, str]],
                                forecast_interface, current_date: date) -> None:
@@ -1798,7 +1831,6 @@ You can interleave queries, searches, memory operations, and submissions as need
 
 {resolution_recap}You currently have {self._memory.entry_count} memory entries (max {max_ent}).
 {index_block}
-
 ### STEP 1: Extract lessons from resolved questions
 For each question resolved this session, create a lesson entry:
 - Name it `q<QID>-lesson-<topic>` (e.g., `q247-lesson-ceremony-precedent`)
@@ -1890,7 +1922,6 @@ Only store what is NOT recoverable from the DataFrame or search.
 
 Cross-question patterns and calibration notes. NOT for question-specific reasoning (use mem_df for that).
 {index_block}
-
 ### STEP 1: Extract lessons from resolved questions
 For each question resolved this session:
 - Create a meta-insight lesson entry (not mem_df — lessons are cross-question):
@@ -1923,6 +1954,7 @@ Descriptions should answer: "Why would future-me read this?" — not just "What 
 - Do NOT just create entries like `2025-05-14-updates-summary` that just list probability changes
 - Do NOT just store general forecasting advice or easily searchable facts
 
+
 ## RESPONSE FORMAT
 Use the function tools from the tool schema. {'You may call multiple tools per turn for efficiency.' if self.config.parallel_tool_calls else 'Call one tool per turn.'}
 Use `mem_add`, `mem_update`, and `mem_delete` for question-specific notes.
@@ -1930,4 +1962,6 @@ Use `memory_retrieve`, `memory_new`, `memory_update`, and `memory_delete` for me
 {chr(10) + 'To avoid read/write conflicts, batch your calls by type:' + chr(10) + '- First turn(s): batch all `memory_retrieve` calls to review entries you need' + chr(10) + '- Next turn(s): batch all write operations based on what you read' + chr(10) if self.config.parallel_tool_calls else ''}
 You do NOT need to exhaust your remaining token budget — call `next_day()` as soon as your essential updates are complete.
 
-Start with Step 1. If questions resolved this session, create lesson entries first."""
+Start with Step 1. If questions resolved this session, create lesson entries first.
+
+Begin."""

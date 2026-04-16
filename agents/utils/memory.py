@@ -618,11 +618,11 @@ class ActiveMemory:
                 "Entries you interacted with today (showing stored memory):\n"
                 + "\n".join(expanded_lines)
             )
-        if compact_lines:
-            header = "  QID | Question | Last Updated | Category"
-            sections.append(
-                "Other entries:\n" + header + "\n" + "\n".join(compact_lines)
-            )
+        # if compact_lines:
+        #     header = "  QID | Question | Last Updated | Category"
+        #     sections.append(
+        #         "Other entries:\n" + header + "\n" + "\n".join(compact_lines)
+        #     )
 
         return "\n\n".join(sections) if sections else "(empty)"
 
