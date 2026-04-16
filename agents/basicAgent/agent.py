@@ -349,6 +349,38 @@ class BasicAgent(BaseAgent):
         )
         return build_start_budget_status(tracker.settings)
 
+    def _build_prompt_seed_budget_block(
+        self,
+        *,
+        warmup: bool = False,
+        max_actions_override: Optional[int] = None,
+        leading_newline: bool = False,
+        trailing_newlines: int = 2,
+    ) -> str:
+        """Render the start-of-prompt budget block with a prompt-seed clarification."""
+        status = self._build_start_budget_status(
+            warmup=warmup,
+            max_actions_override=max_actions_override,
+        )
+        if not status:
+            return ""
+
+        prefix = "\n" if leading_newline else ""
+        suffix = "\n" * max(trailing_newlines, 0)
+        return (
+            f"{prefix}Budget at start:\n"
+            f"{status}\n"
+            "Note: current message tokens are not accounted for yet."
+            f"{suffix}"
+        )
+
+    @staticmethod
+    def _normalize_prompt_heading_spacing(prompt: str) -> str:
+        """Ensure `##` section headings are separated by two blank lines."""
+        if not prompt:
+            return prompt
+        return re.sub(r"\n{1,}(?=## )", "\n\n\n", prompt)
+
     def _build_force_submit_preamble(self, budget: BudgetTracker) -> str:
         """Shared force-submit wording for action/token-constrained loops."""
         lines = [
@@ -1607,8 +1639,7 @@ Example tool arguments (if options are ["Candidate A", "Candidate B", "Candidate
     def _build_instructions(self, current_date: date) -> str:
         """Build the daily tool-calling prompt."""
         df_info = self._query_handler.get_info()
-        budget_start_status = self._build_start_budget_status()
-        budget_start_block = f"Budget at start:\n{budget_start_status}\n\n" if budget_start_status else ""
+        budget_start_block = self._build_prompt_seed_budget_block()
         cadence_section = self._build_cadence_section(current_date)
 
         memory_section = ""
@@ -1662,8 +1693,7 @@ Use the reasoning and insights above to inform today's forecasts.
                 f"`to_date` is capped at {cutoff_desc}. {self._search_results_description()}\n"
             )
             search_advice = (
-                f"You have access to a news article database which is updated **daily**. "
-                f"{self._search_results_description()}"
+                f"You have access to a news article database which is updated **daily** through a search tool, that you can use to find evidence for your forecasts."
             )
 
         memory_tools_section = ""
@@ -1758,7 +1788,9 @@ Use the reasoning and insights above to inform today's forecasts.
             tip_line,
             f"---\n{budget_start_block}Begin.",
         ]
-        return "\n\n".join(section for section in sections if section)
+        return self._normalize_prompt_heading_spacing(
+            "\n\n".join(section for section in sections if section)
+        )
     
     def _prompt_memory_update(self, messages: List[Dict[str, str]],
                                forecast_interface, current_date: date) -> None:
@@ -1824,7 +1856,7 @@ Use the reasoning and insights above to inform today's forecasts.
             index_block = f"Current memory index:\n{memory_index}\n"
         resolution_recap = self._build_resolution_recap_for_memory()
 
-        return f"""End of session {current_date}. Update your memory now.
+        prompt = f"""End of session {current_date}. Update your memory now.
 
 ## MEMORY UPDATE
 {self._build_memory_carryover_note(current_date)}
@@ -1866,10 +1898,11 @@ Use `memory_retrieve`, `memory_new`, `memory_update`, and `memory_delete` for me
 You do NOT need to exhaust your remaining token budget — call `next_day()` as soon as your essential updates are complete.
 
 Start with Step 1. If questions resolved this session, create lesson entries first."""
+        return self._normalize_prompt_heading_spacing(prompt)
 
     def _build_plain_memory_prompt(self, current_date: date) -> str:
         """Build the plain-memory update prompt (full replacement text)."""
-        return f"""End of session {current_date}. You can now update your memory.
+        prompt = f"""End of session {current_date}. You can now update your memory.
 
 ## MEMORY UPDATE
 {self._build_memory_carryover_note(current_date)}
@@ -1888,6 +1921,7 @@ Respond with exactly one of:
 - `NO_MEMORY_UPDATE` if you want to keep the current memory unchanged.
 
 Current memory length: {len(self._memory)} characters"""
+        return self._normalize_prompt_heading_spacing(prompt)
 
     # =========================================================================
     # Active Memory (mem_df + reduced meta-insights)
@@ -1903,7 +1937,7 @@ Current memory length: {len(self._memory)} characters"""
             index_block = f"Current meta-insight index:\n{meta_index}\n"
         resolution_recap = self._build_resolution_recap_for_memory()
 
-        return f"""End of session {current_date}. Update your memory now.
+        prompt = f"""End of session {current_date}. Update your memory now.
 
 ## MEMORY UPDATE
 {self._build_memory_carryover_note(current_date)}
@@ -1927,7 +1961,7 @@ For each question resolved this session:
 - Create a meta-insight lesson entry (not mem_df — lessons are cross-question):
   Name it `q<QID>-lesson-<topic>` (e.g., `q247-lesson-ceremony-precedent`)
   Content: What you predicted, what actually happened, WHY you were wrong/right, and a transferable rule for similar future questions
-- Delete the old mem_df entry for that QID — it's stale now
+- Delete the old mem_df entry for that QID using the `memory_delete` tool call - it's stale now
 - If no questions resolved this session, skip to Step 2.
 
 Example lesson entry:
@@ -1936,7 +1970,7 @@ Example lesson entry:
   content: Predicted St. Peter's Square 0.70, Lateran 0.10. Truth: St. Peter's Square. Brier +0.85. Lesson: For ceremonial events with strong historical patterns (all recent popes used same venue), assign 0.85+ to the precedent option.
 
 ### STEP 2: Update mem_df for questions you interacted with today
-For each question you researched or forecasted today, add or update a mem_df entry with your current reasoning and key evidence.
+For each question you researched or forecasted today, add (using `memory_new`) or update (using `memory_update`) a mem_df entry with your current reasoning and key evidence.
 - Include: your prediction, key evidence, sources, calibration notes
 - Max 1000 chars — be concise but specific
 
@@ -1952,10 +1986,10 @@ Descriptions should answer: "Why would future-me read this?" — not just "What 
 ### Rules
 - Every entry must contain a reusable insight or reasoning chain — NOT a log of what you did
 - Do NOT just create entries like `2025-05-14-updates-summary` that just list probability changes
-- Do NOT just store general forecasting advice or easily searchable facts
 
 
 ## RESPONSE FORMAT
+You will get to take multiple turns/actions to reason and make your updates.
 Use the function tools from the tool schema. {'You may call multiple tools per turn for efficiency.' if self.config.parallel_tool_calls else 'Call one tool per turn.'}
 Use `mem_add`, `mem_update`, and `mem_delete` for question-specific notes.
 Use `memory_retrieve`, `memory_new`, `memory_update`, and `memory_delete` for meta-insights.
@@ -1965,3 +1999,4 @@ You do NOT need to exhaust your remaining token budget — call `next_day()` as 
 Start with Step 1. If questions resolved this session, create lesson entries first.
 
 Begin."""
+        return self._normalize_prompt_heading_spacing(prompt)

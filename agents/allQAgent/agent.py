@@ -95,7 +95,6 @@ Requirements:
 - qid must be exactly "{qid}"
 - question should be "{question_title}"
 - memory should store only question-specific reasoning, evidence, calibration, and update triggers
-- do not store cross-question lessons or cleanup notes
 - keep memory concise and specific"""
 
     @staticmethod
@@ -613,7 +612,7 @@ Requirements:
                 "1. Questions without predictions (if any)\n"
                 "2. Questions where today's news search reveals new information\n"
                 "3. Questions approaching resolution date that you haven't checked recently\n"
-                "4. Skip questions where nothing has changed"
+                "4. Skip questions where there is no new evidence"
             )
             cadence_section = self._build_cadence_section(current_date)
             if cadence_section in base_instructions:
@@ -698,8 +697,11 @@ Key Mechanics:
         Builds a focused prompt for Day 0 warmup.
         Includes Brier score context and question details.
         """
-        budget_start_status = self._build_start_budget_status(warmup=True)
-        budget_start_block = f"\nBudget at start:\n{budget_start_status}" if budget_start_status else ""
+        budget_start_block = self._build_prompt_seed_budget_block(
+            warmup=True,
+            leading_newline=True,
+            trailing_newlines=0,
+        )
 
         # Optional: include existing prediction + market aggregate (without DF access).
         # We only include this section if there's something non-empty to show; on day 0
@@ -735,7 +737,7 @@ Key Mechanics:
                 f"{self._search_results_description()}\n"
             )
 
-        return f"""You are a forecasting agent. Your goal is to make accurate and calibrated predictions. Today is {current_date}.
+        prompt = f"""You are a forecasting agent. Your goal is to make accurate and calibrated predictions. Today is {current_date}.
 
 Target Question: {q.title} (ID: {q.qid})
 
@@ -748,7 +750,6 @@ Answer Type: {q.answer_type}
 
 ## INTERACTION FLOW
 {self._build_budget_overview(warmup=True, per_question=True)}
-This is per-question warmup mode, so `query_df` is unavailable.
 
 
 ## TOOLS YOU SHOULD USE
@@ -769,6 +770,7 @@ Use the function tools from the tool schema. Call exactly one tool per turn.
 
 Begin.
 """
+        return self._normalize_prompt_heading_spacing(prompt)
 
 
 class AllQDailyAgent(AllQAgent):
