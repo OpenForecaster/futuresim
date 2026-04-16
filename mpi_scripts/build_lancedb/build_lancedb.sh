@@ -37,7 +37,7 @@ MODEL="Qwen3-Embedding-8B"
 
 # Date range
 START_DATE="2023-01-01"
-END_DATE="2026-01-31"
+END_DATE="2026-03-31"
 
 # Activate environment
 source "${REPO_DIR}/.venv/bin/activate"

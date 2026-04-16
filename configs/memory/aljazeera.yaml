@@ -1,6 +1,6 @@
 # Active memory run: mem_df + meta-insights, restarting from shared warmup.
 #
-# Usage: python aisa_scripts/run_sim/submit_sim_aisa.py --config configs/memory/active.yaml --runs 1 --gpus 1 --memory 80 --time 2-00:00:00
+# Usage: python mpi_scripts/run_sim/submit_sim.py --config configs/memory/aljazeera.yaml --runs 1
 
 # --- Restart from shared warmup ---
 # restart_from: "logs/current_sim/deepseek_shared_warmup_r00/26-03-22-11-32-28"
@@ -9,23 +9,22 @@
 # --- Simulation Meta ---
 sim_name: "ds_active_mem_aljazeeralate2025"
 start_date: "2025-09-01"
-end_date: "2025-12-13"
+end_date: "2025-09-30"
 lookback_days: 7
 search_cutoff_days: 0
 split: "aljazeeraLate2025"
 
 # --- Data Paths ---
 dataset: "openforesight"
-dataset_path: "nikhilchandak/OpenForesight"
-dataset_cache: "/mnt/nfs/datasets_ac/cache/huggingface/datasets"
+dataset_path: "${FSIM_DATASET_PATH}"
 min_forecasters: 10
 resolved_only: true
-output_base: "logs/current_sim"
+output_base: "${FSIM_OUTPUT_BASE}"
 warmup_parallelism: 64
 
 # --- Search Settings ---
-search_db: "/mnt/nfs/datasets_ac/news/deduped_articles/lance/Qwen3-Embedding-8B"
-embedding_model: "/mnt/nfs/home/ac146091/forecast-sim/models/Qwen3-Embedding-8B"
+search_db: "${FSIM_SEARCH_DB}"
+embedding_model: "${FSIM_EMBEDDING_MODEL}"
 embedding_gpu_mem: 0.7
 
 # --- Answer Matching ---
@@ -47,7 +46,7 @@ defaults:
   provider: "openrouter"
   scaffold: "allQ"
   temperature: 0.7
-  max_tokens: 2048
+  max_tokens: 8192
   max_retries: 3
   enable_memory: true
   memory_format: "active"
@@ -63,6 +62,13 @@ defaults:
   # --- Memory settings ---
   memory_max_entries: 500            # Max meta-insight entries (cross-question patterns; mem_df is unlimited)
   memory_update_max_total_tokens: 40960  # Non-warmup: triggers memory phase when this many tokens remain
+
+resources:
+  gpus: 1
+  cpus: 16
+  memory_gb: 80
+  disk_gb: 50
+  bid: 35
 
 agents:
   - model: "deepseek/deepseek-v3.2"

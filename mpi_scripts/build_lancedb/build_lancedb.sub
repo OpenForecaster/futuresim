@@ -2,11 +2,11 @@
 # ingest table + scalar date index (no FTS / vector index in this stage)
 # Run with: condor_submit_bid 15 build_lancedb.sub
 
-executable = /home/sgoel/forecast-sim/mpi_scripts/build_lancedb/build_lancedb.sh
+executable = /home/nchandak/forecast-sim/mpi_scripts/build_lancedb/build_lancedb.sh
 
-output = /is/cluster/fast/sgoel/logs/forecasting-sim/build_lancedb/$(Cluster).out
-error = /is/cluster/fast/sgoel/logs/forecasting-sim/build_lancedb/$(Cluster).err
-log = /is/cluster/fast/sgoel/logs/forecasting-sim/build_lancedb/$(Cluster).log
+output = /home/nchandak/forecast-sim/logs/build_lancedb/$(Cluster).out
+error = /home/nchandak/forecast-sim/logs/build_lancedb/$(Cluster).err
+log = /home/nchandak/forecast-sim/logs/build_lancedb/$(Cluster).log
 
 # CPU-only job, but needs memory for embedding ingestion.
 request_cpus = 8

@@ -2,11 +2,11 @@
 # build FTS index (with positions by default) + optional IVF-PQ vector index.
 # Run with: condor_submit_bid 25 build_index.sub
 
-executable = /home/sgoel/forecast-sim/mpi_scripts/build_lancedb/build_index.sh
+executable = /home/nchandak/forecast-sim/mpi_scripts/build_lancedb/build_index.sh
 
-output = /is/cluster/fast/sgoel/logs/forecasting-sim/build_lancedb/index_$(Cluster).out
-error = /is/cluster/fast/sgoel/logs/forecasting-sim/build_lancedb/index_$(Cluster).err
-log = /is/cluster/fast/sgoel/logs/forecasting-sim/build_lancedb/index_$(Cluster).log
+output = /home/nchandak/forecast-sim/logs/build_lancedb/index_$(Cluster).out
+error = /home/nchandak/forecast-sim/logs/build_lancedb/index_$(Cluster).err
+log = /home/nchandak/forecast-sim/logs/build_lancedb/index_$(Cluster).log
 
 # FTS on very large tables is memory-heavy; keep this on high-memory nodes.
 request_cpus = 8

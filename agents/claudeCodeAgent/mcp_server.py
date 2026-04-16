@@ -78,7 +78,7 @@ def _build_new_articles_message(previous_date: Optional[date], current_date: Opt
     """Match BasicAgent's article-count wording when search can provide a count."""
     if previous_date is None or current_date is None:
         return (
-            "New articles may be available in articles/ or via the search_news MCP tool."
+            "New articles are available in articles/ or via the search_news MCP tool."
         )
 
     _ensure_search()
@@ -96,7 +96,7 @@ def _build_new_articles_message(previous_date: Optional[date], current_date: Opt
             )
 
     return (
-        f"New articles may be available for {current_date.isoformat()} in articles/ "
+        f"New articles are available for {current_date.isoformat()} in articles/ "
         "or via the search_news tool."
     )
 
