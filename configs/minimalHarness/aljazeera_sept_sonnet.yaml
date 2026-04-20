@@ -1,19 +1,19 @@
-# Claude Code Opus 4.6 on aljazeeraLate2025 split (491 questions, Sep-Dec 2025)
-sim_name: "claude_code_aljazeera_late_opus"
+# Claude Code Sonnet 4.6 on aljazeeraLate2025 split (first month only, Sep 2025)
+#
+# Usage: python mpi_scripts/run_sim/submit_sim.py --config configs/minimalHarness/aljazeera_sept_sonnet.yaml --runs 1
+
+sim_name: "claude_code_aljazeera_sept_sonnet"
 
 start_date: "2025-09-01"
-end_date: "2025-12-13"
-resolution_start: "2025-09-01"
-resolution_end: "2025-12-13"
+end_date: "2025-09-30"
 lookback_days: 7
 search_cutoff_days: 0
-timegap_days: 1
 
 dataset: "openforesight"
 dataset_path: "${FSIM_DATASET_PATH}"
 split: "aljazeeraLate2025"
-resolved_only: false
-min_forecasters: 0
+min_forecasters: 10
+resolved_only: true
 output_base: "${FSIM_OUTPUT_BASE}"
 
 search_db: "${FSIM_SEARCH_DB}"
@@ -25,7 +25,7 @@ matcher: "deepseek/deepseek-v3.2"
 
 defaults:
   provider: "none"
-  scaffold: "claudecode"
+  scaffold: "minimalHarness"
 
 resources:
   gpus: 1
@@ -35,6 +35,6 @@ resources:
   bid: 35
 
 agents:
-  - model: "claude-opus-4-6"
-    timeout_seconds: 1200
+  - model: "claude-sonnet-4-6"
+    timeout_seconds: 900
     claude_code_path: "/home/nchandak/.local/bin/claude"

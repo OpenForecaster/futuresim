@@ -50,7 +50,13 @@ cd "${REPO_DIR}"
 BUILD_FTS="${BUILD_FTS:-1}"
 FTS_WITH_POSITION="${FTS_WITH_POSITION:-1}"
 FTS_USE_TANTIVY="${FTS_USE_TANTIVY:-1}"
-TANTIVY_INDEX_ROOT="${TANTIVY_INDEX_ROOT:-${HOME}/forecasting/lancedb_tantivy_indices}"
+# Tantivy needs POSIX flock — /is/cluster/fast and /lustre/fast do NOT support it.
+# /lustre/scratch (BeeGFS) and /home (NFS) do. Prefer scratch to avoid eating home quota.
+if [[ -d "/lustre/scratch/${USER}" ]]; then
+  TANTIVY_INDEX_ROOT="${TANTIVY_INDEX_ROOT:-/lustre/scratch/${USER}/forecast-sim/lancedb_tantivy_indices}"
+else
+  TANTIVY_INDEX_ROOT="${TANTIVY_INDEX_ROOT:-${HOME}/forecasting/lancedb_tantivy_indices}"
+fi
 BUILD_VECTOR_INDEX="${BUILD_VECTOR_INDEX:-1}"
 NUM_PARTITIONS="${NUM_PARTITIONS:-4096}"
 NUM_SUB_VECTORS="${NUM_SUB_VECTORS:-64}"

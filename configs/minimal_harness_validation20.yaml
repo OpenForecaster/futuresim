@@ -1,10 +1,10 @@
 # Claude Code eval on validation20 split (20 questions, ~6 weeks)
-# Usage: python scripts/test_basic_agent.py --config configs/claude_code_validation20.yaml
+# Usage: python scripts/test_basic_agent.py --config configs/minimal_harness_validation20.yaml
 #
 # This is the full-featured integration test config. Every feature is enabled:
 # search (hybrid), article file access, answer matching, scoring.
 
-sim_name: "claude_code_validation20"
+sim_name: "minimal_harness_validation20"
 
 # Resolution window covers all 20 questions: 2025-07-01 to 2025-07-04
 start_date: "2025-07-01"
@@ -37,7 +37,7 @@ matcher: "deepseek/deepseek-v3.2"
 # Agent
 defaults:
   provider: "none"
-  scaffold: "claudecode"
+  scaffold: "minimalHarness"
 
 # HTCondor resources — 1 GPU for embedding model only
 resources:

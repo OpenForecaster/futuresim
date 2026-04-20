@@ -86,6 +86,9 @@ configs/openrouter_api_key.py
 configs/azure_openai_config.py
 inference/test_script.py
 
+# prompts 
+prompt_rendered/
+
 # Plotting
 plots/
 

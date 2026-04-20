@@ -1,5 +1,5 @@
 """
-ClaudeCodeAgent — forecasting agent that delegates to a single persistent
+MinimalHarnessAgent — forecasting agent that delegates to a single persistent
 Claude Code CLI session.
 
 The first call to act() spawns Claude Code + its MCP server.  Subsequent calls
@@ -19,14 +19,14 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from agents.base import BaseAgent
-from agents.claudeCodeAgent.prompt import build_system_prompt
+from agents.minimalHarnessAgent.prompt import build_system_prompt
 from environment.interfaces import PredictionSubmission
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
-class ClaudeCodeConfig:
+class MinimalHarnessConfig:
     model: str = "claude-opus-4-6"
     timeout_seconds: int = 7200
     max_budget_usd: Optional[float] = None  # None = unconstrained
@@ -41,13 +41,13 @@ class ClaudeCodeConfig:
     extra_flags: List[str] = field(default_factory=list)
 
 
-class ClaudeCodeAgent(BaseAgent):
+class MinimalHarnessAgent(BaseAgent):
     """Forecasting agent backed by a single persistent Claude Code session."""
 
     def __init__(
         self,
         agent_id: str,
-        config: ClaudeCodeConfig,
+        config: MinimalHarnessConfig,
         search_tool: Any = None,
         agent_dir: str = "",
         articles_base: str = "",
@@ -245,6 +245,8 @@ class ClaudeCodeAgent(BaseAgent):
         num_active = 0
         num_resolved = 0
         new_articles_count = None
+        last_active_date = None
+        next_active_date = None
         if forecast_interface is not None:
             source_context = getattr(forecast_interface, "source_context", "")
             source_name = getattr(forecast_interface, "source_name", "openforesight")
@@ -253,6 +255,7 @@ class ClaudeCodeAgent(BaseAgent):
             num_resolved = len(getattr(forecast_interface, "resolved_questions", []))
             num_questions = num_active + num_resolved
             last_active_date = getattr(forecast_interface, "last_active_date", None)
+            next_active_date = getattr(forecast_interface, "next_active_date", None)
             prompt_date = self.config.start_date or self._current_date
             new_articles_count = self._count_new_articles(last_active_date, prompt_date)
         prompt = build_system_prompt(
@@ -267,6 +270,8 @@ class ClaudeCodeAgent(BaseAgent):
             num_resolved=num_resolved,
             search_cutoff_days=self.config.search_cutoff_days,
             new_articles_count=new_articles_count,
+            last_active_date=last_active_date,
+            next_active_date=next_active_date,
         )
         prompt_path = self._internal_dir / "system_prompt.md"
         with open(prompt_path, "w") as f:
@@ -316,7 +321,11 @@ class ClaudeCodeAgent(BaseAgent):
     # ── article staging ────────────────────────────────────────────────
 
     def _update_article_symlinks(self, current_date: date) -> None:
-        """Incrementally add symlinks for article directories up to current_date."""
+        """Incrementally symlink per-day articles.jsonl files up to current_date.
+
+        Only articles.jsonl is exposed to Claude Code; the sibling parquet and
+        headlines JSON files are intentionally omitted (parquet isn't greppable
+        and the headlines JSON duplicates info available in articles.jsonl)."""
         if not self.articles_base or not self.articles_base.exists():
             return
 
@@ -327,9 +336,9 @@ class ClaudeCodeAgent(BaseAgent):
 
         d = start
         while d <= current_date:
-            src = self.articles_base / f"{d.year}" / f"{d.month:02d}" / f"{d.day:02d}"
+            src = self.articles_base / f"{d.year}" / f"{d.month:02d}" / f"{d.day:02d}" / "articles.jsonl"
             if src.exists():
-                dst = articles_dir / f"{d.year}" / f"{d.month:02d}" / f"{d.day:02d}"
+                dst = articles_dir / f"{d.year}" / f"{d.month:02d}" / f"{d.day:02d}" / "articles.jsonl"
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 if not dst.exists():
                     dst.symlink_to(src)
@@ -406,7 +415,7 @@ class ClaudeCodeAgent(BaseAgent):
             time.sleep(poll_interval)
 
         # Read predictions from the predictions file — this is the durable record
-        # of all submit_forecast MCP calls. Each call writes to this file immediately,
+        # of all submit_forecasts MCP calls. Each call writes to this file immediately,
         # so it survives MCP server restarts (unlike the in-memory _today_predictions).
         return self._read_predictions(current_date)
 

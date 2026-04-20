@@ -1518,7 +1518,7 @@ class BasicAgent(BaseAgent):
         mechanics: Dict[str, str] = {
             "accuracy_calibration": "**Accuracy + Calibration**: Assign probabilities that reflect true likelihood.",
             "binary_outcomes": "**Binary Outcomes**: Use exact outcomes \"Yes\" and \"No\".",
-            "time_weighted": "**Time-Weighted Score**: For each question, your time-weighted score = sum(daily_score) / total_question_days where daily_score is the Brier Skill Score for that day (0 if you have no active prediction on that question) and total_question_days is the number of days the question was active. Each prediction's Brier Skill Score (1 minus sum of squared errors) is weighted by how many days it was active before you updated it. Predictions made earlier carry more weight since they cover more days, so act on your best information as soon as possible rather than waiting.",
+            "time_weighted": "**Time-Weighted Score (TW-Score)**: For each question, your time-weighted score = sum(daily_score) / total_question_days where daily_score is the Brier Skill Score for that day (0 if you have no active prediction on that question) and total_question_days is the number of days the question was active. Each prediction's Brier Skill Score (1 minus sum of squared errors) is weighted by how many days it was active before you updated it. Predictions made earlier carry more weight since they cover more days, so act on your best information as soon as possible rather than waiting.",
             "question_count": "**Prediction-Count Incentive**: Scores are summed (not averaged) across all questions you predict on.",
         }
         if show_peer:
@@ -1557,8 +1557,8 @@ Key Mechanics:
 
         mechanics: Dict[str, str] = {
             "accuracy_calibration": "**Accuracy + Calibration**: Try to guess the most likely outcome(s) and assign calibrated probabilities which reflect the likelihood of the outcome(s) occurring.",
-            "time_weighted": "**Time-Weighted Score**: For each question, your time-weighted score = sum(daily_score) / total_question_days where daily_score is the Brier Skill Score for that day (0 if you have no active prediction on that question) and total_question_days is the number of days the question was active. Each prediction's Brier Skill Score (1 minus sum of squared errors) is weighted by how many days it was active before you updated it. Predictions made earlier carry more weight since they cover more days, so act on your best information as soon as possible rather than waiting.",
-            "question_count": "**Prediction-Count Incentive**: Your score for each of the metrics like accuracy, brier skill score, time-weighted score is summed (NOT averaged) across all questions you predict on and higher score is better.",
+            "time_weighted": "**Time-Weighted Score (TW-Score)**: For each question, your time-weighted score = sum(daily_score) / total_question_days where daily_score is the Brier Skill Score for that day (0 if you have no active prediction on that question) and total_question_days is the number of days the question was active. Each prediction's Brier Skill Score (1 minus sum of squared errors) is weighted by how many days it was active before you updated it. Predictions made earlier carry more weight since they cover more days, so act on your best information as soon as possible rather than waiting.",
+            "question_count": "**Prediction-Count Incentive**: Your score for each of the metrics like accuracy, brier skill score, TW-score is summed (NOT averaged) across all questions you predict on and higher score is better.",
             "max_outcomes": f"**Max Outcomes**: Submit at most {self.config.max_outcomes_per_question} outcomes per question.",
             "no_placeholders": "**No Placeholders**: \"Unknown\", \"TBD\", \"Other\" hurt your score. Be specific.",
         }
@@ -1590,7 +1590,7 @@ Key Mechanics:
     def _get_data_notes(self) -> str:
         """Get notes about DataFrame columns - conditional on agent mode."""
         if self.config.single_agent_mode:
-            return "Note: `my_prediction` column contains your current forecast as a dict (or None if not yet predicted)."
+            return "Note: `my_prediction` column contains your current forecast as a dict (or None if not yet predicted). Similarly, `ground_truth` column contains the ground truth answer which is generally a string (or None if not yet resolved)."
         else:
             return """Note: `market_aggregate` and `my_prediction` columns contain Python dicts (or None). You can access them directly, e.g. `row['market_aggregate']['outcome_name']`.
 - `market_aggregate`: the mean probability distribution across all agents' latest predictions from the **previous day**. `None` on the first day (no predictions exist yet).
@@ -1949,12 +1949,12 @@ Current memory length: {len(self._memory)} characters"""
 Current entries:
 {mem_summary}
 
-Per-question reasoning, evidence, and calibration notes. Max 1000 chars per entry.
+In this, keep track of per-question reasoning, evidence, and calibration notes. Max 1000 chars per entry.
 Only store what is NOT recoverable from the DataFrame or search.
 
 ## Layer 2: META-INSIGHTS ({self._memory.entry_count}/{max_ent} entries)
 
-Cross-question patterns and calibration notes. NOT for question-specific reasoning (use mem_df for that).
+Use this to maintain cross-question patterns and calibration notes. NOT for question-specific reasoning (use mem_df for that).
 {index_block}
 ### STEP 1: Extract lessons from resolved questions
 For each question resolved this session:

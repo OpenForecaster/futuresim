@@ -163,7 +163,7 @@ class FeedbackHandler:
                 if show_tw_peer:
                     lines.append(f"  Brier: {item['brier']:+.2f} | TW-Peer: {item['tw_peer']:+.2f}")
                 else:
-                    lines.append(f"  Brier: {item['brier']:+.2f}")
+                    lines.append(f"  Brier: {item['brier']:+.2f} | TW-Score: {item['tw_peer']:+.2f}")
                 lines.append("") 
             sections.append("\n".join(lines))
         

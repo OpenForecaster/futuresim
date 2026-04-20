@@ -29,8 +29,10 @@ class SimulationEnvironment:
     
     Supports parallel agent execution for multi-agent simulations.
     """
-    
-    def __init__(self, 
+
+    max_outcomes_per_question: int = 5
+
+    def __init__(self,
                  dataset: str = "openforesight",
                  dataset_path: str = None,
                  dataset_cache: str = None,

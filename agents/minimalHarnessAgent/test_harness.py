@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-End-to-end test harness for ClaudeCodeAgent.
+End-to-end test harness for MinimalHarnessAgent.
 
 Three test levels:
   1. unit   -- MCP server tools work in isolation (no Claude Code, no GPU)
@@ -12,13 +12,13 @@ Three test levels:
 
 Usage:
   # Unit test (fast, no API calls):
-  python -m agents.claudeCodeAgent.test_harness --level unit
+  python -m agents.minimalHarnessAgent.test_harness --level unit
 
   # Smoke test (full features, validation20 split):
-  python -m agents.claudeCodeAgent.test_harness --level smoke
+  python -m agents.minimalHarnessAgent.test_harness --level smoke
 
   # Real eval run:
-  python -m agents.claudeCodeAgent.test_harness --level real --config configs/claude_code_validation20.yaml
+  python -m agents.minimalHarnessAgent.test_harness --level real --config configs/minimal_harness_validation20.yaml
 """
 
 import argparse
@@ -41,14 +41,14 @@ if _REPO_ROOT not in sys.path:
 
 def test_unit():
     """Test MCP server tools in isolation — no Claude Code, no GPU."""
-    from agents.claudeCodeAgent.mcp_server import (
+    from agents.minimalHarnessAgent.mcp_server import (
         _reload_state,
         _write_json,
         _parse_date,
         search_news,
-        submit_forecast,
+        submit_forecasts,
     )
-    import agents.claudeCodeAgent.mcp_server as srv
+    import agents.minimalHarnessAgent.mcp_server as srv
 
     workspace = Path(tempfile.mkdtemp(prefix="cc_test_unit_"))
     try:
@@ -87,6 +87,7 @@ def test_unit():
 
         # Point module globals at our workspace.
         srv._workspace = workspace
+        srv._internal_dir = workspace
         srv._reload_state()
 
         # Test 1: search_news without search DB returns graceful message.
@@ -94,8 +95,8 @@ def test_unit():
         assert "not available" in result.lower(), f"Expected 'not available', got: {result}"
         print("  [PASS] search_news without DB returns graceful message")
 
-        # Test 2: submit_forecast writes predictions.
-        result = submit_forecast("q1", {"Yes": 0.7, "No": 0.3})
+        # Test 2: submit_forecasts writes predictions.
+        result = submit_forecasts("q1", {"Yes": 0.7, "No": 0.3})
         assert "recorded" in result.lower(), f"Expected 'recorded', got: {result}"
         pred_path = workspace / "predictions" / "2025-05-01.json"
         assert pred_path.exists(), "Predictions file not created"
@@ -103,19 +104,19 @@ def test_unit():
         assert len(preds) == 1
         assert preds[0]["question_id"] == "q1"
         assert preds[0]["outcomes"]["Yes"] == 0.7
-        print("  [PASS] submit_forecast writes valid predictions file")
+        print("  [PASS] submit_forecasts writes valid predictions file")
 
-        # Test 3: submit_forecast validates probabilities.
-        result = submit_forecast("q2", {"Team A": 0.6, "Team B": 0.5})
+        # Test 3: submit_forecasts validates probabilities.
+        result = submit_forecasts("q2", {"Team A": 0.6, "Team B": 0.5})
         assert "error" in result.lower(), f"Expected error for sum > 1, got: {result}"
-        print("  [PASS] submit_forecast rejects probabilities > 1.0")
+        print("  [PASS] submit_forecasts rejects probabilities > 1.0")
 
         # Test 4: submit second valid prediction.
-        result = submit_forecast("q2", {"Team A": 0.5, "Team B": 0.3, "Draw": 0.2})
+        result = submit_forecasts("q2", {"Team A": 0.5, "Team B": 0.3, "Draw": 0.2})
         assert "recorded" in result.lower()
         preds = json.loads(pred_path.read_text())
         assert len(preds) == 2
-        print("  [PASS] submit_forecast accumulates predictions")
+        print("  [PASS] submit_forecasts accumulates predictions")
 
         # Test 5: _parse_date.
         assert _parse_date("2025-05-01") == date(2025, 5, 1)
@@ -131,7 +132,7 @@ def test_unit():
 
 # ── Smoke test ─────────────────────────────────────────────────────────
 
-_SMOKE_CONFIG = "configs/claude_code_validation20.yaml"
+_SMOKE_CONFIG = "configs/minimal_harness_validation20.yaml"
 
 
 def test_smoke():
@@ -221,7 +222,7 @@ def test_smoke():
 
     # ── Find output directory ──────────────────────────────────────────
     output_base = os.environ.get("FSIM_OUTPUT_BASE", "")
-    sim_dirs = sorted(glob.glob(os.path.join(output_base, "claude_code_validation20", "*")))
+    sim_dirs = sorted(glob.glob(os.path.join(output_base, "minimal_harness_validation20", "*")))
     if not sim_dirs:
         print("  ERROR: No output directory found")
         sys.exit(1)
@@ -276,7 +277,7 @@ def test_smoke():
         print("  [FAIL] daily_metrics.csv missing")
 
     # 4. Agent directory
-    agent_dirs = list((output_dir / "agents").glob("claudecode_*"))
+    agent_dirs = list((output_dir / "agents").glob("minimalHarness_*"))
     if agent_dirs:
         agent_dir = agent_dirs[0]
         print(f"  [PASS] Agent directory: {agent_dir.name}")
@@ -318,11 +319,11 @@ def test_smoke():
                 errors.append("search_news was never called")
                 print(f"  [FAIL] search_news was never called")
 
-            if "mcp__forecast__submit_forecast" in mcp_tools:
-                print(f"  [PASS] submit_forecast was called ({mcp_tools['mcp__forecast__submit_forecast']}x)")
+            if "mcp__forecast__submit_forecasts" in mcp_tools:
+                print(f"  [PASS] submit_forecasts was called ({mcp_tools['mcp__forecast__submit_forecasts']}x)")
             else:
-                errors.append("submit_forecast was never called")
-                print(f"  [FAIL] submit_forecast was never called")
+                errors.append("submit_forecasts was never called")
+                print(f"  [FAIL] submit_forecasts was never called")
 
             if "mcp__forecast__next_day" in mcp_tools:
                 print(f"  [PASS] next_day was called ({mcp_tools['mcp__forecast__next_day']}x)")
@@ -401,14 +402,14 @@ def test_real(config_path: str):
 # ── main ───────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="Test ClaudeCodeAgent")
+    parser = argparse.ArgumentParser(description="Test MinimalHarnessAgent")
     parser.add_argument("--level", choices=["unit", "smoke", "real"], default="unit",
                         help="Test level: unit (no API), smoke (full pipeline validation20), "
                              "real (custom config)")
     parser.add_argument("--config", help="Config YAML for real test level")
     args = parser.parse_args()
 
-    print(f"=== ClaudeCodeAgent Test: {args.level} ===\n")
+    print(f"=== MinimalHarnessAgent Test: {args.level} ===\n")
 
     if args.level == "unit":
         test_unit()

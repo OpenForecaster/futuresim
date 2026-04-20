@@ -44,7 +44,7 @@ class AgentConfig:
     parallel_tool_calls: bool = False
 
     # Single agent mode - adjusts prompt to focus on accuracy only (no peer/market language)
-    single_agent_mode: bool = False
+    single_agent_mode: bool = True
 
     # GPT-OSS Harmony prompt placement:
     # - "instructions" (default): task text goes to Responses API `instructions`.

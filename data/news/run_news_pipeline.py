@@ -461,11 +461,12 @@ def run_lancedb_index_step():
     env["BUILD_FTS"] = "1"
     env["FTS_WITH_POSITION"] = "1"
     env["FTS_USE_TANTIVY"] = "1"
-    env["TANTIVY_INDEX_ROOT"] = os.path.expanduser(
-        os.path.expandvars(
-            os.getenv("FSIM_TANTIVY_INDEX_ROOT", "~/forecasting/lancedb_tantivy_indices")
+    # Only override TANTIVY_INDEX_ROOT if user set FSIM_TANTIVY_INDEX_ROOT.
+    # Otherwise let build_index.sh pick its own default (scratch if available, else home).
+    if os.getenv("FSIM_TANTIVY_INDEX_ROOT"):
+        env["TANTIVY_INDEX_ROOT"] = os.path.expanduser(
+            os.path.expandvars(os.environ["FSIM_TANTIVY_INDEX_ROOT"])
         )
-    )
     env["BUILD_VECTOR_INDEX"] = "0"
     env["NUM_PARTITIONS"] = "4096"
     env["NUM_SUB_VECTORS"] = "64"

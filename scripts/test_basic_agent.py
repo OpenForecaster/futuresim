@@ -409,11 +409,11 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
 
         # Claude Code agent doesn't need an inference provider — skip the LLM setup
         # and jump straight to agent creation.
-        if scaffold == 'claudecode':
-            from agents.claudeCodeAgent.agent import ClaudeCodeAgent, ClaudeCodeConfig
-            agent_id = f"claudecode_{model.replace('/', '_').replace('.', '')}_{i+1:03d}"
+        if scaffold == 'minimalHarness':
+            from agents.minimalHarnessAgent.agent import MinimalHarnessAgent, MinimalHarnessConfig
+            agent_id = f"minimalHarness_{model.replace('/', '_').replace('.', '')}_{i+1:03d}"
             cc_search_cutoff = agent_def.get('search_cutoff_days', defaults.get('search_cutoff_days', getattr(args, 'search_cutoff_days', 0)))
-            cc_config = ClaudeCodeConfig(
+            cc_config = MinimalHarnessConfig(
                 model=model,
                 search_db=getattr(args, 'search_db', '') or '',
                 embedding_model=getattr(args, 'embedding_model', '') or '',
@@ -426,7 +426,7 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
                 max_budget_usd=agent_def.get('max_budget_usd', defaults.get('max_budget_usd')),
                 claude_code_path=agent_def.get('claude_code_path', defaults.get('claude_code_path', 'claude')),
             )
-            agent = ClaudeCodeAgent(
+            agent = MinimalHarnessAgent(
                 agent_id=agent_id,
                 config=cc_config,
                 search_tool=search_tool,
@@ -434,7 +434,7 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
                 articles_base=config.get('articles_base', os.environ.get('FSIM_ARTICLES_BASE', '')),
             )
             agents.append(agent)
-            print(f"  Created agent: {agent_id} (Claude Code) [Scaffold: {scaffold}]")
+            print(f"  Created agent: {agent_id} (Minimal Harness) [Scaffold: {scaffold}]")
             continue
 
         # Create inference provider
@@ -688,7 +688,7 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
             raise ValueError(
                 f"Unknown scaffold: {scaffold}. Only 'basic', 'allQ', 'allqd', 'og', "
                 "'qwenbasic', 'qwenallq', 'mirobasic', 'miroallq', 'gptossbasic', "
-                "'gptossallq', and 'claudecode' are supported."
+                "'gptossallq', and 'minimalHarness' are supported."
             )
         
         agents.append(agent)
@@ -1441,9 +1441,9 @@ def main():
                 search_tool=search_tool,
                 start_date=sim_start
             )
-        elif args.scaffold == 'claudecode':
-            from agents.claudeCodeAgent.agent import ClaudeCodeAgent, ClaudeCodeConfig
-            cc_config = ClaudeCodeConfig(
+        elif args.scaffold == 'minimalHarness':
+            from agents.minimalHarnessAgent.agent import MinimalHarnessAgent, MinimalHarnessConfig
+            cc_config = MinimalHarnessConfig(
                 model=model_name,
                 search_db=getattr(args, 'search_db', '') or '',
                 embedding_model=getattr(args, 'embedding_model', '') or '',
@@ -1452,7 +1452,7 @@ def main():
                 start_date=sim_start,
                 end_date=getattr(args, 'end_date', None),
             )
-            agent = ClaudeCodeAgent(
+            agent = MinimalHarnessAgent(
                 agent_id=agent_id,
                 config=cc_config,
                 search_tool=search_tool,
@@ -1463,7 +1463,7 @@ def main():
             raise ValueError(
                 f"Unknown scaffold: {args.scaffold}. Only 'basic', 'allQ', 'allqd', 'og', "
                 "'qwenbasic', 'qwenallq', 'mirobasic', 'miroallq', 'gptossbasic', "
-                "'gptossallq', and 'claudecode' are supported."
+                "'gptossallq', and 'minimalHarness' are supported."
             )
         agents.append(agent)
         print(f"  Created agent: {agent_id}")

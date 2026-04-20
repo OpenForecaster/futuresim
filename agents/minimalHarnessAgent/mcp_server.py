@@ -1,8 +1,8 @@
 """
 MCP server for Claude Code forecasting agent.
 
-Provides 4 tools: search_news, read_article, submit_forecast, next_day.
-Communicates with the driver (ClaudeCodeAgent) via file-based signals.
+Provides 4 tools: search_news, read_article, submit_forecasts, next_day.
+Communicates with the driver (MinimalHarnessAgent) via file-based signals.
 
 IMPORTANT: All heavy imports (lancedb, pandas, torch, etc.) are deferred to
 first use.  The MCP handshake must complete in <10s or Claude Code will give
@@ -213,7 +213,7 @@ def search_news(
 
 
 @mcp.tool()
-def submit_forecast(question_id: str, outcomes: dict[str, float]) -> str:
+def submit_forecasts(question_id: str, outcomes: dict[str, float]) -> str:
     """Submit a probabilistic prediction for a forecasting question.
 
     Args:
@@ -346,7 +346,7 @@ def next_day() -> str:
                         response_parts.append(
                             f"- \"{title}\"\n"
                             f"  Your prediction distribution: {dist_str} | Truth: {gt}\n"
-                            f"  Brier: {brier:+.2f} | TW-Peer: {tw_peer:+.2f}"
+                            f"  Brier: {brier:+.2f} | TW-Score: {tw_peer:+.2f}"
                         )
                     else:
                         response_parts.append(f"- \"{title}\" → {gt}")

@@ -1,17 +1,17 @@
-# Claude Code Opus 4.6 on test split (302 questions, May-Aug 2025)
-sim_name: "claude_code_test_opus"
+# Claude Code Opus 4.6 on aljazeeraLate2025 split (491 questions, Sep-Dec 2025)
+sim_name: "claude_code_aljazeera_late_opus"
 
-start_date: "2025-05-01"
-end_date: "2025-08-23"
-resolution_start: "2025-05-01"
-resolution_end: "2025-08-23"
+start_date: "2025-09-01"
+end_date: "2025-12-13"
+resolution_start: "2025-09-01"
+resolution_end: "2025-12-13"
 lookback_days: 7
 search_cutoff_days: 0
 timegap_days: 1
 
 dataset: "openforesight"
 dataset_path: "${FSIM_DATASET_PATH}"
-split: "test"
+split: "aljazeeraLate2025"
 resolved_only: false
 min_forecasters: 0
 output_base: "${FSIM_OUTPUT_BASE}"
@@ -25,7 +25,7 @@ matcher: "deepseek/deepseek-v3.2"
 
 defaults:
   provider: "none"
-  scaffold: "claudecode"
+  scaffold: "minimalHarness"
 
 resources:
   gpus: 1
