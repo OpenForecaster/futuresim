@@ -571,6 +571,11 @@ class BasicAgent(BaseAgent):
             out["content"] = content if content is not None else ""
         if has_tool_calls:
             out["tool_calls"] = tool_calls
+        # DeepSeek reasoning models (e.g. deepseek-v4-pro) reject follow-up
+        # requests unless the prior reasoning_content is echoed back.
+        reasoning = assistant_message.get("reasoning")
+        if isinstance(reasoning, str) and reasoning:
+            out["reasoning"] = reasoning
         messages.append(out)
         return out
 
@@ -1557,8 +1562,9 @@ Key Mechanics:
 
         mechanics: Dict[str, str] = {
             "accuracy_calibration": "**Accuracy + Calibration**: Try to guess the most likely outcome(s) and assign calibrated probabilities which reflect the likelihood of the outcome(s) occurring.",
-            "time_weighted": "**Time-Weighted Score (TW-Score)**: For each question, your time-weighted score = sum(daily_score) / total_question_days where daily_score is the Brier Skill Score for that day (0 if you have no active prediction on that question) and total_question_days is the number of days the question was active. Each prediction's Brier Skill Score (1 minus sum of squared errors) is weighted by how many days it was active before you updated it. Predictions made earlier carry more weight since they cover more days, so act on your best information as soon as possible rather than waiting.",
-            "question_count": "**Prediction-Count Incentive**: Your score for each of the metrics like accuracy, brier skill score, TW-score is summed (NOT averaged) across all questions you predict on and higher score is better.",
+            "time_weighted": "**Time-Weighted Score (TW-Score)**: For each question, your time-weighted score = sum(daily_score * 100) / total_question_days where daily_score is the Brier Skill Score for that day (0 if you have no active prediction on that question) and total_question_days is the number of days the question was active. Each prediction's Brier Skill Score (1 minus sum of squared errors) is weighted by how many days it was active before you updated it. Predictions made earlier carry more weight since they cover more days, so act on your best information as soon as possible rather than waiting. Thus, for a set of K questions in total (in the market), the maximum possible TW-Score is 100 * K (if one predicts the correct answer for all K questions on their respective opening date each with 100% probability) and minimum possible TW-Score similarly is -100 * K.",
+            "question_count": "**Prediction-Count Incentive**: For each question where you don't have any active prediction on a day, your accuracy, brier skill score, and TW-score for that question will be counted as 0 on that day. Your job is to MAXIMIZE your TW-score. Your TW-score is summed (NOT averaged) across all questions and higher score is better.",
+            "end_of_session_metrics": "**End-of-Session Metrics**: At the end of each session, your accuracy, brier skill score, and TW-score *until that session* are calculated and displayed to you. Accuracy and Brier Skill Score are calculated by taking the mean across ALL the questions (0 for question where you don't have any active prediction) while TW-Score is summed across all questions. You are encouraged to maximize your TW-score throughout.",
             "max_outcomes": f"**Max Outcomes**: Submit at most {self.config.max_outcomes_per_question} outcomes per question.",
             "no_placeholders": "**No Placeholders**: \"Unknown\", \"TBD\", \"Other\" hurt your score. Be specific.",
         }

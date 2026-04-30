@@ -19,9 +19,9 @@ def _iso(d) -> str:
 
 WORKFLOW_BASIC = """\
 1. Read market.csv to understand active questions (is_resolved == False).
-2. Research using search_news and direct file browsing in articles/.
-3. Submit predictions for each active question using submit_forecasts.
-4. Call next_day when done. You'll receive resolution feedback with your Brier score per question — use this to learn from mistakes and improve calibration.
+2. Research using `mcp__forecast__search_news` and direct file browsing in articles/.
+3. Submit predictions for each active question using `mcp__forecast__submit_forecasts`.
+4. Call `mcp__forecast__next_day` when done. You'll receive resolution feedback with your Brier score per question — use this to learn from mistakes and improve calibration.
 5. Repeat until the simulation ends."""
 
 
@@ -44,22 +44,22 @@ def _get_source_rules(source_name: str) -> str:
     if source_name == "metaculus_binary":
         return """
 ## BINARY QUESTION RULES
-All questions are Yes/No binary. Your `submit_forecasts` tool call MUST use exactly:
+All questions are Yes/No binary. Your `mcp__forecast__submit_forecasts` tool call MUST use exactly:
 - **"Yes"** for the affirmative outcome
 - **"No"** for the negative outcome
 
 Example tool arguments:
-submit_forecasts(question_id="12345", outcomes={"Yes": 0.7, "No": 0.3})
+mcp__forecast__submit_forecasts(question_id="12345", outcomes={"Yes": 0.7, "No": 0.3})
 """
     elif source_name == "metaculus_mcq":
         return """
 ## MULTIPLE CHOICE RULES
 Each question has enumerated options shown in the 'options' column.
-Your `submit_forecasts` tool call MUST use the EXACT option text from the question.
+Your `mcp__forecast__submit_forecasts` tool call MUST use the EXACT option text from the question.
 Do NOT paraphrase or abbreviate options.
 
 Example tool arguments (if options are ["Candidate A", "Candidate B", "Candidate C"]):
-submit_forecasts(question_id="12345", outcomes={"Candidate A": 0.5, "Candidate B": 0.3, "Candidate C": 0.2})
+mcp__forecast__submit_forecasts(question_id="12345", outcomes={"Candidate A": 0.5, "Candidate B": 0.3, "Candidate C": 0.2})
 """
     return ""
 
@@ -96,10 +96,11 @@ You are evaluated on the **Brier Skill Score** = 1 - Σ(p_i - y_i)^2 summed over
 
 Key Mechanics:
 1. **Accuracy + Calibration**: Try to guess the most likely outcome(s) and assign calibrated probabilities which reflect the likelihood of the outcome(s) occurring.
-2. **Time-Weighted Score (TW-Score)**: For each question, your time-weighted score = sum(daily_score) / total_question_days where daily_score is the Brier Skill Score for that day (0 if you have no active prediction on that question) and total_question_days is the number of days the question was active. Each prediction's Brier Skill Score (1 minus sum of squared errors) is weighted by how many days it was active before you updated it. Predictions made earlier carry more weight since they cover more days, so act on your best information as soon as possible rather than waiting.
-3. **Prediction-Count Incentive**: Your score for each of the metrics like accuracy, brier skill score, TW-score is summed (NOT averaged) across all questions you predict on and higher score is better.
-4. **Max Outcomes**: Submit at most {max_outcomes_per_question} outcomes per question.
-5. **No Placeholders**: "Unknown", "TBD", "Other" hurt your score. Be specific.
+2. **Time-Weighted Score (TW-Score)**: For each question, your time-weighted score = sum(daily_score * 100) / total_question_days where daily_score is the Brier Skill Score for that day (0 if you have no active prediction on that question) and total_question_days is the number of days the question was active. Each prediction's Brier Skill Score (1 minus sum of squared errors) is weighted by how many days it was active before you updated it. Predictions made earlier carry more weight since they cover more days, so act on your best information as soon as possible rather than waiting. Thus, for a set of K questions in total (in the market), the maximum possible TW-Score is 100 * K (if one predicts the correct answer for all K questions on their respective opening date each with 100% probability) and minimum possible TW-Score similarly is -100 * K.
+3. **Prediction-Count Incentive**: For each question where you don't have any active prediction on a day, your accuracy, brier skill score, and TW-score for that question will be counted as 0 on that day. Your job is to MAXIMIZE your TW-score. Your TW-score is summed (NOT averaged) across all questions and higher score is better.
+4. **End-of-Session Metrics**: At the end of each session, your accuracy, brier skill score, and TW-score *until that session* are calculated and displayed to you. Accuracy and Brier Skill Score are calculated by taking the mean across ALL the questions (0 for question where you don't have any active prediction) while TW-Score is summed across all questions. You are encouraged to maximize your TW-score throughout.
+5. **Max Outcomes**: Submit at most {max_outcomes_per_question} outcomes per question.
+6. **No Placeholders**: "Unknown", "TBD", "Other" hurt your score. Be specific.
 """
 
 
@@ -246,7 +247,7 @@ def build_system_prompt(
 
     # Matches BasicAgent search_tool_line text verbatim.
     search_tool_line = (
-        f"- `search_news(query, from_date?, to_date?)`: search the news corpus for evidence. "
+        f"- `mcp__forecast__search_news(query, from_date?, to_date?)`: search the news corpus for evidence. "
         f"`to_date` is capped at {cutoff_desc}. {search_results_desc}\n"
     )
 
@@ -289,22 +290,22 @@ Column descriptions of the DataFrame (market.csv):
 
 ## TOOLS AVAILABLE FOR YOUR USE
 {search_tool_line}\
-- `submit_forecasts(forecasts)`: submit exactly one forecast for exactly one question ID (`qid`).
-- `next_day()`: end the current session and proceed to the next one.
+- `mcp__forecast__submit_forecasts(question_id, outcomes)`: submit exactly one forecast for exactly one question ID (`qid`). Your forecasts are tracked by the harness — there is no file to inspect.
+- `mcp__forecast__next_day()`: end the current session and proceed to the next one.
 
 
-## Workspace: 
-- articles/ — Browsable news articles organized by date as articles/YYYY/MM/DD/articles.jsonl (one JSON article per line). New date directories appear after calling next_day.
+## Workspace:
+- market.csv — Read-only snapshot of all questions (refreshed each day).
+- articles/ — Browsable news articles organized by date as articles/YYYY/MM/DD/articles.jsonl (one JSON article per line). New date directories appear after calling `mcp__forecast__next_day`.
   - Each line has fields: `title` (headline), `source` (publisher domain, e.g. "www.reuters.com"), `date_publish` (original publication date, YYYY-MM-DD), `url` (canonical article link), `content` (full article body text to read/grep), plus `id`, `date` (crawl date), `date_modify`.
 - memory/ — Your persistent notes directory. Read and write freely. Files here persist across days. Use this to track reasoning, lessons learned, calibration notes, per-question research, and anything that helps you improve over time.
-- predictions/ — Your submitted forecasts (managed by `submit_forecasts` tool).
 
 {HANDHOLDING_SECTION}
 
 
 ## SUBMISSION RULES
 - qid must be from an active (`is_resolved=False`) question you identified from market.csv
-- Each `submit_forecasts` call must contain exactly one forecast for one question ID (`qid`).
+- Each `mcp__forecast__submit_forecasts` call must contain exactly one forecast for one question ID (`qid`).
 - You may submit again later in the same session to update that `qid`.
 - Maximum of {max_outcomes_per_question} outcomes allowed per question.
 - Outcome names must be REAL predicted answers (e.g. person names, locations, dates, etc.)
@@ -313,10 +314,10 @@ Column descriptions of the DataFrame (market.csv):
 
 
 ## Rules
-- No web access is available. Use search_news and articles/ for information.
+- No web access is available. Use `mcp__forecast__search_news` and articles/ for information.
 - market.csv is read-only. DO NOT modify it.
 - You can use Bash, Read, Write, Grep, Glob, and other tools freely in your workspace.
-- Your job is to maximize performance across metrics: accuracy, brier skill score, and TW-score.
+- Your job is to maximize your time-weighted score (TW-score).
 
 ---
 

@@ -1,0 +1,48 @@
+# Claude Code -> DeepSeek (deepseek-v4-pro) on aljazeeraQ12026v37 split.
+# Full 88-day sim (2025-12-31 -> 2026-03-28, 331 questions).
+#
+# Routes Claude Code through DeepSeek's Anthropic-compatible endpoint
+# (https://api.deepseek.com/anthropic). DEEPSEEK_API_KEY auto-loaded via
+# configs/deepseek_api_key.py (see scripts/test_basic_agent.py).
+#
+# Smoke-tested (3 days) on 2026-04-29: tmux session cc_v4pro_3day, GPU 2.
+# DeepSeek shim: 0 errors, MCP tool surface working end-to-end.
+#
+# Usage (tmux, free GPU):
+#   CUDA_VISIBLE_DEVICES=<idx> python scripts/test_basic_agent.py \
+#     --config configs/minimalHarness/aljazeeraQ12026v37_deepseek_v4pro_cc.yaml
+
+sim_name: "claude_code_aljazeeraQ12026v37_deepseek_v4_pro"
+
+start_date: "2025-12-31"
+end_date: "2026-03-28"
+resolution_start: "2025-12-31"
+resolution_end: "2026-03-28"
+lookback_days: 7
+search_cutoff_days: 0
+timegap_days: 1
+
+dataset: "openforesight"
+dataset_path: "${FSIM_DATASET_PATH}"
+split: "aljazeeraQ12026v37"
+resolved_only: false
+min_forecasters: 0
+output_base: "/fast/sgoel/forecasting/current_sim/final_runs_v37/"
+
+search_db: "${FSIM_SEARCH_DB}"
+embedding_model: "${FSIM_EMBEDDING_MODEL}"
+articles_base: "/fast/sgoel/forecasting/news/deduped_articles/data"
+
+matching: "openrouter"
+matcher: "deepseek/deepseek-v3.2"
+
+defaults:
+  provider: "none"
+  scaffold: "minimalHarness"
+  sandbox: true
+  anthropic_base_url: "https://api.deepseek.com/anthropic"
+
+agents:
+  - model: "deepseek-v4-pro"
+    timeout_seconds: 86400
+    claude_code_path: "/home/nchandak/.local/bin/claude"

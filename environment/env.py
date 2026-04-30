@@ -496,11 +496,27 @@ class SimulationEnvironment:
     def _resolve_question(self, q: Question):
         """Resolve a question and compute final scores."""
         from .scoring import compute_snapshot_peer_scores
-        
+
         history = self.prediction_histories.get(q.qid)
         if not history or not history.predictions:
+            # Still emit a resolution event so downstream metric consumers
+            # (MCP feedback, daily_metrics.csv) count this question toward
+            # the "all questions" denominator with a 0 contribution.
+            self.resolution_events.append({
+                "sim_date": str(self.current_date),
+                "qid": q.qid,
+                "title": q.title,
+                "source_split": q.source_split,
+                "ground_truth": q.ground_truth_answer,
+                "agents": {},
+            })
+            env_logging.print_resolution(q, {})
+            if q.qid in self.prediction_histories:
+                del self.prediction_histories[q.qid]
+            if q.qid in self.current_aggregates:
+                del self.current_aggregates[q.qid]
             return
-            
+
         # Resolve and compute time-weighted scores
         result = resolve_question(
             history,

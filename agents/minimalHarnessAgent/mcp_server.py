@@ -310,6 +310,10 @@ def next_day() -> str:
                     title = ev.get("title", "")
                     gt = ev.get("ground_truth", "?")
                     _cumulative["processed_qids"].add(qid)
+                    # Count every resolved question toward the denominator, so
+                    # accuracy/brier are computed across the whole question set
+                    # (unpredicted questions contribute 0 to both).
+                    _cumulative["resolved_count"] += 1
 
                     # Extract per-agent scoring from the event.
                     agents_data = ev.get("agents", {})
@@ -328,7 +332,6 @@ def next_day() -> str:
                         is_accurate = my_stats.get("is_accurate", False)
                         _cumulative["brier_sum"] += brier
                         _cumulative["tw_peer_sum"] += tw_peer
-                        _cumulative["resolved_count"] += 1
                         if is_accurate:
                             _cumulative["accuracy_count"] += 1
 
@@ -352,18 +355,25 @@ def next_day() -> str:
                         response_parts.append(f"- \"{title}\" → {gt}")
 
                 # --- Cumulative performance summary ---
+                # Denominator is ALL questions: resolved + currently active.
+                # Unpredicted (and still-active) questions contribute 0.
                 rc = _cumulative["resolved_count"]
+                active_count = len(_state.get("questions", []))
+                denom = rc + active_count
                 total_preds = _state.get("total_predictions", 0)
-                if rc > 0:
-                    avg_brier = _cumulative["brier_sum"] / rc
-                    accuracy = _cumulative["accuracy_count"] / rc * 100
+                if denom > 0:
+                    avg_brier = _cumulative["brier_sum"] / denom
+                    accuracy = _cumulative["accuracy_count"] / denom * 100
                     response_parts.append(
                         f"\n## YOUR CUMULATIVE PERFORMANCE TILL TODAY\n"
-                        f"- Total Predictions: {total_preds} ({rc} resolved)\n"
+                        f"- Total Predictions: {total_preds} ({rc} resolved, {active_count} active)\n"
                         f"- accuracy: {accuracy:.1f}% | brier skill score: {avg_brier:.3f} | "
                         f"time weighted score: {_cumulative['tw_peer_sum']:.2f}\n"
-                        f"  accuracy = fraction of resolved questions where your top outcome "
-                        f"matched the truth; brier skill score = mean brier skill score across resolved questions; "
+                        f"  accuracy = fraction of ALL questions (resolved + active) where your top "
+                        f"outcome matched the truth (0 credit for questions you did not predict or "
+                        f"that have not resolved); "
+                        f"brier skill score = mean brier skill score across ALL questions "
+                        f"(0 for questions you did not predict or that have not resolved); "
                         f"time weighted score = sum of brier skill scores across all resolved questions, across all days you held your respective predictions"
                     )
 

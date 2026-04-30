@@ -11,10 +11,26 @@ import pandas as pd
 from agents.utils.output_logger import AgentOutputLogger
 
 
-DAILY_METRICS_HEADER = (
-    "date,agent_id,avg_brier,peer_score,tw_peer_score,accuracy,exp_acc,"
-    "total_predictions,daily_submissions,avg_submission_tv_to_prev\n"
-)
+def _daily_metrics_header(single_agent: bool) -> str:
+    """
+    Header for daily_metrics.csv. In single-agent mode, the time-weighted
+    column is named ``tw_score`` (raw Brier-skill weighting against a 0
+    baseline) rather than ``tw_peer_score`` (peer-relative), and the
+    ``peer_score`` column is dropped entirely (it reduces to
+    ``100 × Σ Brier_skill``, which is redundant with ``avg_brier``).
+    """
+    if single_agent:
+        return (
+            "date,agent_id,avg_brier,tw_score,accuracy,exp_acc,"
+            "total_predictions,daily_submissions,avg_submission_tv_to_prev\n"
+        )
+    return (
+        "date,agent_id,avg_brier,peer_score,tw_peer_score,accuracy,exp_acc,"
+        "total_predictions,daily_submissions,avg_submission_tv_to_prev\n"
+    )
+
+
+DAILY_METRICS_HEADER = _daily_metrics_header(single_agent=False)
 
 
 class SimLogger:
@@ -39,9 +55,10 @@ class SimLogger:
         self.metrics_file = open(self.metrics_path, mode)
         self.test_metrics_path = os.path.join(output_dir, "test_daily_metrics.csv")
         self.test_metrics_file = open(self.test_metrics_path, mode)
-        if not append:
-            self.metrics_file.write(DAILY_METRICS_HEADER)
-            self.test_metrics_file.write(DAILY_METRICS_HEADER)
+        # Defer header write until the first log_daily_metrics call so we can
+        # pick the column name based on single- vs multi-agent mode.
+        self._metrics_header_written = bool(append)
+        self._test_metrics_header_written = bool(append)
 
         self._matcher_lock = Lock()
         self.matcher_file = open(os.path.join(output_dir, "matcher.jsonl"), mode)
@@ -118,36 +135,55 @@ class SimLogger:
         file_obj,
         sim_date: date,
         metrics_list: List[Dict[str, Any]],
+        single_agent: bool,
     ) -> None:
         for m in metrics_list:
-            row = (
-                f"{sim_date},{m['agent_id']},{m['avg_brier']:.4f},{m['peer_score']:.4f},"
-                f"{m['tw_peer_score']:.4f},{m['accuracy']:.2f},{m['exp_acc']:.4f},"
-                f"{m['total_predictions']},{m['daily_submissions']},"
-                f"{m['avg_submission_tv_to_prev']:.4f}\n"
-            )
+            if single_agent:
+                row = (
+                    f"{sim_date},{m['agent_id']},{m['avg_brier']:.4f},"
+                    f"{m['tw_peer_score']:.4f},{m['accuracy']:.2f},{m['exp_acc']:.4f},"
+                    f"{m['total_predictions']},{m['daily_submissions']},"
+                    f"{m['avg_submission_tv_to_prev']:.4f}\n"
+                )
+            else:
+                row = (
+                    f"{sim_date},{m['agent_id']},{m['avg_brier']:.4f},{m['peer_score']:.4f},"
+                    f"{m['tw_peer_score']:.4f},{m['accuracy']:.2f},{m['exp_acc']:.4f},"
+                    f"{m['total_predictions']},{m['daily_submissions']},"
+                    f"{m['avg_submission_tv_to_prev']:.4f}\n"
+                )
             file_obj.write(row)
 
     def log_daily_metrics(self, sim_date: date, metrics_list: List[Dict[str, Any]]) -> None:
+        single_agent = len(metrics_list) == 1
         with self._metrics_lock:
-            self._write_metrics_rows(self.metrics_file, sim_date, metrics_list)
+            if not self._metrics_header_written:
+                self.metrics_file.write(_daily_metrics_header(single_agent=single_agent))
+                self._metrics_header_written = True
+            self._write_metrics_rows(self.metrics_file, sim_date, metrics_list, single_agent)
             self.metrics_file.flush()
 
     def log_test_daily_metrics(self, sim_date: date, metrics_list: List[Dict[str, Any]]) -> None:
+        single_agent = len(metrics_list) == 1
         with self._metrics_lock:
-            self._write_metrics_rows(self.test_metrics_file, sim_date, metrics_list)
+            if not self._test_metrics_header_written:
+                self.test_metrics_file.write(_daily_metrics_header(single_agent=single_agent))
+                self._test_metrics_header_written = True
+            self._write_metrics_rows(self.test_metrics_file, sim_date, metrics_list, single_agent)
             self.test_metrics_file.flush()
 
     def reset_metrics_files(self) -> None:
         with self._metrics_lock:
             self.metrics_file.close()
             self.test_metrics_file.close()
-            with open(self.metrics_path, "w") as f:
-                f.write(DAILY_METRICS_HEADER)
-            with open(self.test_metrics_path, "w") as f:
-                f.write(DAILY_METRICS_HEADER)
+            # Preserve the header style (single- vs multi-agent) on reset by
+            # deferring again to the next write.
+            open(self.metrics_path, "w").close()
+            open(self.test_metrics_path, "w").close()
             self.metrics_file = open(self.metrics_path, "a")
             self.test_metrics_file = open(self.test_metrics_path, "a")
+            self._metrics_header_written = False
+            self._test_metrics_header_written = False
 
     def log_matcher(
         self,
@@ -255,6 +291,10 @@ class MarketWriter:
                 }
             )
 
+        # Agents (e.g. minimalHarness) may chmod this file read-only while active.
+        # On resume, the owner may no longer have write perms — ensure we can overwrite.
+        if os.path.exists(self.csv_path):
+            os.chmod(self.csv_path, 0o644)
         pd.DataFrame(rows).to_csv(self.csv_path, index=False)
         return self.csv_path
 

@@ -291,6 +291,15 @@ def build_metrics_list(
     )
     resolved_stats = compute_resolved_metrics_from_events(env, source_split=source_split)
 
+    # Denominator for mean metrics: ALL questions (resolved + active),
+    # not just ones this agent predicted on. Unpredicted questions contribute
+    # 0 to brier/accuracy/exp_acc sums.
+    total_resolved_questions = sum(
+        1 for ev in env.resolution_events
+        if not source_split or ev.get("source_split") == source_split
+    )
+    total_question_count = total_resolved_questions + len(filtered_active_questions)
+
     daily_submission_stats: Dict[str, Dict[str, float]] = {}
     for q in filtered_active_questions:
         history = env.prediction_histories.get(q.qid)
@@ -348,11 +357,14 @@ def build_metrics_list(
         total_tw_peer_sum = resolved["tw_peer_sum"] + agent_active["tw_peer_sum"]
         total_correct = resolved["correct_count"] + agent_active["correct_count"]
         total_truth_prob = resolved["truth_prob_sum"] + agent_active["truth_prob_sum"]
-        total_count = resolved["count"] + agent_active["count"]
+        predicted_count = resolved["count"] + agent_active["count"]
 
-        avg_brier = total_brier_sum / total_count if total_count > 0 else 0.0
-        accuracy = (total_correct / total_count * 100) if total_count > 0 else 0.0
-        exp_acc = total_truth_prob / total_count if total_count > 0 else 0.0
+        # Means are taken over ALL questions (resolved + active), with 0
+        # contribution from questions this agent did not predict on.
+        denom = total_question_count
+        avg_brier = total_brier_sum / denom if denom > 0 else 0.0
+        accuracy = (total_correct / denom * 100) if denom > 0 else 0.0
+        exp_acc = total_truth_prob / denom if denom > 0 else 0.0
         avg_submission_tv = (
             submission_stats["tv_sum"] / submission_stats["tv_count"]
             if submission_stats["tv_count"] > 0
@@ -367,7 +379,8 @@ def build_metrics_list(
                 "tw_peer_score": total_tw_peer_sum,
                 "accuracy": accuracy,
                 "exp_acc": exp_acc,
-                "total_predictions": int(total_count),
+                "total_predictions": int(predicted_count),
+                "total_questions": int(total_question_count),
                 "daily_submissions": int(submission_stats["count"]),
                 "avg_submission_tv_to_prev": avg_submission_tv,
             }

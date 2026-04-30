@@ -413,6 +413,32 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
             from agents.minimalHarnessAgent.agent import MinimalHarnessAgent, MinimalHarnessConfig
             agent_id = f"minimalHarness_{model.replace('/', '_').replace('.', '')}_{i+1:03d}"
             cc_search_cutoff = agent_def.get('search_cutoff_days', defaults.get('search_cutoff_days', getattr(args, 'search_cutoff_days', 0)))
+            harness_backend = agent_def.get('harness_backend', defaults.get('harness_backend', 'claude_code'))
+            openrouter_api_key = ''
+            if harness_backend == 'opencode':
+                try:
+                    from configs.openrouter_api_key import OPENROUTER_API_KEY as _OR_KEY
+                    openrouter_api_key = _OR_KEY
+                except ImportError:
+                    openrouter_api_key = os.environ.get('OPENROUTER_API_KEY', '')
+
+            anthropic_base_url = agent_def.get('anthropic_base_url', defaults.get('anthropic_base_url', ''))
+            anthropic_auth_token = agent_def.get('anthropic_auth_token', defaults.get('anthropic_auth_token', ''))
+            if anthropic_base_url and not anthropic_auth_token:
+                if 'z.ai' in anthropic_base_url:
+                    try:
+                        from configs.glm_api_key import GLM_API_KEY as _GLM_KEY
+                        anthropic_auth_token = _GLM_KEY
+                    except ImportError:
+                        anthropic_auth_token = os.environ.get('GLM_API_KEY', '') or os.environ.get('ANTHROPIC_AUTH_TOKEN', '')
+                elif 'deepseek.com' in anthropic_base_url:
+                    try:
+                        from configs.deepseek_api_key import DEEPSEEK_API_KEY as _DS_KEY
+                        anthropic_auth_token = _DS_KEY
+                    except ImportError:
+                        anthropic_auth_token = os.environ.get('DEEPSEEK_API_KEY', '') or os.environ.get('ANTHROPIC_AUTH_TOKEN', '')
+                else:
+                    anthropic_auth_token = os.environ.get('ANTHROPIC_AUTH_TOKEN', '')
             cc_config = MinimalHarnessConfig(
                 model=model,
                 search_db=getattr(args, 'search_db', '') or '',
@@ -425,6 +451,17 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
                 timeout_seconds=int(agent_def.get('timeout_seconds', defaults.get('timeout_seconds', 7200))),
                 max_budget_usd=agent_def.get('max_budget_usd', defaults.get('max_budget_usd')),
                 claude_code_path=agent_def.get('claude_code_path', defaults.get('claude_code_path', 'claude')),
+                harness_backend=harness_backend,
+                opencode_path=agent_def.get('opencode_path', defaults.get('opencode_path', 'opencode')),
+                codex_path=agent_def.get('codex_path', defaults.get('codex_path', 'codex')),
+                reasoning_effort=agent_def.get('reasoning_effort', defaults.get('reasoning_effort', 'high')),
+                codex_resume=bool(agent_def.get('codex_resume', defaults.get('codex_resume', False))),
+                claude_code_resume=bool(agent_def.get('claude_code_resume', defaults.get('claude_code_resume', False)) or args.resume),
+                openrouter_api_key=openrouter_api_key,
+                anthropic_base_url=anthropic_base_url,
+                anthropic_auth_token=anthropic_auth_token,
+                extra_flags=list(agent_def.get('extra_flags', defaults.get('extra_flags', []))),
+                sandbox=bool(agent_def.get('sandbox', defaults.get('sandbox', False))),
             )
             agent = MinimalHarnessAgent(
                 agent_id=agent_id,

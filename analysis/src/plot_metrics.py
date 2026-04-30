@@ -75,8 +75,9 @@ def main():
     # 1. Avg Brier
     plot_metric(df, 'avg_brier', 'Average Brier Score over Time', os.path.join(args.output_dir, 'avg_brier.png'))
     
-    # 2. TW Peer Score
-    plot_metric(df, 'tw_peer_score', 'Time-Weighted Peer Score over Time', os.path.join(args.output_dir, 'tw_peer_score.png'))
+    # 2. TW Score (column name differs between single- and multi-agent runs)
+    tw_col = 'tw_score' if 'tw_score' in df.columns else 'tw_peer_score'
+    plot_metric(df, tw_col, 'Time-Weighted Score over Time', os.path.join(args.output_dir, f'{tw_col}.png'))
     
     # 3. Accuracy
     plot_metric(df, 'accuracy', 'Accuracy over Time', os.path.join(args.output_dir, 'accuracy.png'))

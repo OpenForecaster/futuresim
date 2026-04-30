@@ -269,6 +269,7 @@ def test_metrics_builder_can_filter_to_test_split():
         "accuracy": 100.0,
         "exp_acc": 0.8,
         "total_predictions": 1,
+        "total_questions": 1,
         "daily_submissions": 0,
         "avg_submission_tv_to_prev": 0.0,
     }]

@@ -453,6 +453,9 @@ def extract_assistant_message(chat_response_json: Dict[str, Any]) -> Dict[str, A
     tool_calls = message.get("tool_calls")
     if isinstance(tool_calls, list):
         out["tool_calls"] = tool_calls
+    reasoning = message.get("reasoning")
+    if isinstance(reasoning, str) and reasoning:
+        out["reasoning"] = reasoning
     return out
 
 

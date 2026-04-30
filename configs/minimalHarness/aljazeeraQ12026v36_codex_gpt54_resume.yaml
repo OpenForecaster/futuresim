@@ -1,0 +1,50 @@
+# Codex CLI + gpt-5.4 (max reasoning) on aljazeeraQ12026v36 split with RESUME
+# mode (codex exec resume <thread_id>). Single context window across all sim
+# days. Resolution dates 2026-01-01 -> 2026-03-28 (334 questions).
+#
+# Usage:
+#   python scripts/test_basic_agent.py --config configs/minimalHarness/aljazeeraQ12026v36_codex_gpt54_resume.yaml
+
+sim_name: "codex_aljazeeraQ12026v36_gpt54_resume"
+
+start_date: "2025-12-31"
+end_date: "2026-03-28"
+resolution_start: "2025-12-31"
+resolution_end: "2026-03-28"
+lookback_days: 7
+search_cutoff_days: 0
+timegap_days: 1
+
+dataset: "openforesight"
+dataset_path: "${FSIM_DATASET_PATH}"
+split: "aljazeeraQ12026v36"
+resolved_only: false
+min_forecasters: 0
+output_base: "/fast/sgoel/forecasting/current_sim/final_runs_v36/"
+
+search_db: "${FSIM_SEARCH_DB}"
+embedding_model: "${FSIM_EMBEDDING_MODEL}"
+articles_base: "/fast/sgoel/forecasting/news/deduped_articles/data"
+
+matching: "openrouter"
+matcher: "deepseek/deepseek-v3.2"
+
+defaults:
+  provider: "none"
+  scaffold: "minimalHarness"
+  harness_backend: "codex"
+  codex_path: "/home/nchandak/.local/bin/codex"
+  reasoning_effort: "high"
+  codex_resume: true
+  sandbox: true
+
+resources:
+  gpus: 1
+  cpus: 16
+  memory_gb: 80
+  disk_gb: 50
+  bid: 35
+
+agents:
+  - model: "gpt-5.4"
+    timeout_seconds: 86400

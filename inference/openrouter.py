@@ -341,8 +341,10 @@ class OpenRouterInference:
                     reasoning = usage.get("_reasoning_content")
                     finish_reason = usage.get("_finish_reason")
 
-                    # Treat null/empty content as retryable when reasoning exists
-                    if (not content or not content.strip()) and reasoning:
+                    # Treat null/empty content as retryable when reasoning exists.
+                    # Skip when finish_reason=tool_calls — the response payload is in
+                    # tool_calls, so empty content + reasoning is the normal shape.
+                    if (not content or not content.strip()) and reasoning and finish_reason != "tool_calls":
                         last_error = Exception(
                             f"Empty content with reasoning ({len(reasoning)} chars), finish_reason={finish_reason}"
                         )

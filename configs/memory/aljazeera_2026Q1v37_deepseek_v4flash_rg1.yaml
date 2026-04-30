@@ -1,0 +1,69 @@
+# True 1-day warmup-only oracle run: deepseek-v4-flash on aljazeeraQ12026v37 with resolution_guard=1.
+# Each question's effective warmup date = its resolution_date - 1 day (per-question oracle).
+# v4-flash uses 1M context; xhigh maps to "max" reasoning on flash.
+# Requires BYOK DeepSeek key on openrouter (otherwise upstream rate-limits).
+#
+# Usage: python mpi_scripts/run_sim/submit_sim.py --config configs/memory/aljazeera_2026Q1v37_deepseek_v4flash_rg1.yaml --runs 1
+
+# --- Simulation Meta ---
+sim_name: "ds_v4flash_rg1_aljazeeraQ12026v37"
+start_date: "2026-03-29"           # = end_date with lookback_days=0 => 1-day env loop
+end_date: "2026-03-29"
+resolution_start: "2026-01-01"
+resolution_end: "2026-03-29"
+lookback_days: 0
+search_cutoff_days: 0
+timegap_days: 1
+resolution_guard: 1
+split: "aljazeeraQ12026v37"
+
+# --- Data Paths ---
+dataset: "openforesight"
+dataset_path: "${FSIM_DATASET_PATH}"
+resolved_only: false
+min_forecasters: 0
+output_base: "/fast/sgoel/forecasting/current_sim/final_runs_v37"
+warmup_parallelism: 64
+
+# --- Search Settings ---
+search_db: "${FSIM_SEARCH_DB}"
+embedding_model: "${FSIM_EMBEDDING_MODEL}"
+embedding_gpu_mem: 0.7
+articles_base: "/fast/sgoel/forecasting/news/deduped_articles/data"
+
+# --- Answer Matching ---
+matching: "openrouter"
+matcher: "deepseek/deepseek-v3.2"
+matcher_gpu_mem: 0.0
+max_model_len: 32768
+
+# --- Inference Defaults ---
+rate_limit: 32.0
+parallel: true
+
+# --- Agents Configuration ---
+defaults:
+  provider: "openrouter"
+  scaffold: "allQ"
+  temperature: 0.7
+  max_tokens: 32768
+  max_retries: 3
+  reasoning:
+    effort: xhigh
+
+  # --- Context-window budgets (scaled for v4-flash 1M ctx) ---
+  warmup_max_actions: null
+  warmup_max_total_tokens: 204800
+  submit_reserve_tokens: 16384
+  force_submit_threshold_tokens: 32768
+
+resources:
+  gpus: 1
+  cpus: 16
+  memory_gb: 80
+  disk_gb: 50
+  bid: 150
+
+agents:
+  - model: "deepseek/deepseek-v4-flash"
+    provider: "openrouter"

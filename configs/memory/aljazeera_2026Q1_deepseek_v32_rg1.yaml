@@ -1,0 +1,76 @@
+# True 1-day warmup-only oracle run: deepseek-v3.2 on aljazeeraQ12026 with resolution_guard=1.
+# Each question's effective warmup date = its resolution_date - 1 day (per-question oracle).
+#
+# How the 1-day-only behavior is achieved:
+#   sim_start = start_date - lookback_days = 2026-03-30 - 0 = 2026-03-30
+#   sim_end   = end_date                                    = 2026-03-30
+#   => env loop runs exactly one day (Day 0 = 2026-03-30).
+#   On Day 0 the allQ scaffold parallel-warmups every question; resolution_guard=1
+#   makes each question's search context = resolution_date - 1, independent of clock.
+#   After warmup the env resolves all questions (all resolve on or before 03-30).
+#
+# Mirrors configs/memory/aljazeera_2026Q1.yaml (same split / scoring regime),
+# but drops persistent memory (rg1 oracle is per-question independent).
+#
+# Usage: python mpi_scripts/run_sim/submit_sim.py --config configs/memory/aljazeera_2026Q1_deepseek_v32_rg1.yaml --runs 1
+
+# --- Simulation Meta ---
+sim_name: "ds_rg1_aljazeeraQ12026"
+start_date: "2026-03-30"           # = end_date with lookback_days=0 => 1-day env loop
+end_date: "2026-03-30"
+resolution_start: "2025-12-31"
+resolution_end: "2026-03-30"
+lookback_days: 0                   # No pre-warmup days; sim_start == sim_end
+search_cutoff_days: 0
+timegap_days: 1
+resolution_guard: 1                # effective warmup date = resolution_date - 1
+split: "aljazeeraQ12026"
+
+# --- Data Paths ---
+dataset: "openforesight"
+dataset_path: "${FSIM_DATASET_PATH}"
+resolved_only: false
+min_forecasters: 0
+output_base: "${FSIM_OUTPUT_BASE}/final_runs"
+warmup_parallelism: 64
+
+# --- Search Settings ---
+search_db: "${FSIM_SEARCH_DB}"
+embedding_model: "${FSIM_EMBEDDING_MODEL}"
+embedding_gpu_mem: 0.7
+articles_base: "/fast/sgoel/forecasting/news/deduped_articles/data"
+
+# --- Answer Matching ---
+matching: "openrouter"
+matcher: "deepseek/deepseek-v3.2"
+matcher_gpu_mem: 0.0
+max_model_len: 8192
+
+# --- Inference Defaults ---
+rate_limit: 32.0
+parallel: true
+
+# --- Agents Configuration ---
+defaults:
+  provider: "openrouter"
+  scaffold: "allQ"
+  temperature: 0.7
+  max_tokens: 8192
+  max_retries: 3
+
+  # --- Context-window budgets ---
+  warmup_max_actions: null
+  warmup_max_total_tokens: 40960
+  submit_reserve_tokens: 4096
+  force_submit_threshold_tokens: 8192
+
+resources:
+  gpus: 1
+  cpus: 16
+  memory_gb: 80
+  disk_gb: 50
+  bid: 150
+
+agents:
+  - model: "deepseek/deepseek-v3.2"
+    provider: "openrouter"

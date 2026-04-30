@@ -1,0 +1,45 @@
+# Claude Code Sonnet 4.6 on aljazeeraQ12026 split (440 questions, Jan-Mar 2026).
+# Uses 24h per-day timeout so slow agents don't get truncated mid-Day-0.
+#
+# Usage: python mpi_scripts/run_sim/submit_sim.py --config configs/minimalHarness/aljazeeraQ12026_sonnet.yaml --runs 1
+
+sim_name: "claude_code_aljazeeraQ12026_sonnet"
+
+start_date: "2025-12-31"
+end_date: "2026-03-30"
+resolution_start: "2025-12-31"
+resolution_end: "2026-03-30"
+lookback_days: 7
+search_cutoff_days: 0
+timegap_days: 1
+
+dataset: "openforesight"
+dataset_path: "${FSIM_DATASET_PATH}"
+split: "aljazeeraQ12026"
+resolved_only: false
+min_forecasters: 0
+output_base: "/fast/sgoel/forecasting/current_sim/final_runs/"
+
+search_db: "${FSIM_SEARCH_DB}"
+embedding_model: "${FSIM_EMBEDDING_MODEL}"
+articles_base: "/fast/sgoel/forecasting/news/deduped_articles/data"
+
+matching: "openrouter"
+matcher: "deepseek/deepseek-v3.2"
+
+defaults:
+  provider: "none"
+  scaffold: "minimalHarness"
+  sandbox: true
+
+resources:
+  gpus: 1
+  cpus: 16
+  memory_gb: 80
+  disk_gb: 50
+  bid: 205
+
+agents:
+  - model: "claude-sonnet-4-6"
+    timeout_seconds: 86400
+    claude_code_path: "/home/nchandak/.local/bin/claude"

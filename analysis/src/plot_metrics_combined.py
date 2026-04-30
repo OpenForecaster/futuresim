@@ -29,9 +29,11 @@ def main():
     df['date'] = pd.to_datetime(df['date'])
     df = df.sort_values(by=['date', 'agent_id'])
 
+    tw_col = 'tw_score' if 'tw_score' in df.columns else 'tw_peer_score'
+    tw_label = 'TW Score' if tw_col == 'tw_score' else 'TW Peer Score'
     metrics = [
         ('avg_brier', 'Avg Brier Score'),
-        ('tw_peer_score', 'TW Peer Score'),
+        (tw_col, tw_label),
         ('accuracy', 'Accuracy (%)'),
     ]
 

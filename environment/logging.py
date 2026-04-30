@@ -37,7 +37,13 @@ def print_final_summary(env, active_stats: Dict[str, Dict[str, float]]) -> None:
         print("  No agents participated.")
         return
 
-    header = f"{'Agent':<25} {'Avg Brier':>10} {'Peer':>10} {'TW-Peer':>10} {'Acc %':>8} {'Total':>6}"
+    # Mean metrics are taken over ALL questions (resolved + currently active),
+    # not just ones an agent predicted on. Unpredicted questions contribute 0.
+    total_resolved_questions = len(env.resolution_events)
+    total_active_questions = len(env.q_pool.get_active())
+    total_question_count = total_resolved_questions + total_active_questions
+
+    header = f"{'Agent':<25} {'Avg Brier':>10} {'Peer':>10} {'TW-Peer':>10} {'Acc %':>8} {'Pred':>6} {'Qs':>6}"
     print(header)
     print("-" * 90)
 
@@ -65,22 +71,24 @@ def print_final_summary(env, active_stats: Dict[str, Dict[str, float]]) -> None:
         total_peer_sum = resolved_snapshot_peer + agent_active["peer_sum"]
         total_tw_peer_sum = resolved_tw_peer + agent_active["tw_peer_sum"]
         total_correct = resolved_correct + agent_active["correct_count"]
-        total_count = resolved_count + agent_active["count"]
+        predicted_count = resolved_count + agent_active["count"]
 
-        avg_brier = total_brier_sum / total_count if total_count > 0 else 0.0
-        accuracy = (total_correct / total_count * 100) if total_count > 0 else 0.0
+        denom = total_question_count
+        avg_brier = total_brier_sum / denom if denom > 0 else 0.0
+        accuracy = (total_correct / denom * 100) if denom > 0 else 0.0
         display_name = aid[:24] if len(aid) > 24 else aid
 
         row = (
             f"{display_name:<25} {avg_brier:>+10.3f} {total_peer_sum:>+10.2f} "
-            f"{total_tw_peer_sum:>+10.2f} {accuracy:>7.1f}% {total_count:>6}"
+            f"{total_tw_peer_sum:>+10.2f} {accuracy:>7.1f}% {predicted_count:>6} {denom:>6}"
         )
         print(row)
 
     print("-" * 90)
-    print("Legend: Avg Brier=Mean Brier score per question (Active + Resolved)")
-    print("        Peer=Snapshot peer sum, TW-Peer=Time-weighted peer sum")
-    print("        Acc=% of questions where agent's top choice matched truth.")
+    print("Legend: Avg Brier / Acc are means over ALL questions (resolved + active);")
+    print("        unpredicted questions contribute 0. Peer=Snapshot peer sum,")
+    print("        TW-Peer=Time-weighted peer sum. Pred=# questions agent predicted,")
+    print("        Qs=total question count (denominator).")
     print("=" * 90)
 
 
