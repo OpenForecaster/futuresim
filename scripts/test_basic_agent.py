@@ -465,7 +465,10 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
                     'timegap_days',
                     defaults.get('timegap_days', config.get('timegap_days', 1)),
                 )),
-                claude_code_resume=bool(agent_def.get('claude_code_resume', defaults.get('claude_code_resume', False)) or args.resume),
+                claude_code_resume=bool(
+                    agent_def.get('claude_code_resume', defaults.get('claude_code_resume', False))
+                    or (args.resume and str(agent_def.get('prompt_mode', defaults.get('prompt_mode', 'default'))) != 'active_memory')
+                ),
                 openrouter_api_key=openrouter_api_key,
                 anthropic_base_url=anthropic_base_url,
                 anthropic_auth_token=anthropic_auth_token,

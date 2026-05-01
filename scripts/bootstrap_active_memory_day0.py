@@ -26,6 +26,7 @@ import json
 import re
 from datetime import date
 from pathlib import Path
+from typing import Optional
 
 import pandas as pd
 import yaml
@@ -110,14 +111,15 @@ META_ENTRIES = [
 ]
 
 
-def build_meta_yaml(day0: str) -> str:
-    entries = [{
+def build_meta_yaml(day0: str, entries: Optional[list] = None) -> str:
+    src = entries if entries is not None else META_ENTRIES
+    out = [{
         "name": e["name"],
         "description": e["description"],
         "content": e["content"],
         "added": day0,
-    } for e in META_ENTRIES]
-    return yaml.safe_dump(entries, default_flow_style=False, allow_unicode=True)
+    } for e in src]
+    return yaml.safe_dump(out, default_flow_style=False, allow_unicode=True)
 
 
 def _validate_meta_entries(entries: list) -> None:

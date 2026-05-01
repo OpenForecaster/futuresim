@@ -291,6 +291,19 @@ def next_day() -> str:
             new_date_obj = _parse_date(new_date)
 
             active_count = len(_state.get("questions", []))
+            tomorrow_iso = (new_date_obj + timedelta(days=1)).isoformat() if new_date_obj else None
+            imminent_qids = [
+                q.get("qid") for q in _state.get("questions", [])
+                if tomorrow_iso and q.get("resolution_date") == tomorrow_iso
+            ]
+            imminent_msg = (
+                f"**IMPORTANT**: {len(imminent_qids)} question(s) resolve tomorrow ({tomorrow_iso}): "
+                f"{imminent_qids}. Make sure your prediction on each is up-to-date before calling next_day — "
+                "stale forecasts might hurt your performance."
+                if imminent_qids else
+                f"No questions resolve tomorrow ({tomorrow_iso}), but still scan for ones "
+                "resolving soon (check the resolution_date column in market.csv)."
+            )
             response_parts = [
                 f"Day advanced to {new_date}.",
                 _build_new_articles_message(_parse_date(cur_date), new_date_obj),
@@ -300,6 +313,7 @@ def next_day() -> str:
                     "has shifted your view before calling next_day again. A forecast "
                     "is never \"done\" while its question is still active."
                 ),
+                imminent_msg,
             ]
 
             # --- Per-question resolution feedback with scores ---

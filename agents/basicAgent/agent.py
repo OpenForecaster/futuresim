@@ -453,10 +453,30 @@ class BasicAgent(BaseAgent):
                     articles_text = f"{count:,} new articles have been published since your last update and you can access them using the search tool. "
             if not articles_text:
                 articles_text = "New articles have been published since your last update and you can access them using the search tool. "
+        tomorrow = current_date + timedelta(days=1)
+        imminent_qids = []
+        fi = getattr(self, "_forecast_interface", None)
+        if fi is not None and hasattr(fi, "questions"):
+            imminent_qids = [
+                qid for qid, q in (fi.questions or {}).items()
+                if getattr(q, "resolution_date", None) == tomorrow
+            ]
+        if imminent_qids:
+            imminent_reminder = (
+                f"**IMPORTANT**: {len(imminent_qids)} question(s) resolve tomorrow ({tomorrow.isoformat()}): "
+                f"{imminent_qids}. Make sure your prediction on each is up-to-date before calling next_day — "
+                "stale forecasts might hurt your performance."
+            )
+        else:
+            imminent_reminder = (
+                f"No questions resolve tomorrow ({tomorrow.isoformat()}), but still scan for ones "
+                "resolving soon (filter `df` by `resolution_date`)."
+            )
         return (
             "## UPDATE CADENCE\n"
             f"You have the chance to update your predictions every {self._get_timegap_days()} day(s). Your context is cleared after every session and your memory (along with past predictions) is the only information retained between sessions. {articles_text}"
-            f"{last_text}Current date: {current_date}. {next_text}\n\n"
+            f"{last_text}Current date: {current_date}. {next_text}\n"
+            f"{imminent_reminder}\n\n"
         )
 
     def _build_memory_carryover_note(self, current_date: date) -> str:
@@ -1523,7 +1543,7 @@ class BasicAgent(BaseAgent):
         mechanics: Dict[str, str] = {
             "accuracy_calibration": "**Accuracy + Calibration**: Assign probabilities that reflect true likelihood.",
             "binary_outcomes": "**Binary Outcomes**: Use exact outcomes \"Yes\" and \"No\".",
-            "time_weighted": "**Time-Weighted Score (TW-Score)**: For each question, your time-weighted score = sum(daily_score) / total_question_days where daily_score is the Brier Skill Score for that day (0 if you have no active prediction on that question) and total_question_days is the number of days the question was active. Each prediction's Brier Skill Score (1 minus sum of squared errors) is weighted by how many days it was active before you updated it. Predictions made earlier carry more weight since they cover more days, so act on your best information as soon as possible rather than waiting.",
+            "time_weighted": "**Time-Weighted Score (TW-Score)**: For each question, your time-weighted score = sum(daily_score) / total_question_days where daily_score is the Brier Skill Score for that day (0 if you have no active prediction on that question) and total_question_days is the number of days the question was active. Each prediction's Brier Skill Score (1 minus sum of squared errors) is weighted by how many days it was active before you updated it. Predictions made earlier carry more weight since they cover more days, so act on your best information as soon as possible rather than waiting — **but the TW score equally rewards updating when new evidence arrives, since each new submission overwrites the prior one and accrues weight from that day forward. Never treat a forecast as \"done\" while its question is still active.**",
             "question_count": "**Prediction-Count Incentive**: Scores are summed (not averaged) across all questions you predict on.",
         }
         if show_peer:
@@ -1562,7 +1582,7 @@ Key Mechanics:
 
         mechanics: Dict[str, str] = {
             "accuracy_calibration": "**Accuracy + Calibration**: Try to guess the most likely outcome(s) and assign calibrated probabilities which reflect the likelihood of the outcome(s) occurring.",
-            "time_weighted": "**Time-Weighted Score (TW-Score)**: For each question, your time-weighted score = sum(daily_score * 100) / total_question_days where daily_score is the Brier Skill Score for that day (0 if you have no active prediction on that question) and total_question_days is the number of days the question was active. Each prediction's Brier Skill Score (1 minus sum of squared errors) is weighted by how many days it was active before you updated it. Predictions made earlier carry more weight since they cover more days, so act on your best information as soon as possible rather than waiting. Thus, for a set of K questions in total (in the market), the maximum possible TW-Score is 100 * K (if one predicts the correct answer for all K questions on their respective opening date each with 100% probability) and minimum possible TW-Score similarly is -100 * K.",
+            "time_weighted": "**Time-Weighted Score (TW-Score)**: For each question, your time-weighted score = sum(daily_score * 100) / total_question_days where daily_score is the Brier Skill Score for that day (0 if you have no active prediction on that question) and total_question_days is the number of days the question was active. Each prediction's Brier Skill Score (1 minus sum of squared errors) is weighted by how many days it was active before you updated it. Predictions made earlier carry more weight since they cover more days, so act on your best information as soon as possible rather than waiting — **but the TW score equally rewards updating when new evidence arrives, since each new submission overwrites the prior one and accrues weight from that day forward. Never treat a forecast as \"done\" while its question is still active.** Thus, for a set of K questions in total (in the market), the maximum possible TW-Score is 100 * K (if one predicts the correct answer for all K questions on their respective opening date each with 100% probability) and minimum possible TW-Score similarly is -100 * K.",
             "question_count": "**Prediction-Count Incentive**: For each question where you don't have any active prediction on a day, your accuracy, brier skill score, and TW-score for that question will be counted as 0 on that day. Your job is to MAXIMIZE your TW-score. Your TW-score is summed (NOT averaged) across all questions and higher score is better.",
             "end_of_session_metrics": "**End-of-Session Metrics**: At the end of each session, your accuracy, brier skill score, and TW-score *until that session* are calculated and displayed to you. Accuracy and Brier Skill Score are calculated by taking the mean across ALL the questions (0 for question where you don't have any active prediction) while TW-Score is summed across all questions. You are encouraged to maximize your TW-score throughout.",
             "max_outcomes": f"**Max Outcomes**: Submit at most {self.config.max_outcomes_per_question} outcomes per question.",

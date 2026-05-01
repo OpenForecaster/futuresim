@@ -22,7 +22,8 @@ WORKFLOW_BASIC = """\
 2. Research using `mcp__forecast__search_news` and direct file browsing in articles/.
 3. Submit predictions for each active question using `mcp__forecast__submit_forecasts`.
 4. Call `mcp__forecast__next_day` when done. You'll receive resolution feedback with your Brier score per question — use this to learn from mistakes and improve calibration.
-5. On every subsequent day: re-read market.csv, search the new articles for updates, and **revise any forecast on a still-active question where new evidence has shifted your view**, then call next_day. A forecast is never "done" while its question is still active."""
+5. On every subsequent day: re-read market.csv, search the new articles for updates, and **revise any forecast on a still-active question where new evidence has shifted your view**, then call next_day. A forecast is never "done" while its question is still active.
+6. **IMPORTANT**: Actively look out for questions resolving the next day (check via the `resolution_date` column of market.csv) and make sure you have up-to-date predictions on them."""
 
 
 HANDHOLDING_SECTION = """\
@@ -134,6 +135,7 @@ def _build_cadence_section(
     new_articles_count: Optional[int] = None,
     last_active_date=None,
     next_active_date=None,
+    imminent_qids: Optional[list] = None,
 ) -> str:
     """Matches BasicAgent._build_cadence_section template.
     CC-SPECIFIC: The system prompt is written once at startup so we cannot
@@ -152,6 +154,20 @@ def _build_cadence_section(
         if next_active_date
         else "No later updates are scheduled."
     )
+    tomorrow_iso = _iso(current_date + timedelta(days=1)) if hasattr(current_date, "__add__") else None
+    if imminent_qids:
+        imminent_reminder = (
+            f"**IMPORTANT**: {len(imminent_qids)} question(s) resolve tomorrow ({tomorrow_iso}): "
+            f"{list(imminent_qids)}. Make sure your prediction on each is up-to-date before calling next_day — "
+            "stale forecasts might hurt your performance."
+        )
+    elif tomorrow_iso is not None:
+        imminent_reminder = (
+            f"No questions resolve tomorrow ({tomorrow_iso}), but still scan for ones "
+            "resolving soon (check the resolution_date column in market.csv)."
+        )
+    else:
+        imminent_reminder = ""
     return (
         "## UPDATE CADENCE\n"
         f"You have the chance to update your predictions every {timegap_days} day(s). "
@@ -160,7 +176,8 @@ def _build_cadence_section(
         # information retained between sessions."
         "Your workspace files (memory/, scripts, notes) persist across days — use them to track reasoning and lessons learned. "
         "Articles are available via the search tool and in the articles/ directory. "
-        f"Current date: {_iso(current_date)}. {next_text}\n\n"
+        f"Current date: {_iso(current_date)}. {next_text}\n"
+        f"{imminent_reminder}\n\n"
     )
 
 

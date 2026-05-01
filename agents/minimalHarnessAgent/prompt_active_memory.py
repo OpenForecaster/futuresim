@@ -57,10 +57,11 @@ def _allq_reminder(predicted_count: int, active_count: int) -> str:
         "- Do NOT re-predict questions from scratch unless you find specific new evidence.\n"
         "- Only update a prediction if you find SPECIFIC NEW evidence (news, data) that updates your view.\n\n"
         "PRIORITIES FOR UPDATES:\n"
-        "1. Questions without predictions (if any)\n"
-        "2. Questions where today's news search reveals new information\n"
-        "3. Questions approaching resolution date that you haven't checked recently\n"
-        "4. Skip questions where there is no new evidence"
+        "1. **Questions resolving the next day** (filter `market.csv` by `resolution_date` == tomorrow) — make sure your prediction is up-to-date before calling next_day.\n"
+        "2. Questions without predictions (if any)\n"
+        "3. Questions where today's news search reveals new information\n"
+        "4. Questions approaching resolution date that you haven't checked recently\n"
+        "5. Skip questions where there is no new evidence"
     )
 
 
@@ -120,6 +121,7 @@ def build_daily_prompt(
     search_cutoff_days: int,
     timegap_days: int,
     new_articles_count: Optional[int] = None,
+    imminent_qids: Optional[list] = None,
 ) -> str:
     """Build the per-day user prompt for codex active_memory mode.
 
@@ -151,6 +153,7 @@ def build_daily_prompt(
         new_articles_count=new_articles_count,
         last_active_date=last_active_date,
         next_active_date=next_active_date,
+        imminent_qids=imminent_qids,
     )
     memory_section = _memory_section(
         last_active_date=last_active_date,

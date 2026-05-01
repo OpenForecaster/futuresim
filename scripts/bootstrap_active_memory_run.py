@@ -99,6 +99,9 @@ def main():
     ap.add_argument("--day0", required=True, help="Bootstrap day (YYYY-MM-DD); typically sim_start - 1 = first sim day")
     ap.add_argument("--restart-from-day", required=True, help="First day the new run will simulate (typically day0 + timegap)")
     ap.add_argument("--target-agent-idx", type=int, default=1, help="Index used for new agent_id (default: 1)")
+    ap.add_argument("--meta-source", default=None,
+                    help="Optional YAML file with custom META_ENTRIES (list of {name, description, content}). "
+                         "Defaults to the built-in gpt-5.5-derived entries.")
     args = ap.parse_args()
 
     # Parse / validate dates.
@@ -129,14 +132,24 @@ def main():
     src_agent_dir = src_run / "agents" / args.source_agent_id
     src_predictions = src_agent_dir / "predictions" / f"{day0.isoformat()}.json"
     src_market = src_agent_dir / "workspace" / "market.csv"
-    src_notes = src_agent_dir / "workspace" / "memory" / "forecasting_notes.md"
 
-    for p in (src_actions, src_predictions, src_market, src_notes):
+    for p in (src_actions, src_predictions, src_market):
         if not p.exists():
             raise SystemExit(f"Required source file missing: {p}")
 
-    # Validate meta entries before doing anything destructive.
-    _validate_meta_entries(META_ENTRIES)
+    # Resolve meta entries (custom or default), and validate before doing
+    # anything destructive.
+    if args.meta_source:
+        meta_path = Path(args.meta_source)
+        if not meta_path.exists():
+            raise SystemExit(f"--meta-source not found: {meta_path}")
+        with open(meta_path) as f:
+            meta_entries = yaml.safe_load(f)
+        if not isinstance(meta_entries, list) or not meta_entries:
+            raise SystemExit(f"--meta-source must contain a non-empty list (got {type(meta_entries).__name__})")
+    else:
+        meta_entries = META_ENTRIES
+    _validate_meta_entries(meta_entries)
 
     # Create new run dir.
     timestamp = datetime.now().strftime("%y-%m-%d-%H-%M-%S")
@@ -176,10 +189,10 @@ def main():
     mem_df.to_csv(mem_csv_path, index=False)
     print(f"[4/5] Wrote {mem_csv_path}  ({len(mem_df)} rows)")
 
-    meta_yaml_text = build_meta_yaml(day0.isoformat())
+    meta_yaml_text = build_meta_yaml(day0.isoformat(), entries=meta_entries)
     meta_yaml_path = agent_workspace_memory / "meta.yaml"
     meta_yaml_path.write_text(meta_yaml_text)
-    print(f"    Wrote {meta_yaml_path}  ({len(META_ENTRIES)} entries)")
+    print(f"    Wrote {meta_yaml_path}  ({len(meta_entries)} entries)")
 
     # Save provenance for the bootstrap itself.
     provenance = {

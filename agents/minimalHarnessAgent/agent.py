@@ -254,16 +254,22 @@ class MinimalHarnessAgent(BaseAgent):
 
         # active_memory mode wiring.
         if self.config.prompt_mode == "active_memory":
-            if self.config.harness_backend != "codex":
+            if self.config.harness_backend not in ("codex", "claude_code"):
                 raise ValueError(
-                    "prompt_mode='active_memory' requires harness_backend='codex' "
+                    "prompt_mode='active_memory' requires harness_backend in {'codex', 'claude_code'} "
                     f"(got {self.config.harness_backend!r})."
                 )
-            if self.config.codex_resume:
+            if self.config.harness_backend == "codex" and self.config.codex_resume:
                 raise ValueError(
                     "prompt_mode='active_memory' requires codex_resume=False; "
                     "this mode delivers AllQ-style fresh-context-per-day with "
                     "memory files, not a persistent codex thread."
+                )
+            if self.config.harness_backend == "claude_code" and self.config.claude_code_resume:
+                raise ValueError(
+                    "prompt_mode='active_memory' requires claude_code_resume=False; "
+                    "this mode delivers fresh-context-per-day with memory files, "
+                    "not a persistent claude session."
                 )
             # Stateful feedback aggregator (shared across days, dedups on qid).
             from agents.basicAgent.feedback import FeedbackHandler
@@ -325,13 +331,21 @@ class MinimalHarnessAgent(BaseAgent):
 
         # codex has no persistent session: each `codex exec` runs once and
         # exits. So we re-spawn codex (and its child MCP server) every day.
-        # claude_code and opencode use a single long-lived process whose
-        # MCP server polls for a per-day continue signal.
+        # claude_code and opencode normally use a single long-lived process
+        # whose MCP server polls for a per-day continue signal — but in
+        # active_memory mode claude_code also re-spawns per day so each
+        # session reads/writes structured memory files instead of carrying
+        # state in conversation context.
         codex_per_day = self.config.harness_backend == "codex"
+        claude_code_per_day = (
+            self.config.harness_backend == "claude_code"
+            and self.config.prompt_mode == "active_memory"
+        )
+        respawn_per_day = codex_per_day or claude_code_per_day
 
-        if not self._started or codex_per_day:
-            if codex_per_day and self._started:
-                # Reap the previous day's codex if still alive (should have
+        if not self._started or respawn_per_day:
+            if respawn_per_day and self._started:
+                # Reap the previous day's harness if still alive (should have
                 # exited after writing next_day, but be defensive).
                 if self._harness_proc and self._harness_proc.poll() is None:
                     self._harness_proc.terminate()
@@ -340,7 +354,7 @@ class MinimalHarnessAgent(BaseAgent):
                     except subprocess.TimeoutExpired:
                         self._harness_proc.kill()
                 # Clear stale next_day signals so _wait_for_next_day blocks
-                # until the freshly-spawned codex writes a new one.
+                # until the freshly-spawned harness writes a new one.
                 signal_dir = self._internal_dir / "signals"
                 signal_dir.mkdir(parents=True, exist_ok=True)
                 for old in signal_dir.glob("next_day_*.json"):
@@ -356,7 +370,7 @@ class MinimalHarnessAgent(BaseAgent):
             if self.config.harness_backend == "opencode":
                 self._write_opencode_config()
                 self._start_opencode()
-            elif codex_per_day:
+            elif self.config.harness_backend == "codex":
                 self._start_codex()
             else:
                 self._write_mcp_config()
@@ -597,6 +611,13 @@ class MinimalHarnessAgent(BaseAgent):
             preds = get_preds(self.agent_id) or {}
             predicted_count = sum(1 for qid in preds.keys() if qid in active_qids)
 
+        # Questions resolving tomorrow — surfaced inline in the cadence section.
+        tomorrow = current_date + timedelta(days=1)
+        imminent_qids = [
+            q.qid for q in questions
+            if getattr(q, "resolution_date", None) == tomorrow
+        ]
+
         prompt = build_daily_prompt(
             current_date=current_date,
             start_date=self.config.start_date or current_date,
@@ -616,6 +637,7 @@ class MinimalHarnessAgent(BaseAgent):
             search_cutoff_days=self.config.search_cutoff_days,
             timegap_days=self.config.timegap_days,
             new_articles_count=new_articles_count,
+            imminent_qids=imminent_qids,
         )
         # Persist for debugging / offline review.
         prompt_path = self._internal_dir / f"active_memory_prompt_{current_date.isoformat()}.md"
@@ -754,6 +776,11 @@ class MinimalHarnessAgent(BaseAgent):
                 "predictions, then continue research, update predictions "
                 "where new info changes your view, and call next_day."
             )
+        elif (
+            self.config.prompt_mode == "active_memory"
+            and self._codex_initial_prompt_override
+        ):
+            initial_prompt = self._codex_initial_prompt_override
         else:
             initial_prompt = (
                 "Begin forecasting. Read market.csv to see your questions, "
@@ -782,7 +809,15 @@ class MinimalHarnessAgent(BaseAgent):
             "--mcp-config", str(self._internal_dir / "mcp_config.json"),
             "--strict-mcp-config",
             "--disallowedTools", "WebSearch,WebFetch",
-            "--system-prompt-file", str(self._internal_dir / "system_prompt.md"),
+        ])
+        # active_memory mode delivers the full daily instructions via -p, so
+        # skip the standalone system prompt file (which isn't written in this
+        # mode anyway).
+        if self.config.prompt_mode != "active_memory":
+            cmd.extend([
+                "--system-prompt-file", str(self._internal_dir / "system_prompt.md"),
+            ])
+        cmd.extend([
             "--add-dir", str(self.workspace),
         ])
 

@@ -609,10 +609,11 @@ Requirements:
                 "- Do NOT re-predict questions from scratch unless you find specific new evidence.\n"
                 "- Only update a prediction if you find SPECIFIC NEW evidence (news, data) that updates your view.\n\n"
                 "PRIORITIES FOR UPDATES:\n"
-                "1. Questions without predictions (if any)\n"
-                "2. Questions where today's news search reveals new information\n"
-                "3. Questions approaching resolution date that you haven't checked recently\n"
-                "4. Skip questions where there is no new evidence"
+                "1. **Questions resolving the next day** (filter `df` by `resolution_date` == tomorrow) — make sure your prediction is up-to-date before calling next_day.\n"
+                "2. Questions without predictions (if any)\n"
+                "3. Questions where today's news search reveals new information\n"
+                "4. Questions approaching resolution date that you haven't checked recently\n"
+                "5. Skip questions where there is no new evidence"
             )
             cadence_section = self._build_cadence_section(current_date)
             if cadence_section in base_instructions:
