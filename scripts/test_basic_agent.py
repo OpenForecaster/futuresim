@@ -474,6 +474,7 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
                 anthropic_auth_token=anthropic_auth_token,
                 extra_flags=list(agent_def.get('extra_flags', defaults.get('extra_flags', []))),
                 sandbox=bool(agent_def.get('sandbox', defaults.get('sandbox', False))),
+                sandbox_proc_mode=str(agent_def.get('sandbox_proc_mode', defaults.get('sandbox_proc_mode', 'new'))),
                 network_isolation=bool(agent_def.get('network_isolation', defaults.get('network_isolation', False))),
                 egress_allowlist=list(agent_def.get('egress_allowlist', defaults.get('egress_allowlist', []))),
             )

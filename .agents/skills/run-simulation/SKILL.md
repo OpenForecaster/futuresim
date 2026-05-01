@@ -25,6 +25,7 @@ Use this skill for `scripts/test_basic_agent.py`, `mpi_scripts/run_sim/submit_si
 - Sim answer matching still falls back to per-run `matcher_cache.json`, but if `FSIM_SIM_MATCHER_CACHE_DIR` is set then `split: "test"` runs automatically reuse a shared `<matcher_slug>.json` and only merge back at run end. Non-test runs can opt in with top-level YAML `matcher_cache: {enabled: true, path: null}`.
 - Resume mode skips Day 0 warmup because predictions are restored from `actions.jsonl`.
 - `daily_metrics.csv` is session-based: one row per wakeup date. `test_daily_metrics.csv` mirrors it for test-only metrics.
+- Minimal-harness Codex runs must keep native Codex web search disabled. Evidence should come through the date-capped MCP `search_news` tool and staged `articles/`, not Codex's live `web_search` tool.
 
 ## Ask The User When
 

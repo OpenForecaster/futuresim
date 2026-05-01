@@ -29,6 +29,10 @@ from environment.interfaces import PredictionSubmission
 logger = logging.getLogger(__name__)
 
 
+def _resolve_socat_cmd() -> str:
+    return shutil.which("socat") or ("/usr/bin/socat" if os.path.exists("/usr/bin/socat") else "socat")
+
+
 @dataclass
 class MinimalHarnessConfig:
     model: str = "claude-opus-4-6"
@@ -100,6 +104,13 @@ class MinimalHarnessConfig:
     # instead of symlink (required: workspace and articles_base must be on the
     # same filesystem). Supported for both claude_code and opencode backends.
     sandbox: bool = False
+    # Procfs strategy for the bwrap sandbox.
+    # - "new": current strict behavior; create a private PID namespace and a
+    #   fresh procfs. This is preferred where the host allows procfs mounts.
+    # - "host_ro": keep filesystem isolation but bind the host/job /proc
+    #   read-only. This is less process-isolated, but works on Condor nodes
+    #   that reject `bwrap --proc`.
+    sandbox_proc_mode: str = "new"
     # When true (requires sandbox=True), replace --share-net with --unshare-net
     # and route outbound traffic through a host-side allowlist proxy bound to a
     # unix socket. SDK clients honouring HTTPS_PROXY (Anthropic, OpenAI,
@@ -247,6 +258,11 @@ class MinimalHarnessAgent(BaseAgent):
 
         if self.config.network_isolation and not self.config.sandbox:
             raise ValueError("network_isolation=True requires sandbox=True.")
+        if self.config.sandbox_proc_mode not in {"new", "host_ro"}:
+            raise ValueError(
+                "sandbox_proc_mode must be 'new' or 'host_ro' "
+                f"(got {self.config.sandbox_proc_mode!r})."
+            )
 
         # Per-day codex initial prompt (set by _build_active_memory_prompt when
         # config.prompt_mode == "active_memory"). Read by _start_codex.
@@ -936,7 +952,7 @@ class MinimalHarnessAgent(BaseAgent):
         """
         if self._egress_proc is not None and self._egress_proc.poll() is None:
             return
-        scratch = os.environ.get("_CONDOR_SCRATCH_DIR") or tempfile.gettempdir()
+        scratch = os.path.realpath(os.environ.get("_CONDOR_SCRATCH_DIR") or tempfile.gettempdir())
         # Include a short hash of the run output dir so parallel sims with the
         # same agent_id (same model name, different sim_name/timestamp) don't
         # collide on the same unix-socket path.
@@ -1046,7 +1062,7 @@ class MinimalHarnessAgent(BaseAgent):
                     "MCP relay socket not initialized; "
                     "_start_mcp_relay must run before _build_mcp_invocation"
                 )
-            return ("socat", ["-", f"UNIX-CONNECT:{self._mcp_relay_sock}"])
+            return (_resolve_socat_cmd(), ["-", f"UNIX-CONNECT:{self._mcp_relay_sock}"])
 
         repo_root = str(Path(__file__).resolve().parents[2])
         mcp_server_script = str(Path(__file__).resolve().parent / "mcp_server.py")
@@ -1078,7 +1094,7 @@ class MinimalHarnessAgent(BaseAgent):
         if self._mcp_relay_proc is not None and self._mcp_relay_proc.poll() is None:
             return
 
-        scratch = os.environ.get("_CONDOR_SCRATCH_DIR") or tempfile.gettempdir()
+        scratch = os.path.realpath(os.environ.get("_CONDOR_SCRATCH_DIR") or tempfile.gettempdir())
         run_tag = hashlib.sha1(
             str(Path(self._internal_dir).resolve()).encode()
         ).hexdigest()[:8]
@@ -1122,7 +1138,7 @@ class MinimalHarnessAgent(BaseAgent):
         # off keeps mcp_server.py stderr on socat's parent stderr (which
         # we redirect into mcp_relay.log below).
         cmd = [
-            "socat",
+            _resolve_socat_cmd(),
             f"UNIX-LISTEN:{self._mcp_relay_sock},fork",
             f"EXEC:{wrapper}",
         ]
@@ -1173,13 +1189,14 @@ class MinimalHarnessAgent(BaseAgent):
         network_isolation=True."""
         proxy_sock = str(self._egress_proxy_sock)
         proxy_port = self._egress_proxy_port
+        socat_cmd = shlex.quote(_resolve_socat_cmd())
         bridge = (
-            f"socat TCP-LISTEN:{proxy_port},bind=127.0.0.1,fork,reuseaddr "
+            f"{socat_cmd} TCP-LISTEN:{proxy_port},bind=127.0.0.1,fork,reuseaddr "
             f"UNIX-CONNECT:{proxy_sock} 2>/dev/null & "
         )
         if self._egress_embed_sock and self._egress_embed_port:
             bridge += (
-                f"socat TCP-LISTEN:{self._egress_embed_port},bind=127.0.0.1,"
+                f"{socat_cmd} TCP-LISTEN:{self._egress_embed_port},bind=127.0.0.1,"
                 f"fork,reuseaddr UNIX-CONNECT:{self._egress_embed_sock} 2>/dev/null & "
             )
         # Brief grace for socat to bind its listening sockets before the
@@ -1222,7 +1239,8 @@ class MinimalHarnessAgent(BaseAgent):
               opencode:    ~/.cache|.local|.config/opencode plus an
                            XDG_DATA_HOME scratch for its SQLite session DB
           - /usr, /etc, /lib, /lib64, /bin, /sbin (ro) — OS tools/libs
-          - /proc (new namespace), /dev (stripped), /tmp (tmpfs)
+          - /proc (fresh namespace by default, or host read-only with
+            sandbox_proc_mode="host_ro"), /dev (stripped), /tmp (tmpfs)
 
         NOT bound (stays invisible to the model):
           - search_db / lancedb / embedding_model — retrieval lives on the
@@ -1253,10 +1271,8 @@ class MinimalHarnessAgent(BaseAgent):
             "bwrap",
             "--unshare-net" if self.config.network_isolation else "--share-net",
             "--die-with-parent",
-            "--unshare-pid",
             "--unshare-ipc",
             "--unshare-uts",
-            "--proc", "/proc",
             "--dev", "/dev",
             "--tmpfs", "/tmp",
             "--ro-bind", "/usr", "/usr",
@@ -1266,6 +1282,13 @@ class MinimalHarnessAgent(BaseAgent):
             "--ro-bind-try", "/bin", "/bin",
             "--ro-bind-try", "/sbin", "/sbin",
         ]
+        if self.config.sandbox_proc_mode == "new":
+            args.extend(["--unshare-pid", "--proc", "/proc"])
+        else:
+            # Some Condor execution environments forbid mounting a new procfs.
+            # This preserves the filesystem sandbox while exposing process
+            # metadata read-only instead of creating a private PID namespace.
+            args.extend(["--ro-bind", "/proc", "/proc"])
 
         # Recreate top-level path aliases BEFORE any binds whose DEST would
         # implicitly create the alias dir as tmpfs. Each alias only resolves
@@ -1417,7 +1440,7 @@ class MinimalHarnessAgent(BaseAgent):
             env["OPENROUTER_API_KEY"] = self.config.openrouter_api_key
         # Isolate opencode's SQLite session DB per agent. Must live on local
         # disk — shared FS (Lustre/NFS) breaks SQLite WAL ("disk I/O error").
-        scratch = os.environ.get("_CONDOR_SCRATCH_DIR") or tempfile.gettempdir()
+        scratch = os.path.realpath(os.environ.get("_CONDOR_SCRATCH_DIR") or tempfile.gettempdir())
         run_tag = hashlib.sha1(
             str(Path(self._internal_dir).resolve()).encode()
         ).hexdigest()[:8]
@@ -1504,6 +1527,10 @@ class MinimalHarnessAgent(BaseAgent):
         common_args = [
             "-m", self.config.model,
             "-c", f'model_reasoning_effort="{self.config.reasoning_effort}"',
+            # Codex exposes native web_search by default in current CLIs. Forecast
+            # sims must use the date-capped MCP search_news tool / staged articles
+            # only, so remove native web search from every codex exec/resume call.
+            "-c", 'web_search="disabled"',
             "-c", f'mcp_servers.forecast.command="{mcp_cmd}"',
             "-c", f"mcp_servers.forecast.args={json.dumps(mcp_args)}",
             "--dangerously-bypass-approvals-and-sandbox",
