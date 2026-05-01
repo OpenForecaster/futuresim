@@ -1,0 +1,62 @@
+# Short 3-day smoke test for active_memory mode on codex (gpt-5.3-codex-spark).
+# Bootstrapped from the gpt-5.5 codex_resume run's day-0 (2025-12-24) via
+# scripts/bootstrap_active_memory_day0.py + --restart_from --restart_from_day.
+#
+# Expected sim window: sim_start = resolution_start - lookback_days
+#   = 2025-12-31 - 7 days = 2025-12-24 (day 0; pre-loaded via restart_from).
+# Active days under test: 2025-12-25, 2025-12-26, 2025-12-27.
+#
+# Usage:
+#   python scripts/bootstrap_active_memory_day0.py \
+#       --source /fast/sgoel/forecasting/current_sim/final_runs_v37/codex_aljazeeraQ12026v37_gpt55_resume/26-04-29-02-49-22/agents/minimalHarness_gpt-55_001 \
+#       --target <target_run_dir>/agents/minimalHarness_gpt-53-codex-spark_001 \
+#       --day0 2025-12-24
+#   python scripts/test_basic_agent.py \
+#       --config configs/minimalHarness/aljazeeraQ12026v37_codex_gpt53spark_activemem_test3day.yaml \
+#       --restart_from /fast/.../codex_aljazeeraQ12026v37_gpt55_resume/26-04-29-02-49-22 \
+#       --restart_from_day 2025-12-25
+
+sim_name: "codex_aljazeeraQ12026v37_gpt53spark_activemem_test3day"
+
+start_date: "2025-12-31"
+end_date: "2025-12-27"
+resolution_start: "2025-12-31"
+resolution_end: "2026-03-28"
+lookback_days: 7
+search_cutoff_days: 0
+timegap_days: 1
+
+dataset: "openforesight"
+dataset_path: "${FSIM_DATASET_PATH}"
+split: "aljazeeraQ12026v37"
+resolved_only: false
+min_forecasters: 0
+output_base: "/fast/sgoel/forecasting/current_sim/final_runs_v37/active_memory_harness/"
+
+search_db: "${FSIM_SEARCH_DB}"
+embedding_model: "${FSIM_EMBEDDING_MODEL}"
+articles_base: "/fast/sgoel/forecasting/news/deduped_articles/data"
+
+matching: "openrouter"
+matcher: "deepseek/deepseek-v3.2"
+
+defaults:
+  provider: "none"
+  scaffold: "minimalHarness"
+  harness_backend: "codex"
+  codex_path: "/home/nchandak/.local/bin/codex"
+  reasoning_effort: "xhigh"
+  prompt_mode: "active_memory"
+  codex_resume: false
+  sandbox: true
+
+resources:
+  gpus: 1
+  cpus: 16
+  memory_gb: 80
+  disk_gb: 50
+  bid: 35
+
+agents:
+  - model: "gpt-5.3-codex-spark"
+    timeout_seconds: 14400

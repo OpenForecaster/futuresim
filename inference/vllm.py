@@ -10,9 +10,11 @@ import os
 import time
 import json
 import atexit
+import fcntl
 import subprocess
 import socket
 import sys
+from pathlib import Path
 from threading import Lock, Condition
 from dataclasses import dataclass
 
@@ -110,15 +112,47 @@ class VLLMChatTimeoutError(VLLMTransportError):
     """Raised when a vLLM chat request times out."""
 
 
-def _find_free_port(start_port: int = 8001) -> int:
-    """Find a free port starting from start_port."""
+# Cross-process port reservations live here. flock state is held in the
+# kernel (not the file), so stale .lock files left behind by crashed runs
+# are harmless — fcntl.flock() auto-releases on fd close / process exit.
+_PORT_LOCK_DIR = Path("/tmp/fsim_vllm_ports")
+
+
+def _acquire_port_lock(port: int):
+    """Try to take an exclusive non-blocking flock on the per-port lock file.
+    Returns the open file object on success (caller must keep it alive to
+    hold the lock); returns None if another driver holds the lock."""
+    _PORT_LOCK_DIR.mkdir(parents=True, exist_ok=True)
+    f = open(_PORT_LOCK_DIR / f"{port}.lock", "w")
+    try:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return f
+    except OSError:
+        f.close()
+        return None
+
+
+def _find_free_port(start_port: int = 8001):
+    """Find a free port and hold a cross-process lock on it until the
+    target server (vLLM) has bound the port itself.
+
+    Returns (port, lock_file). The caller MUST close `lock_file` once the
+    server is up — the lock file's flock prevents another fsim driver
+    from picking the same port during the multi-second window between
+    our bind-test releasing the socket and vLLM actually binding it.
+    """
     port = start_port
     while port < 65535:
+        lock = _acquire_port_lock(port)
+        if lock is None:
+            port += 1
+            continue
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             try:
                 s.bind(('127.0.0.1', port))
-                return port
+                return port, lock
             except OSError:
+                lock.close()
                 port += 1
     raise RuntimeError("No free ports available")
 
@@ -265,12 +299,16 @@ class VLLMInference:
                 self._starting = True
                 break
 
+        port_lock = None
         try:
-            # Find a free port (global allocator).
+            # Find a free port (global allocator). `port_lock` holds a
+            # cross-process flock on the chosen port so a parallel driver
+            # can't pick it during the window between our bind-test
+            # releasing the socket and vLLM actually binding it.
             with _PORT_LOCK:
-                self._port = _find_free_port(_NEXT_PORT)
+                self._port, port_lock = _find_free_port(_NEXT_PORT)
                 _NEXT_PORT = self._port + 1
-        
+
             print(f"Starting VLLM server for {self.model_name} on port {self._port}...", flush=True)
         
             # Start server process through a local wrapper so repo-level
@@ -466,6 +504,15 @@ class VLLMInference:
                 self._start_error = str(e)
             raise
         finally:
+            # Release the cross-process port lock. By now vLLM has either
+            # bound the port itself (in which case the lock is no longer
+            # needed) or we're aborting (in which case the port goes back
+            # into the pool for the next caller).
+            if port_lock is not None:
+                try:
+                    port_lock.close()
+                except Exception:
+                    pass
             with self._start_lock:
                 self._starting = False
                 self._start_cond.notify_all()

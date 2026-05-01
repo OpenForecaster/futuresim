@@ -290,9 +290,16 @@ def next_day() -> str:
             new_date = _state.get("current_date", "unknown")
             new_date_obj = _parse_date(new_date)
 
+            active_count = len(_state.get("questions", []))
             response_parts = [
                 f"Day advanced to {new_date}.",
                 _build_new_articles_message(_parse_date(cur_date), new_date_obj),
+                (
+                    f"{active_count} question(s) are still active. Re-read market.csv, "
+                    "scan today's news, and resubmit any forecast where new evidence "
+                    "has shifted your view before calling next_day again. A forecast "
+                    "is never \"done\" while its question is still active."
+                ),
             ]
 
             # --- Per-question resolution feedback with scores ---

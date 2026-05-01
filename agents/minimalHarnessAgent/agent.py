@@ -7,9 +7,11 @@ signal the MCP server (via a file-based continue signal) so the already-running
 harness session can resume with the next simulation day.
 """
 
+import hashlib
 import json
 import logging
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -18,7 +20,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from agents.base import BaseAgent
 from agents.minimalHarnessAgent.prompt import build_system_prompt
@@ -73,6 +75,22 @@ class MinimalHarnessConfig:
     # env. Empty => default Anthropic endpoint.
     anthropic_base_url: str = ""
     anthropic_auth_token: str = ""
+    # Daily prompt mode for codex backend.
+    # - "default": existing behavior (AGENTS.md + 2-line "Begin forecasting..." per day,
+    #   or codex_resume thread continuation).
+    # - "active_memory": AllQAgent-style fresh-context-per-day. No AGENTS.md; the
+    #   full daily prompt (mirroring BasicAgent._build_instructions with surgical
+    #   swaps for codex) is sent as the user prompt to a fresh `codex exec`. Codex
+    #   is told to read prior memory/{prev}/{mem.csv,meta.yaml} and write
+    #   memory/{today}/{mem.csv,meta.yaml} before next_day. Requires
+    #   harness_backend="codex" and codex_resume=False.
+    prompt_mode: str = "default"
+    # Max outcomes per question — only used by prompt_mode="active_memory" today,
+    # but kept on the base config so it can be plumbed cleanly from YAML.
+    max_outcomes_per_question: int = 5
+    # Days between successive agent updates — passed into the cadence section
+    # (used by active_memory daily prompt).
+    timegap_days: int = 1
     # When true, wrap the harness subprocess in bwrap so the filesystem is
     # restricted to just {workspace, _internal_dir, repo_root+venv, search_db,
     # harness runtime} plus /usr,/etc,/lib*. articles_base, dataset path,
@@ -82,6 +100,101 @@ class MinimalHarnessConfig:
     # instead of symlink (required: workspace and articles_base must be on the
     # same filesystem). Supported for both claude_code and opencode backends.
     sandbox: bool = False
+    # When true (requires sandbox=True), replace --share-net with --unshare-net
+    # and route outbound traffic through a host-side allowlist proxy bound to a
+    # unix socket. SDK clients honouring HTTPS_PROXY (Anthropic, OpenAI,
+    # OpenRouter, DeepSeek, z.ai, ...) reach allowed APIs; everything else is
+    # rejected by the proxy with HTTP 403. The vLLM embedding server (which the
+    # MCP client reaches with HTTPS_PROXY bypassed) is exposed via a separate
+    # raw TCP forward unix socket.
+    network_isolation: bool = False
+    # Allowlisted upstream targets ("host[:port]", glob ok in host). When empty,
+    # falls back to DEFAULT_EGRESS_ALLOWLIST.
+    egress_allowlist: List[str] = field(default_factory=list)
+
+
+# Default allowlist covers the LLM provider endpoints used (or likely to be
+# used) across current and near-future configs. Wildcards follow fnmatch
+# shell-glob semantics: "*.foo.com" matches any single- or multi-label
+# subdomain of foo.com. Entries are pinned to :443 (HTTPS) since SDK clients
+# all speak TLS. Extend or replace per-config via egress_allowlist.
+DEFAULT_EGRESS_ALLOWLIST = [
+    # Anthropic / Claude Code (api, console, statsig telemetry, ...).
+    "*.anthropic.com:443",
+    # OpenAI / Codex (api, auth, platform; chatgpt.com is used by codex
+    # login-token refresh).
+    "*.openai.com:443",
+    "chatgpt.com:443",
+    "*.chatgpt.com:443",
+    # Azure OpenAI (regional resource and Cognitive Services hosts).
+    "*.openai.azure.com:443",
+    "*.cognitiveservices.azure.com:443",
+    # OpenRouter (multi-provider gateway).
+    "openrouter.ai:443",
+    "*.openrouter.ai:443",
+    # DeepSeek (direct API).
+    "api.deepseek.com:443",
+    # Zhipu / GLM (z.ai is the new domain; open.bigmodel.cn is the legacy one).
+    "api.z.ai:443",
+    "*.z.ai:443",
+    "open.bigmodel.cn:443",
+    "*.bigmodel.cn:443",
+    # Moonshot / Kimi (CN + intl endpoints).
+    "api.moonshot.cn:443",
+    "api.moonshot.ai:443",
+    "*.moonshot.cn:443",
+    "*.moonshot.ai:443",
+    # Alibaba / Qwen (DashScope CN + intl, plus newer qwen.ai).
+    "dashscope.aliyuncs.com:443",
+    "dashscope-intl.aliyuncs.com:443",
+    "*.qwen.ai:443",
+    # Google Gemini direct + Vertex AI (regional aiplatform hosts + token
+    # exchange endpoint for service-account auth).
+    "generativelanguage.googleapis.com:443",
+    "aiplatform.googleapis.com:443",
+    "*-aiplatform.googleapis.com:443",
+    "oauth2.googleapis.com:443",
+    # Mistral (chat + Codestral).
+    "api.mistral.ai:443",
+    "codestral.mistral.ai:443",
+    # xAI / Grok.
+    "api.x.ai:443",
+    # Cohere.
+    "api.cohere.com:443",
+    "api.cohere.ai:443",
+    # Together.ai (legacy .xyz + current .ai).
+    "api.together.xyz:443",
+    "api.together.ai:443",
+    # Fireworks.
+    "api.fireworks.ai:443",
+    # Groq.
+    "api.groq.com:443",
+    # Perplexity.
+    "api.perplexity.ai:443",
+    # 01.ai / Yi.
+    "api.lingyiwanwu.com:443",
+    # MiniMax (CN + intl).
+    "api.minimaxi.chat:443",
+    "api.minimax.chat:443",
+    "api.minimax.io:443",
+    # ByteDance / Doubao via Volcano Engine ("ark").
+    "*.volces.com:443",
+    # StepFun.
+    "api.stepfun.com:443",
+    # SiliconFlow (CN proxy widely used for OSS models).
+    "api.siliconflow.cn:443",
+    "api.siliconflow.com:443",
+    # Baidu ERNIE / Qianfan.
+    "qianfan.baidubce.com:443",
+    "aip.baidubce.com:443",
+    # Tencent Hunyuan.
+    "hunyuan.tencentcloudapi.com:443",
+    # Replicate (multi-model gateway).
+    "api.replicate.com:443",
+    # HuggingFace (inference endpoints + model download CDN).
+    "huggingface.co:443",
+    "*.huggingface.co:443",
+]
 
 
 class MinimalHarnessAgent(BaseAgent):
@@ -114,6 +227,55 @@ class MinimalHarnessAgent(BaseAgent):
         self._codex_thread_id: Optional[str] = None  # codex thread_id, captured from Day 0 stdout
         self._claude_code_session_id: Optional[str] = None  # claude session_id, captured from Day 0 stdout
 
+        # Egress proxy state (network_isolation=True). Started lazily on first act().
+        self._egress_proc: Optional[subprocess.Popen] = None
+        self._egress_dir: Optional[Path] = None
+        self._egress_proxy_sock: Optional[Path] = None
+        self._egress_embed_sock: Optional[Path] = None
+        self._egress_embed_port: Optional[int] = None
+        # In-sandbox loopback port the bridge sidecar listens on for the proxy.
+        self._egress_proxy_port = 9080
+
+        # MCP relay state (sandbox=True). Started lazily on first act() — keeps
+        # the MCP server (and thus search_db / lancedb / embedding_model) on
+        # the host so the sandboxed harness can't bypass date-capping by
+        # querying the index directly. The harness reaches MCP via a socat
+        # stdio bridge to a per-agent unix socket.
+        self._mcp_relay_proc: Optional[subprocess.Popen] = None
+        self._mcp_relay_dir: Optional[Path] = None
+        self._mcp_relay_sock: Optional[Path] = None
+
+        if self.config.network_isolation and not self.config.sandbox:
+            raise ValueError("network_isolation=True requires sandbox=True.")
+
+        # Per-day codex initial prompt (set by _build_active_memory_prompt when
+        # config.prompt_mode == "active_memory"). Read by _start_codex.
+        self._codex_initial_prompt_override: Optional[str] = None
+
+        # active_memory mode wiring.
+        if self.config.prompt_mode == "active_memory":
+            if self.config.harness_backend != "codex":
+                raise ValueError(
+                    "prompt_mode='active_memory' requires harness_backend='codex' "
+                    f"(got {self.config.harness_backend!r})."
+                )
+            if self.config.codex_resume:
+                raise ValueError(
+                    "prompt_mode='active_memory' requires codex_resume=False; "
+                    "this mode delivers AllQ-style fresh-context-per-day with "
+                    "memory files, not a persistent codex thread."
+                )
+            # Stateful feedback aggregator (shared across days, dedups on qid).
+            from agents.basicAgent.feedback import FeedbackHandler
+            self._feedback_handler: Optional[FeedbackHandler] = FeedbackHandler(self.agent_id)
+        elif self.config.prompt_mode != "default":
+            raise ValueError(
+                f"Unknown prompt_mode={self.config.prompt_mode!r}; "
+                "expected 'default' or 'active_memory'."
+            )
+        else:
+            self._feedback_handler = None
+
     # ── BaseAgent contract ─────────────────────────────────────────────
 
     def act(
@@ -144,6 +306,23 @@ class MinimalHarnessAgent(BaseAgent):
         # 3. Update article symlinks up to current date.
         self._update_article_symlinks(current_date)
 
+        # 3b. If network_isolation is on, ensure the host-side egress proxy is
+        # running before we spawn (or re-spawn) the harness. Idempotent.
+        if self.config.network_isolation:
+            self._start_egress_proxy()
+
+        # 3c. If sandboxed, start the host-side MCP relay so search_db and
+        # the embedding model stay out of the sandbox. The harness reaches
+        # MCP only via the bind-mounted unix socket. Idempotent.
+        if self.config.sandbox:
+            self._start_mcp_relay()
+
+        # 3c. If sandbox is on, ensure the host-side MCP relay is running so
+        # the harness can reach search_news/etc. without needing search_db
+        # bound into the sandbox. Idempotent.
+        if self.config.sandbox:
+            self._start_mcp_relay()
+
         # codex has no persistent session: each `codex exec` runs once and
         # exits. So we re-spawn codex (and its child MCP server) every day.
         # claude_code and opencode use a single long-lived process whose
@@ -167,7 +346,13 @@ class MinimalHarnessAgent(BaseAgent):
                 for old in signal_dir.glob("next_day_*.json"):
                     old.unlink(missing_ok=True)
 
-            self._write_system_prompt(forecast_interface)
+            if self.config.prompt_mode == "active_memory":
+                # active_memory mode replaces AGENTS.md + 2-line per-day prompt
+                # with a full daily user prompt (mirroring AllQAgent). Skip the
+                # system_prompt.md write entirely.
+                self._build_active_memory_prompt(forecast_interface, current_date)
+            else:
+                self._write_system_prompt(forecast_interface)
             if self.config.harness_backend == "opencode":
                 self._write_opencode_config()
                 self._start_opencode()
@@ -310,31 +495,16 @@ class MinimalHarnessAgent(BaseAgent):
         We pass the repo root via the server's own --repo-root flag rather than
         using the 'env' key in the MCP config, because Claude Code replaces
         (rather than merges) the process environment when 'env' is set.
+
+        With sandbox=True, _build_mcp_invocation returns a socat bridge so
+        the MCP server stays on the host (see _start_mcp_relay).
         """
-        repo_root = str(Path(__file__).resolve().parents[2])
-        mcp_server_script = str(Path(__file__).resolve().parent / "mcp_server.py")
-        venv_python = os.path.join(repo_root, ".venv", "bin", "python")
-        python_cmd = venv_python if os.path.exists(venv_python) else "python"
-
-        # Detect running vLLM embedding server so the MCP server can reuse it.
-        embed_server_url = self._detect_embedding_server()
-
-        mcp_args = [
-            mcp_server_script,
-            "--workspace", str(self.workspace),
-            "--internal-dir", str(self._internal_dir),
-            "--repo-root", repo_root,
-            "--search-db", self.config.search_db or "",
-            "--embedding-model", self.config.embedding_model or "",
-        ]
-        if embed_server_url:
-            mcp_args.extend(["--embedding-server-url", embed_server_url])
-
+        cmd, args = self._build_mcp_invocation()
         config = {
             "mcpServers": {
                 "forecast": {
-                    "command": python_cmd,
-                    "args": mcp_args,
+                    "command": cmd,
+                    "args": args,
                 }
             }
         }
@@ -381,6 +551,78 @@ class MinimalHarnessAgent(BaseAgent):
         with open(prompt_path, "w") as f:
             f.write(prompt)
 
+    def _build_active_memory_prompt(
+        self, forecast_interface: Any, current_date: date
+    ) -> None:
+        """Compose the per-day active_memory user prompt and stash it for _start_codex.
+
+        Mirrors BasicAgent / AllQAgent daily prompt construction:
+          - feedback aggregated via FeedbackHandler (cumulative across days),
+          - prior day's meta-insight index loaded from disk via ActiveMemory,
+          - AllQ "already-predicted" reminder with current predicted/active counts.
+        """
+        from agents.minimalHarnessAgent.prompt_active_memory import build_daily_prompt
+        from agents.utils.memory import ActiveMemory
+
+        source_context = getattr(forecast_interface, "source_context", "") or ""
+        source_name = getattr(forecast_interface, "source_name", "openforesight")
+        questions = forecast_interface.list_questions()
+        num_active = len(questions)
+        num_resolved = len(getattr(forecast_interface, "resolved_questions", []))
+        num_questions = num_active + num_resolved
+        last_active_date = getattr(forecast_interface, "last_active_date", None)
+        next_active_date = getattr(forecast_interface, "next_active_date", None)
+        new_articles_count = self._count_new_articles(last_active_date, current_date)
+
+        # Feedback (consumes resolution_events from the env; dedups on qid).
+        assert self._feedback_handler is not None
+        feedback_data = self._feedback_handler.generate_feedback(
+            forecast_interface, current_date, inference_provider=None
+        )
+        feedback_text = self._feedback_handler.format_feedback(
+            feedback_data, show_tw_peer=False
+        )
+
+        # Prior-day meta-insight index from memory/{prev}/meta.yaml on disk.
+        meta_index = ""
+        am = ActiveMemory(self.agent_id, memory_dir=str(self.workspace))
+        am.set_date(current_date)
+        meta_index = am.get_index() or ""
+
+        # Predicted / active counts for the AllQ reminder.
+        active_qids = {q.qid for q in questions}
+        predicted_count = 0
+        get_preds = getattr(forecast_interface, "get_agent_predictions", None)
+        if callable(get_preds):
+            preds = get_preds(self.agent_id) or {}
+            predicted_count = sum(1 for qid in preds.keys() if qid in active_qids)
+
+        prompt = build_daily_prompt(
+            current_date=current_date,
+            start_date=self.config.start_date or current_date,
+            end_date=self.config.end_date or current_date,
+            last_active_date=last_active_date,
+            next_active_date=next_active_date,
+            source_context=source_context,
+            source_name=source_name,
+            feedback_text=feedback_text,
+            meta_index=meta_index,
+            num_questions=num_questions,
+            num_active=num_active,
+            num_resolved=num_resolved,
+            predicted_count=predicted_count,
+            active_count=num_active,
+            max_outcomes_per_question=self.config.max_outcomes_per_question,
+            search_cutoff_days=self.config.search_cutoff_days,
+            timegap_days=self.config.timegap_days,
+            new_articles_count=new_articles_count,
+        )
+        # Persist for debugging / offline review.
+        prompt_path = self._internal_dir / f"active_memory_prompt_{current_date.isoformat()}.md"
+        with open(prompt_path, "w") as f:
+            f.write(prompt)
+        self._codex_initial_prompt_override = prompt
+
     def _count_new_articles(
         self,
         last_active_date: Optional[date],
@@ -404,19 +646,38 @@ class MinimalHarnessAgent(BaseAgent):
             return None
 
     def _detect_embedding_server(self) -> str:
-        """Check if a vLLM embedding server is already running (started by the driver).
+        """Locate the vLLM embedding server started by the driver.
+
+        Prefers $FSIM_EMBEDDING_URL (set by test_basic_agent.py after the
+        driver-owned vLLMInference is warm) so parallel sims with multiple
+        vLLMs on the same host don't grab a sibling sim's server. Falls back
+        to scanning 127.0.0.1:8001-8009 for a /v1/models 200 if the env var
+        is unset (legacy callers / external launchers).
         Uses 127.0.0.1 to bypass any HTTP proxy that intercepts 'localhost'.
         Returns the server URL or empty string."""
         import urllib.request
-        # Bypass proxy for local connections.
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+        env_url = os.environ.get("FSIM_EMBEDDING_URL", "").strip()
+        if env_url:
+            try:
+                req = urllib.request.Request(f"{env_url}/v1/models", method="GET")
+                with opener.open(req, timeout=2) as resp:
+                    if resp.status == 200:
+                        logger.info("Using embedding server from FSIM_EMBEDDING_URL: %s", env_url)
+                        return env_url
+            except Exception as e:
+                logger.warning(
+                    "FSIM_EMBEDDING_URL=%s set but unreachable (%s); falling back to port scan",
+                    env_url, e)
+
         for port in range(8001, 8010):
             url = f"http://127.0.0.1:{port}"
             try:
                 req = urllib.request.Request(f"{url}/v1/models", method="GET")
                 with opener.open(req, timeout=2) as resp:
                     if resp.status == 200:
-                        logger.info("Found running embedding server at %s", url)
+                        logger.info("Found running embedding server at %s (scan)", url)
                         return url
             except Exception:
                 continue
@@ -540,6 +801,8 @@ class MinimalHarnessAgent(BaseAgent):
             env["ANTHROPIC_BASE_URL"] = self.config.anthropic_base_url
         if self.config.anthropic_auth_token:
             env["ANTHROPIC_AUTH_TOKEN"] = self.config.anthropic_auth_token
+        if self.config.network_isolation:
+            env.update(self._egress_env_overrides())
 
         launch_cmd = self._maybe_sandbox(cmd)
         # When sandboxed, bwrap sets cwd via --chdir; passing cwd= to Popen
@@ -547,8 +810,9 @@ class MinimalHarnessAgent(BaseAgent):
         # path is visible only through symlinks that bwrap reshapes.
         popen_cwd = None if self.config.sandbox else str(self.workspace)
 
-        logger.info("Starting Claude Code%s: %s",
+        logger.info("Starting Claude Code%s%s: %s",
                     " [sandboxed]" if self.config.sandbox else "",
+                    " [net-isolated]" if self.config.network_isolation else "",
                     " ".join(launch_cmd))
         self._harness_proc = subprocess.Popen(
             launch_cmd,
@@ -576,23 +840,7 @@ class MinimalHarnessAgent(BaseAgent):
         - Web tools and opencode-only meta tools are disabled so the tool
           surface matches CC's forecasting scaffold as closely as possible.
         """
-        repo_root = str(Path(__file__).resolve().parents[2])
-        mcp_server_script = str(Path(__file__).resolve().parent / "mcp_server.py")
-        venv_python = os.path.join(repo_root, ".venv", "bin", "python")
-        python_cmd = venv_python if os.path.exists(venv_python) else "python"
-
-        embed_server_url = self._detect_embedding_server()
-
-        mcp_args = [
-            mcp_server_script,
-            "--workspace", str(self.workspace),
-            "--internal-dir", str(self._internal_dir),
-            "--repo-root", repo_root,
-            "--search-db", self.config.search_db or "",
-            "--embedding-model", self.config.embedding_model or "",
-        ]
-        if embed_server_url:
-            mcp_args.extend(["--embedding-server-url", embed_server_url])
+        mcp_cmd, mcp_args = self._build_mcp_invocation()
 
         system_prompt = (self._internal_dir / "system_prompt.md").read_text()
 
@@ -609,7 +857,7 @@ class MinimalHarnessAgent(BaseAgent):
             "mcp": {
                 "mcp__forecast_": {
                     "type": "local",
-                    "command": [python_cmd] + mcp_args,
+                    "command": [mcp_cmd] + mcp_args,
                     "enabled": True,
                 }
             },
@@ -641,6 +889,287 @@ class MinimalHarnessAgent(BaseAgent):
             return []
         return ["--variant", "high"]
 
+    # ── egress proxy (network_isolation) ───────────────────────────────
+
+    def _start_egress_proxy(self) -> None:
+        """Start the host-side allowlist proxy daemon on a per-agent unix socket.
+
+        Idempotent — second call is a no-op if the daemon is already running.
+        Sockets live on local scratch (Condor scratch / /tmp) since unix-domain
+        sockets aren't reliable on shared FS (Lustre/NFS), and are bind-mounted
+        into the sandbox at the same realpath.
+        """
+        if self._egress_proc is not None and self._egress_proc.poll() is None:
+            return
+        scratch = os.environ.get("_CONDOR_SCRATCH_DIR") or tempfile.gettempdir()
+        # Include a short hash of the run output dir so parallel sims with the
+        # same agent_id (same model name, different sim_name/timestamp) don't
+        # collide on the same unix-socket path.
+        run_tag = hashlib.sha1(
+            str(Path(self._internal_dir).resolve()).encode()
+        ).hexdigest()[:8]
+        d = Path(scratch) / f"egress_{self.agent_id}_{run_tag}"
+        d.mkdir(parents=True, exist_ok=True)
+        os.chmod(d, 0o700)
+        self._egress_dir = d
+        self._egress_proxy_sock = d / "proxy.sock"
+
+        # Detect a running embedding server so we can raw-forward it. Detection
+        # runs on the host (where loopback works); the resulting URL is
+        # rewritten so the in-sandbox bridge port matches.
+        host_embed_url = self._detect_embedding_server()
+        raw_forwards: List[str] = []
+        if host_embed_url:
+            self._egress_embed_port = int(host_embed_url.rsplit(":", 1)[1])
+            self._egress_embed_sock = d / "embed.sock"
+            raw_forwards.append(f"{self._egress_embed_sock}=127.0.0.1:{self._egress_embed_port}")
+
+        allow = list(self.config.egress_allowlist) or list(DEFAULT_EGRESS_ALLOWLIST)
+
+        proxy_script = str(Path(__file__).resolve().parent / "egress_proxy.py")
+        repo_root = str(Path(__file__).resolve().parents[2])
+        venv_python = os.path.join(repo_root, ".venv", "bin", "python")
+        python_cmd = venv_python if os.path.exists(venv_python) else sys.executable
+
+        cmd = [python_cmd, proxy_script,
+               "--proxy-socket", str(self._egress_proxy_sock)]
+        for a in allow:
+            cmd.extend(["--allow", a])
+        for rf in raw_forwards:
+            cmd.extend(["--raw-forward", rf])
+
+        # ready_fd: the proxy writes "ready\n" once both servers are listening.
+        r_fd, w_fd = os.pipe()
+        cmd.extend(["--ready-fd", str(w_fd)])
+
+        log_path = self._internal_dir / "egress_proxy.log"
+        log_f = open(log_path, "a")
+        logger.info("Starting egress proxy: %s", " ".join(cmd))
+        self._egress_proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=log_f,
+            stderr=log_f,
+            pass_fds=(w_fd,),
+        )
+        os.close(w_fd)
+        # Block until the proxy reports ready (or dies / 5s timeout).
+        ready = b""
+        try:
+            os.set_blocking(r_fd, False)
+            deadline = time.time() + 5.0
+            while time.time() < deadline:
+                try:
+                    chunk = os.read(r_fd, 16)
+                    if chunk:
+                        ready += chunk
+                        if b"ready" in ready:
+                            break
+                except BlockingIOError:
+                    pass
+                if self._egress_proc.poll() is not None:
+                    break
+                time.sleep(0.05)
+        finally:
+            os.close(r_fd)
+        if b"ready" not in ready:
+            raise RuntimeError(
+                f"egress proxy failed to become ready (rc={self._egress_proc.poll()}); "
+                f"see {log_path}"
+            )
+
+    def _stop_egress_proxy(self) -> None:
+        if self._egress_proc and self._egress_proc.poll() is None:
+            self._egress_proc.terminate()
+            try:
+                self._egress_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self._egress_proc.kill()
+        self._egress_proc = None
+
+    # ── MCP relay (sandbox=True) ───────────────────────────────────────
+
+    def _build_mcp_invocation(self) -> Tuple[str, List[str]]:
+        """Return (command, args) for the harness' MCP config.
+
+        sandbox=False: the harness spawns mcp_server.py as a child process
+        directly. The MCP server runs alongside the harness with full repo
+        access — this is the pre-refactor behavior.
+
+        sandbox=True: the MCP server runs on the host (started via
+        _start_mcp_relay) and the harness reaches it through a per-agent
+        unix socket. The harness invokes `socat - UNIX-CONNECT:<sock>` as
+        its MCP child; socat bridges Claude Code's stdio to the host's
+        socat, which forks a fresh mcp_server.py per connection. Keeping
+        the MCP server (and therefore search_db, lancedb, and the
+        embedding model) on the host prevents the sandboxed harness from
+        bypassing date-capping by querying the index directly.
+        """
+        if self.config.sandbox:
+            if self._mcp_relay_sock is None:
+                raise RuntimeError(
+                    "MCP relay socket not initialized; "
+                    "_start_mcp_relay must run before _build_mcp_invocation"
+                )
+            return ("socat", ["-", f"UNIX-CONNECT:{self._mcp_relay_sock}"])
+
+        repo_root = str(Path(__file__).resolve().parents[2])
+        mcp_server_script = str(Path(__file__).resolve().parent / "mcp_server.py")
+        venv_python = os.path.join(repo_root, ".venv", "bin", "python")
+        python_cmd = venv_python if os.path.exists(venv_python) else "python"
+        embed_server_url = self._detect_embedding_server()
+
+        mcp_args = [
+            mcp_server_script,
+            "--workspace", str(self.workspace),
+            "--internal-dir", str(self._internal_dir),
+            "--repo-root", repo_root,
+            "--search-db", self.config.search_db or "",
+            "--embedding-model", self.config.embedding_model or "",
+        ]
+        if embed_server_url:
+            mcp_args.extend(["--embedding-server-url", embed_server_url])
+        return (python_cmd, mcp_args)
+
+    def _start_mcp_relay(self) -> None:
+        """Spawn host-side MCP server bridged via a unix socket. Idempotent.
+
+        Only used when sandbox=True. The host listener is `socat
+        UNIX-LISTEN:<sock>,fork EXEC:<wrapper.sh>`; each new connection
+        from inside the sandbox forks a fresh mcp_server.py wired through
+        the wrapper script's stdio. The wrapper exists so paths with
+        spaces don't trip socat's whitespace-split EXEC parser.
+        """
+        if self._mcp_relay_proc is not None and self._mcp_relay_proc.poll() is None:
+            return
+
+        scratch = os.environ.get("_CONDOR_SCRATCH_DIR") or tempfile.gettempdir()
+        run_tag = hashlib.sha1(
+            str(Path(self._internal_dir).resolve()).encode()
+        ).hexdigest()[:8]
+        d = Path(scratch) / f"mcp_{self.agent_id}_{run_tag}"
+        d.mkdir(parents=True, exist_ok=True)
+        os.chmod(d, 0o700)
+        self._mcp_relay_dir = d
+        self._mcp_relay_sock = d / "mcp.sock"
+
+        # Stale socket from a prior run will block bind; remove it.
+        if self._mcp_relay_sock.exists() or self._mcp_relay_sock.is_symlink():
+            self._mcp_relay_sock.unlink()
+
+        repo_root = str(Path(__file__).resolve().parents[2])
+        mcp_server_script = str(Path(__file__).resolve().parent / "mcp_server.py")
+        venv_python = os.path.join(repo_root, ".venv", "bin", "python")
+        python_cmd = venv_python if os.path.exists(venv_python) else sys.executable
+
+        embed_server_url = self._detect_embedding_server()
+
+        mcp_args = [
+            mcp_server_script,
+            "--workspace", str(self.workspace),
+            "--internal-dir", str(self._internal_dir),
+            "--repo-root", repo_root,
+            "--search-db", self.config.search_db or "",
+            "--embedding-model", self.config.embedding_model or "",
+        ]
+        if embed_server_url:
+            mcp_args.extend(["--embedding-server-url", embed_server_url])
+
+        wrapper = d / "launch_mcp.sh"
+        wrapper.write_text(
+            "#!/bin/sh\nexec " + shlex.join([python_cmd, *mcp_args]) + "\n"
+        )
+        wrapper.chmod(0o755)
+
+        # NOTE: do NOT add `stderr` to the EXEC option — that dup2's the
+        # subprocess's stderr onto stdout, which corrupts the JSON-RPC
+        # stream the harness reads back over the unix socket. Leaving it
+        # off keeps mcp_server.py stderr on socat's parent stderr (which
+        # we redirect into mcp_relay.log below).
+        cmd = [
+            "socat",
+            f"UNIX-LISTEN:{self._mcp_relay_sock},fork",
+            f"EXEC:{wrapper}",
+        ]
+        log_path = self._internal_dir / "mcp_relay.log"
+        log_f = open(log_path, "a")
+        logger.info("Starting MCP relay: %s", " ".join(cmd))
+        self._mcp_relay_proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=log_f,
+            stderr=log_f,
+        )
+
+        # Wait for socat to bind. socat creates the socket synchronously
+        # before accepting; 5s is generous.
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            if self._mcp_relay_sock.exists():
+                return
+            if self._mcp_relay_proc.poll() is not None:
+                raise RuntimeError(
+                    f"MCP relay died before listening (rc={self._mcp_relay_proc.returncode}); "
+                    f"see {log_path}"
+                )
+            time.sleep(0.05)
+        raise RuntimeError(
+            f"MCP relay socket {self._mcp_relay_sock} did not appear within 5s; see {log_path}"
+        )
+
+    def _stop_mcp_relay(self) -> None:
+        if self._mcp_relay_proc and self._mcp_relay_proc.poll() is None:
+            self._mcp_relay_proc.terminate()
+            try:
+                self._mcp_relay_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self._mcp_relay_proc.kill()
+        self._mcp_relay_proc = None
+        if self._mcp_relay_sock and self._mcp_relay_sock.exists():
+            try:
+                self._mcp_relay_sock.unlink()
+            except OSError:
+                pass
+
+    def _wrap_for_egress_bridge(self, cmd: List[str]) -> List[str]:
+        """Prefix `cmd` with a /bin/sh wrapper that starts socat sidecars
+        (TCP-listen on sandbox loopback → unix-connect to bind-mounted host
+        socket) and then exec's the harness. Only applied when
+        network_isolation=True."""
+        proxy_sock = str(self._egress_proxy_sock)
+        proxy_port = self._egress_proxy_port
+        bridge = (
+            f"socat TCP-LISTEN:{proxy_port},bind=127.0.0.1,fork,reuseaddr "
+            f"UNIX-CONNECT:{proxy_sock} 2>/dev/null & "
+        )
+        if self._egress_embed_sock and self._egress_embed_port:
+            bridge += (
+                f"socat TCP-LISTEN:{self._egress_embed_port},bind=127.0.0.1,"
+                f"fork,reuseaddr UNIX-CONNECT:{self._egress_embed_sock} 2>/dev/null & "
+            )
+        # Brief grace for socat to bind its listening sockets before the
+        # harness fires its first request. socat binds in <50ms typically;
+        # 0.3s is conservative.
+        wrapper = bridge + 'sleep 0.3; exec "$@"'
+        return ["/bin/sh", "-c", wrapper, "egress-bridge", *cmd]
+
+    def _egress_env_overrides(self) -> Dict[str, str]:
+        """Env vars to set in the harness subprocess so SDK clients route
+        through the in-sandbox bridge to the host proxy."""
+        proxy_url = f"http://127.0.0.1:{self._egress_proxy_port}"
+        # NO_PROXY=127.0.0.1,localhost so the embedding client (which already
+        # bypasses HTTPS_PROXY explicitly) and any other loopback-to-loopback
+        # call stays local. The loopback embedding server reaches the host via
+        # the raw-forward bridge on the same port.
+        return {
+            "HTTPS_PROXY": proxy_url,
+            "https_proxy": proxy_url,
+            "HTTP_PROXY": proxy_url,
+            "http_proxy": proxy_url,
+            "NO_PROXY": "127.0.0.1,localhost",
+            "no_proxy": "127.0.0.1,localhost",
+        }
+
     def _build_bwrap_cmd(self, inner_cmd: List[str]) -> List[str]:
         """Wrap `inner_cmd` in bwrap for filesystem isolation.
 
@@ -651,7 +1180,8 @@ class MinimalHarnessAgent(BaseAgent):
           - repo_root (ro) — agents/, environment/, .venv symlink
           - realpath(venv) (ro) — when .venv is symlinked out of the repo
           - sys.base_prefix (ro) — Python interpreter + stdlib
-          - search_db (ro) — LanceDB articles index
+          - mcp_relay_dir (rw) — per-agent unix socket for the host-side
+            MCP server (the only path through which retrieval is reachable)
           - harness binary tree (ro), harness state dirs under ~ (rw):
               claude_code: ~/.claude, ~/.claude.json, ~/.cache/claude*
               opencode:    ~/.cache|.local|.config/opencode plus an
@@ -660,6 +1190,9 @@ class MinimalHarnessAgent(BaseAgent):
           - /proc (new namespace), /dev (stripped), /tmp (tmpfs)
 
         NOT bound (stays invisible to the model):
+          - search_db / lancedb / embedding_model — retrieval lives on the
+            host behind the MCP relay, so the harness can only search via
+            `mcp__forecast__search_news`, where date-capping is enforced
           - articles_base — date-gating is enforced by hardlinks we placed in
             workspace/articles; articles_base itself is unreachable
           - FSIM_DATASET_PATH — HF dataset with resolution labels
@@ -671,8 +1204,11 @@ class MinimalHarnessAgent(BaseAgent):
         symlink aliases (/fast, /is/cluster/fast) are recreated via
         --symlink so code using aliased paths still resolves.
 
-        Network is kept via --share-net so OpenRouter + local vLLM embedding
-        server at 127.0.0.1:800x remain reachable.
+        By default, network is kept via --share-net so OpenRouter + the local
+        vLLM embedding server at 127.0.0.1:800x remain reachable. When
+        network_isolation=True, --share-net is replaced with --unshare-net
+        and outbound traffic is funnelled through the host-side allowlist
+        proxy (see _start_egress_proxy + _wrap_for_egress_bridge).
         """
         repo_root_real = os.path.realpath(str(Path(__file__).resolve().parents[2]))
         workspace_real = os.path.realpath(str(self.workspace))
@@ -680,7 +1216,7 @@ class MinimalHarnessAgent(BaseAgent):
 
         args = [
             "bwrap",
-            "--share-net",
+            "--unshare-net" if self.config.network_isolation else "--share-net",
             "--die-with-parent",
             "--unshare-pid",
             "--unshare-ipc",
@@ -739,18 +1275,12 @@ class MinimalHarnessAgent(BaseAgent):
         if base_prefix and os.path.exists(base_prefix) and base_prefix != repo_root_real:
             args.extend(["--ro-bind", base_prefix, base_prefix])
 
-        # LanceDB search index.
-        if self.config.search_db:
-            sdb_real = os.path.realpath(self.config.search_db)
-            if os.path.exists(sdb_real):
-                args.extend(["--ro-bind", sdb_real, sdb_real])
-
-        # Embedding model path (used by LanceDB as a fallback when no vLLM
-        # embedding server is detected; harmless to bind when unused).
-        if self.config.embedding_model:
-            em_real = os.path.realpath(self.config.embedding_model)
-            if os.path.exists(em_real):
-                args.extend(["--ro-bind", em_real, em_real])
+        # LanceDB search_db and the embedding_model are intentionally NOT
+        # bound when sandbox=True. They live on the host alongside the
+        # MCP relay (see _start_mcp_relay); the harness reaches search via
+        # the MCP `search_news` tool only, where date-capping is enforced.
+        # Binding the index here would let the harness open lancedb
+        # directly and bypass the date filter.
 
         # Harness binary install tree (ro).
         if self.config.harness_backend == "claude_code":
@@ -797,9 +1327,27 @@ class MinimalHarnessAgent(BaseAgent):
             if os.path.exists(dh):
                 args.extend(["--bind", dh, dh])
 
+        # network_isolation: bind-mount the per-agent egress socket dir at the
+        # same realpath so the in-sandbox bridge can UNIX-CONNECT to it.
+        if self.config.network_isolation and self._egress_dir:
+            ed = os.path.realpath(str(self._egress_dir))
+            args.extend(["--bind", ed, ed])
+
+        # sandbox: bind-mount the per-agent MCP relay socket dir so the
+        # harness' `socat - UNIX-CONNECT:<sock>` MCP child can reach the
+        # host-side MCP server.
+        if self._mcp_relay_dir:
+            md = os.path.realpath(str(self._mcp_relay_dir))
+            if os.path.exists(md):
+                args.extend(["--bind", md, md])
+
         # chdir inside the sandbox to the workspace realpath (matches the bind).
         args.extend(["--chdir", workspace_real])
         args.append("--")
+        # When network_isolation is on, prefix the harness with a tiny shell
+        # that brings up TCP→Unix-socket bridges before exec'ing the harness.
+        if self.config.network_isolation:
+            inner_cmd = self._wrap_for_egress_bridge(list(inner_cmd))
         args.extend(inner_cmd)
         return args
 
@@ -835,10 +1383,15 @@ class MinimalHarnessAgent(BaseAgent):
         # Isolate opencode's SQLite session DB per agent. Must live on local
         # disk — shared FS (Lustre/NFS) breaks SQLite WAL ("disk I/O error").
         scratch = os.environ.get("_CONDOR_SCRATCH_DIR") or tempfile.gettempdir()
-        data_home = Path(scratch) / f"opencode_{self.agent_id}"
+        run_tag = hashlib.sha1(
+            str(Path(self._internal_dir).resolve()).encode()
+        ).hexdigest()[:8]
+        data_home = Path(scratch) / f"opencode_{self.agent_id}_{run_tag}"
         data_home.mkdir(parents=True, exist_ok=True)
         env["XDG_DATA_HOME"] = str(data_home)
         self._opencode_data_home = data_home
+        if self.config.network_isolation:
+            env.update(self._egress_env_overrides())
 
         log_stdout = open(self._internal_dir / "opencode_stdout.jsonl", "w")
         log_stderr = open(self._internal_dir / "opencode_stderr.log", "w")
@@ -849,8 +1402,9 @@ class MinimalHarnessAgent(BaseAgent):
         # path is visible only through symlinks that bwrap reshapes.
         popen_cwd = None if self.config.sandbox else str(self.workspace)
 
-        logger.info("Starting opencode%s: %s",
+        logger.info("Starting opencode%s%s: %s",
                     " [sandboxed]" if self.config.sandbox else "",
+                    " [net-isolated]" if self.config.network_isolation else "",
                     " ".join(launch_cmd))
         self._harness_proc = subprocess.Popen(
             launch_cmd,
@@ -883,28 +1437,22 @@ class MinimalHarnessAgent(BaseAgent):
         System prompt: codex auto-loads `AGENTS.md` from cwd, so we copy
         system_prompt.md → workspace/AGENTS.md.
         MCP server: configured via `-c mcp_servers.forecast.command/args`.
+        With sandbox=True the command becomes a socat bridge to the
+        host-side MCP relay (see _build_mcp_invocation).
         """
-        repo_root = str(Path(__file__).resolve().parents[2])
-        mcp_server_script = str(Path(__file__).resolve().parent / "mcp_server.py")
-        venv_python = os.path.join(repo_root, ".venv", "bin", "python")
-        python_cmd = venv_python if os.path.exists(venv_python) else "python"
-
-        embed_server_url = self._detect_embedding_server()
-
-        mcp_args = [
-            mcp_server_script,
-            "--workspace", str(self.workspace),
-            "--internal-dir", str(self._internal_dir),
-            "--repo-root", repo_root,
-            "--search-db", self.config.search_db or "",
-            "--embedding-model", self.config.embedding_model or "",
-        ]
-        if embed_server_url:
-            mcp_args.extend(["--embedding-server-url", embed_server_url])
+        mcp_cmd, mcp_args = self._build_mcp_invocation()
 
         # Codex reads AGENTS.md from cwd at startup as user instructions.
-        system_prompt = (self._internal_dir / "system_prompt.md").read_text()
-        (self.workspace / "AGENTS.md").write_text(system_prompt)
+        # active_memory mode delivers the full daily prompt as the user prompt
+        # instead — skip the AGENTS.md write and clear any stale copy from a
+        # prior config so codex can't pick it up.
+        if self.config.prompt_mode == "active_memory":
+            stale_agents_md = self.workspace / "AGENTS.md"
+            if stale_agents_md.exists():
+                stale_agents_md.unlink()
+        else:
+            system_prompt = (self._internal_dir / "system_prompt.md").read_text()
+            (self.workspace / "AGENTS.md").write_text(system_prompt)
 
         # When sandboxed, pass the realpath of the codex binary as argv[0] so
         # the subprocess can exec it without needing the ~/.local/bin/codex
@@ -921,7 +1469,7 @@ class MinimalHarnessAgent(BaseAgent):
         common_args = [
             "-m", self.config.model,
             "-c", f'model_reasoning_effort="{self.config.reasoning_effort}"',
-            "-c", f'mcp_servers.forecast.command="{python_cmd}"',
+            "-c", f'mcp_servers.forecast.command="{mcp_cmd}"',
             "-c", f"mcp_servers.forecast.args={json.dumps(mcp_args)}",
             "--dangerously-bypass-approvals-and-sandbox",
             "--skip-git-repo-check",
@@ -949,10 +1497,16 @@ class MinimalHarnessAgent(BaseAgent):
                 *common_args, resume_prompt,
             ]
         else:
-            initial_prompt = (
-                "Begin forecasting. Read market.csv to see your questions, "
-                "then research and submit predictions."
-            )
+            if (
+                self.config.prompt_mode == "active_memory"
+                and self._codex_initial_prompt_override
+            ):
+                initial_prompt = self._codex_initial_prompt_override
+            else:
+                initial_prompt = (
+                    "Begin forecasting. Read market.csv to see your questions, "
+                    "then research and submit predictions."
+                )
             cmd = [
                 codex_bin, "exec",
                 *common_args,
@@ -966,14 +1520,17 @@ class MinimalHarnessAgent(BaseAgent):
         log_stderr = open(self._internal_dir / "codex_stderr.log", "a")
 
         env = os.environ.copy()
+        if self.config.network_isolation:
+            env.update(self._egress_env_overrides())
 
         launch_cmd = self._maybe_sandbox(cmd)
         # When sandboxed, bwrap sets cwd via --chdir; passing cwd= to Popen
         # would chdir in the host namespace before exec.
         popen_cwd = None if self.config.sandbox else str(self.workspace)
 
-        logger.info("Starting codex%s: %s",
+        logger.info("Starting codex%s%s: %s",
                     " [sandboxed]" if self.config.sandbox else "",
+                    " [net-isolated]" if self.config.network_isolation else "",
                     " ".join(launch_cmd))
         self._harness_proc = subprocess.Popen(
             launch_cmd,
@@ -1090,6 +1647,8 @@ class MinimalHarnessAgent(BaseAgent):
         if self.config.openrouter_api_key:
             env["OPENROUTER_API_KEY"] = self.config.openrouter_api_key
         env["XDG_DATA_HOME"] = str(self._opencode_data_home)
+        if self.config.network_isolation:
+            env.update(self._egress_env_overrides())
 
         try:
             self._stdout_log.close()
@@ -1120,6 +1679,54 @@ class MinimalHarnessAgent(BaseAgent):
         self._stderr_log = log_stderr
         return True
 
+    def _resume_claude_code(self, current_date: date) -> bool:
+        """Relaunch claude with `--resume <session_id>` after early exit.
+
+        Reuses _start_claude_code's resume branch by temporarily forcing
+        config.claude_code_resume=True. Returns False if no prior session_id
+        is recoverable from claude_code_stdout.jsonl.
+        """
+        if not self._find_claude_code_session_id():
+            logger.error("claude_code died and no session_id found — cannot resume")
+            return False
+        rc = self._harness_proc.returncode if self._harness_proc else "?"
+        prev = self.config.claude_code_resume
+        self.config.claude_code_resume = True
+        try:
+            self._start_claude_code()
+        finally:
+            self.config.claude_code_resume = prev
+        logger.warning(
+            "claude_code exited (rc=%s) — resumed session %s for %s",
+            rc, self._claude_code_session_id, current_date,
+        )
+        return True
+
+    def _resume_codex(self, current_date: date) -> bool:
+        """Relaunch codex via `exec resume <thread_id>` after early exit.
+
+        Reuses _start_codex's resume branch by ensuring _codex_thread_id is
+        populated and temporarily forcing config.codex_resume=True. Returns
+        False if no prior thread_id is recoverable from codex_stdout.jsonl.
+        """
+        if self._codex_thread_id is None:
+            self._find_codex_thread_id()
+        if self._codex_thread_id is None:
+            logger.error("codex died and no thread_id found — cannot resume")
+            return False
+        rc = self._harness_proc.returncode if self._harness_proc else "?"
+        prev = self.config.codex_resume
+        self.config.codex_resume = True
+        try:
+            self._start_codex()
+        finally:
+            self.config.codex_resume = prev
+        logger.warning(
+            "codex exited (rc=%s) — resumed thread %s for %s",
+            rc, self._codex_thread_id, current_date,
+        )
+        return True
+
     # ── signal coordination ────────────────────────────────────────────
 
     def _wait_for_next_day(self, current_date: date) -> List[Dict[str, Any]]:
@@ -1139,21 +1746,24 @@ class MinimalHarnessAgent(BaseAgent):
         while not signal_path.exists():
             # Check if harness process died.
             if self._harness_proc and self._harness_proc.poll() is not None:
-                if self.config.harness_backend == "opencode":
-                    attempts = self._resume_attempts.get(current_date, 0)
-                    if attempts < MAX_RESUMES_PER_DAY and self._resume_opencode(current_date):
-                        self._resume_attempts[current_date] = attempts + 1
-                        continue
-                    logger.error(
-                        "opencode exited and could not be resumed for %s (attempts=%d)",
-                        current_date, attempts,
-                    )
-                else:
-                    logger.warning(
-                        "%s exited with code %d before signaling next_day",
-                        self.config.harness_backend,
-                        self._harness_proc.returncode,
-                    )
+                backend = self.config.harness_backend
+                attempts = self._resume_attempts.get(current_date, 0)
+                resumed = False
+                if attempts < MAX_RESUMES_PER_DAY:
+                    if backend == "opencode":
+                        resumed = self._resume_opencode(current_date)
+                    elif backend == "claude_code":
+                        resumed = self._resume_claude_code(current_date)
+                    elif backend == "codex":
+                        resumed = self._resume_codex(current_date)
+                if resumed:
+                    self._resume_attempts[current_date] = attempts + 1
+                    continue
+                logger.error(
+                    "%s exited with code %d before signaling next_day "
+                    "(resume attempts=%d)",
+                    backend, self._harness_proc.returncode, attempts,
+                )
                 return self._read_predictions(current_date)
             if time.time() - start > timeout:
                 logger.error("Timeout waiting for next_day signal on %s", current_date)
@@ -1234,6 +1844,9 @@ class MinimalHarnessAgent(BaseAgent):
                 self._harness_proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 self._harness_proc.kill()
+
+        self._stop_egress_proxy()
+        self._stop_mcp_relay()
 
         for f in (getattr(self, "_stdout_log", None), getattr(self, "_stderr_log", None)):
             if f and not f.closed:

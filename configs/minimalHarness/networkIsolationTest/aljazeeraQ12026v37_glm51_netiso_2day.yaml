@@ -1,0 +1,50 @@
+# 2-day network-isolation smoke test: Claude Code -> z.ai (GLM-5.1).
+# Identical to aljazeeraQ12026v37_glm51.yaml except:
+#   - 2-day sim window (2026-01-01 -> 2026-01-02) inside the active resolution range
+#   - network_isolation: true (bwrap --unshare-net + host allowlist proxy)
+#
+# Usage:
+#   python scripts/test_basic_agent.py --config configs/minimalHarness/aljazeeraQ12026v37_glm51_netiso_2day.yaml
+
+sim_name: "claude_code_aljazeeraQ12026v37_glm51_netiso_2day"
+
+start_date: "2026-01-01"
+end_date: "2026-01-02"
+resolution_start: "2026-01-01"
+resolution_end: "2026-01-02"
+lookback_days: 7
+search_cutoff_days: 0
+timegap_days: 1
+
+dataset: "openforesight"
+dataset_path: "${FSIM_DATASET_PATH}"
+split: "aljazeeraQ12026v37"
+resolved_only: false
+min_forecasters: 0
+output_base: "/fast/sgoel/forecasting/current_sim/final_runs_v37/"
+
+search_db: "${FSIM_SEARCH_DB}"
+embedding_model: "${FSIM_EMBEDDING_MODEL}"
+articles_base: "/fast/sgoel/forecasting/news/deduped_articles/data"
+
+matching: "openrouter"
+matcher: "deepseek/deepseek-v3.2"
+
+defaults:
+  provider: "none"
+  scaffold: "minimalHarness"
+  sandbox: true
+  network_isolation: true
+  anthropic_base_url: "https://api.z.ai/api/anthropic"
+
+resources:
+  gpus: 1
+  cpus: 16
+  memory_gb: 80
+  disk_gb: 50
+  bid: 35
+
+agents:
+  - model: "glm-5.1"
+    timeout_seconds: 3600
+    claude_code_path: "/home/nchandak/.local/bin/claude"

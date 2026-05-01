@@ -456,12 +456,23 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
                 codex_path=agent_def.get('codex_path', defaults.get('codex_path', 'codex')),
                 reasoning_effort=agent_def.get('reasoning_effort', defaults.get('reasoning_effort', 'high')),
                 codex_resume=bool(agent_def.get('codex_resume', defaults.get('codex_resume', False))),
+                prompt_mode=str(agent_def.get('prompt_mode', defaults.get('prompt_mode', 'default'))),
+                max_outcomes_per_question=int(agent_def.get(
+                    'max_outcomes_per_question',
+                    defaults.get('max_outcomes_per_question', config.get('max_outcomes_per_question', 5)),
+                )),
+                timegap_days=int(agent_def.get(
+                    'timegap_days',
+                    defaults.get('timegap_days', config.get('timegap_days', 1)),
+                )),
                 claude_code_resume=bool(agent_def.get('claude_code_resume', defaults.get('claude_code_resume', False)) or args.resume),
                 openrouter_api_key=openrouter_api_key,
                 anthropic_base_url=anthropic_base_url,
                 anthropic_auth_token=anthropic_auth_token,
                 extra_flags=list(agent_def.get('extra_flags', defaults.get('extra_flags', []))),
                 sandbox=bool(agent_def.get('sandbox', defaults.get('sandbox', False))),
+                network_isolation=bool(agent_def.get('network_isolation', defaults.get('network_isolation', False))),
+                egress_allowlist=list(agent_def.get('egress_allowlist', defaults.get('egress_allowlist', []))),
             )
             agent = MinimalHarnessAgent(
                 agent_id=agent_id,
@@ -1258,6 +1269,11 @@ def main():
                 warm = embedding_model.embed(["test"], use_tqdm=False)
                 if not warm:
                     raise RuntimeError("Embedding warmup returned empty result")
+                # Publish the actual URL so child agents (esp. parallel sims with
+                # multiple vLLMs on the host) don't have to scan port ranges and
+                # can deterministically pick the right embedding server.
+                if getattr(embedding_model, "_port", None):
+                    os.environ["FSIM_EMBEDDING_URL"] = f"http://127.0.0.1:{embedding_model._port}"
                 print("  Embedding server ready (queries will use semantic/hybrid search)")
             except Exception as e:
                 print(f"  Warning: Failed to start embedding server: {e}")
