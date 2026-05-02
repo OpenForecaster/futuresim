@@ -1,9 +1,10 @@
-# Claude Code Opus 4.6 on aljazeeraQ12026v37 split (331 questions, Jan-Mar 2026).
-# Resolution dates in v37 range 2026-01-01 -> 2026-03-28, so end/resolution_end = 2026-03-28.
+# opencode + moonshotai/kimi-k2.6 (via OpenRouter) on aljazeeraQ12026v37 split
+# (331 questions, Jan-Mar 2026). Mirrors aljazeeraQ12026v37_opencode_qwen36plus.yaml
+# but swaps the model.
 #
-# Usage: python scripts/test_basic_agent.py --config configs/minimalHarness/aljazeeraQ12026v37_opus.yaml
+# Usage: python scripts/test_basic_agent.py --config configs/minimalHarness/aljazeeraQ12026v37_opencode_kimik26.yaml
 
-sim_name: "claude_code_aljazeeraQ12026v37_opus"
+sim_name: "opencode_aljazeeraQ12026v37_kimik26"
 
 start_date: "2025-12-31"
 end_date: "2026-03-28"
@@ -30,8 +31,8 @@ matcher: "deepseek/deepseek-v3.2"
 defaults:
   provider: "none"
   scaffold: "minimalHarness"
-  sandbox: true
-  network_isolation: true
+  harness_backend: "opencode"
+  opencode_path: "/home/nchandak/.opencode/bin/opencode"
 
 resources:
   gpus: 1
@@ -41,6 +42,5 @@ resources:
   bid: 35
 
 agents:
-  - model: "claude-opus-4-6"
-    timeout_seconds: 86400
-    claude_code_path: "/home/nchandak/.local/bin/claude"
+  - model: "moonshotai/kimi-k2.6"
+    timeout_seconds: 7200

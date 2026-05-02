@@ -1225,24 +1225,31 @@ class MinimalHarnessAgent(BaseAgent):
     def _build_bwrap_cmd(self, inner_cmd: List[str]) -> List[str]:
         """Wrap `inner_cmd` in bwrap for filesystem isolation.
 
-        The sandbox hides everything by default and only exposes:
+        The sandbox hides everything by default and only exposes the
+        absolute minimum the harness binary needs to run:
           - workspace (rw) — harness cwd; articles/, memory/, market.csv,
             plus any files the model writes
-          - _internal_dir (rw) — MCP signals/, predictions/, state.json
-          - repo_root (ro) — agents/, environment/, .venv symlink
-          - realpath(venv) (ro) — when .venv is symlinked out of the repo
-          - sys.base_prefix (ro) — Python interpreter + stdlib
+          - _internal_dir (rw) — MCP signals/, predictions/, state.json,
+            system_prompt.md
           - mcp_relay_dir (rw) — per-agent unix socket for the host-side
             MCP server (the only path through which retrieval is reachable)
-          - harness binary tree (ro), harness state dirs under ~ (rw):
+          - harness binary install tree (ro), harness state dirs under ~ (rw):
+              codex:       ~/.codex (auth, sessions, cache)
               claude_code: ~/.claude, ~/.claude.json, ~/.cache/claude*
               opencode:    ~/.cache|.local|.config/opencode plus an
                            XDG_DATA_HOME scratch for its SQLite session DB
           - /usr, /etc, /lib, /lib64, /bin, /sbin (ro) — OS tools/libs
+            (provides /usr/bin/python3, socat, sh, curl, etc.)
           - /proc (fresh namespace by default, or host read-only with
             sandbox_proc_mode="host_ro"), /dev (stripped), /tmp (tmpfs)
 
         NOT bound (stays invisible to the model):
+          - the forecast-sim repo itself — the harness binary is
+            self-contained and the MCP server runs host-side; binding the
+            repo would expose analysis/reports/ ground-truth tables,
+            prior-run logs under logs/sims/, and other sim state
+          - .venv / sys.base_prefix — no Python is invoked inside the
+            sandbox; system /usr/bin/python3 is sufficient when needed
           - search_db / lancedb / embedding_model — retrieval lives on the
             host behind the MCP relay, so the harness can only search via
             `mcp__forecast__search_news`, where date-capping is enforced
@@ -1263,7 +1270,6 @@ class MinimalHarnessAgent(BaseAgent):
         and outbound traffic is funnelled through the host-side allowlist
         proxy (see _start_egress_proxy + _wrap_for_egress_bridge).
         """
-        repo_root_real = os.path.realpath(str(Path(__file__).resolve().parents[2]))
         workspace_real = os.path.realpath(str(self.workspace))
         internal_real = os.path.realpath(str(self._internal_dir))
 
@@ -1317,21 +1323,15 @@ class MinimalHarnessAgent(BaseAgent):
         if os.path.exists(articles_dst):
             args.extend(["--ro-bind", articles_dst, articles_dst])
 
-        # Repo (ro).
-        args.extend(["--ro-bind", repo_root_real, repo_root_real])
-
-        # If .venv is a symlink out of the repo (common when the venv lives on
-        # fast storage), bind the real venv location too.
-        venv = os.path.join(repo_root_real, ".venv")
-        if os.path.islink(venv):
-            venv_real = os.path.realpath(venv)
-            if venv_real and os.path.exists(venv_real):
-                args.extend(["--ro-bind", venv_real, venv_real])
-
-        # Python interpreter + stdlib (base_prefix of the venv).
-        base_prefix = os.path.realpath(sys.base_prefix) if sys.base_prefix else ""
-        if base_prefix and os.path.exists(base_prefix) and base_prefix != repo_root_real:
-            args.extend(["--ro-bind", base_prefix, base_prefix])
+        # The forecast-sim repo is intentionally NOT bound. Earlier the
+        # MCP server ran inside the sandbox and needed agents/, environment/,
+        # and the repo's .venv. The MCP server now runs host-side over the
+        # unix-socket relay (see _start_mcp_relay), and the harness binaries
+        # (codex/claude/opencode) are self-contained — none of them import
+        # repo Python. Binding the repo would re-expose analysis/reports/
+        # ground-truth tables, sibling-run logs under logs/sims/, prior-run
+        # state.json/predictions/, and the YAML configs themselves, all of
+        # which would let the model recover answers without any retrieval.
 
         # LanceDB search_db and the embedding_model are intentionally NOT
         # bound when sandbox=True. They live on the host alongside the
@@ -1538,6 +1538,8 @@ class MinimalHarnessAgent(BaseAgent):
             "--json",
         ]
 
+        if self.config.codex_resume and self._codex_thread_id is None:
+            self._find_codex_thread_id()
         use_resume = (
             self.config.codex_resume
             and self._codex_thread_id is not None

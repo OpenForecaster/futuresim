@@ -37,6 +37,7 @@ defaults:
   reasoning_effort: "xhigh"
   codex_resume: true
   sandbox: true
+  network_isolation: true
 
 resources:
   gpus: 1
