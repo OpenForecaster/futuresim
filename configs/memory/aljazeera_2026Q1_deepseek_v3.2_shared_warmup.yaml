@@ -1,0 +1,80 @@
+# Shared Day 0 warmup for the DeepSeek v3.2 single-agent memory comparison.
+# Run this once, then restart both active-memory and no-memory arms from the
+# saved output directory with restart_from_day=2025-12-25.
+#
+# Usage:
+#   python aisa_scripts/run_sim/submit_sim_aisa.py \
+#     --config configs/memory/aljazeera_2026Q1_deepseek_v3.2_shared_warmup.yaml \
+#     --runs 1 --gpus 1 --memory 80 --time 1-00:00:00
+
+# --- Simulation Meta ---
+sim_name: "ds_v32_shared_warmup_aljazeera2026Q1_1agent"
+start_date: "2025-12-24"       # Day 0 warmup date
+end_date: "2025-12-24"         # Stop after the warmup wakeup is recorded
+resolution_start: "2025-12-31"
+resolution_end: "2026-03-28"
+lookback_days: 0
+search_cutoff_days: 0
+timegap_days: 1
+split: "aljazeera2026Q1"
+
+# --- Data Paths ---
+dataset: "openforesight"
+dataset_path: "${FSIM_DATASET_PATH}"
+dataset_cache: "${FSIM_DATASET_CACHE}"
+resolved_only: false
+min_forecasters: 0
+output_base: "${FSIM_OUTPUT_BASE}/final_runs_v37"
+warmup_parallelism: 64
+
+# --- Search Settings ---
+search_db: "${FSIM_SEARCH_DB}"
+embedding_model: "${FSIM_EMBEDDING_MODEL}"
+embedding_gpu_mem: 0.7
+articles_base: "${FSIM_NEWS_BASE}/deduped_articles/data"
+
+# --- Answer Matching ---
+matching: "openrouter"
+matcher: "deepseek/deepseek-v3.2"
+matcher_gpu_mem: 0.0
+max_model_len: 32768
+embedding_max_model_len: 32768
+
+# --- Inference Defaults ---
+rate_limit: 32.0
+parallel: true
+
+# --- Agents Configuration ---
+defaults:
+  provider: "openrouter"
+  scaffold: "allQ"
+  temperature: 0.7
+  max_tokens: 65536
+  max_retries: 3
+  reasoning:
+    effort: "none"
+  enable_memory: true
+  memory_format: "active"
+
+  # --- Context-window budgets ---
+  max_actions: null
+  warmup_max_actions: null
+  max_total_tokens: 131072
+  warmup_max_total_tokens: 131072
+  submit_reserve_tokens: 8192
+  force_submit_threshold_tokens: 16384
+
+  # --- Memory settings ---
+  memory_max_entries: 500
+  memory_update_max_total_tokens: 65536
+
+resources:
+  gpus: 1
+  cpus: 16
+  memory_gb: 80
+  disk_gb: 50
+  bid: 150
+
+agents:
+  - model: "deepseek/deepseek-v3.2"
+    provider: "openrouter"

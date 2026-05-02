@@ -432,6 +432,8 @@ class BasicAgent(BaseAgent):
     def _build_cadence_section(self, current_date: date) -> str:
         last_active = self._get_last_active_date(current_date)
         next_active = self._get_next_active_date(current_date)
+        timegap_days = self._get_timegap_days()
+        day_unit = "day" if timegap_days == 1 else "days"
         next_text = (
             f"Next scheduled update: {next_active}."
             if next_active
@@ -472,9 +474,15 @@ class BasicAgent(BaseAgent):
                 f"No questions resolve tomorrow ({tomorrow.isoformat()}), but still scan for ones "
                 "resolving soon (filter `df` by `resolution_date`)."
             )
+        has_memory = getattr(self, "_memory", None) is not None
+        retained_context = (
+            "your memory (along with past predictions) is the only information retained between sessions"
+            if has_memory
+            else "your past predictions are the only information retained between sessions"
+        )
         return (
             "## UPDATE CADENCE\n"
-            f"You have the chance to update your predictions every {self._get_timegap_days()} day(s). Your context is cleared after every session and your memory (along with past predictions) is the only information retained between sessions. {articles_text}"
+            f"You can make updates every {timegap_days} {day_unit}. Your context is cleared after every session and {retained_context}. {articles_text}"
             f"{last_text}Current date: {current_date}. {next_text}\n"
             f"{imminent_reminder}\n\n"
         )
@@ -1733,6 +1741,24 @@ Use the reasoning and insights above to inform today's forecasts.
                 "- `memory_retrieve` / `memory_new` / `memory_update` / `memory_delete`: manage reusable memory entries.\n"
             )
 
+        if isinstance(self._memory, ActiveMemory):
+            interaction_text = (
+                "You can interleave queries, searches, memory operations, and submissions as needed. "
+                "Consider using `mem_df` early to recall prior reasoning and identify which questions need attention."
+            )
+        elif isinstance(self._memory, StructuredMemory):
+            interaction_text = (
+                "You can interleave queries, searches, memory operations, and submissions as needed. "
+                "Use memory tools when you need to retrieve or save reusable reasoning."
+            )
+        elif self._memory is not None:
+            interaction_text = (
+                "You can interleave queries, searches, and submissions as needed. "
+                "Use your memory to inform today's forecasts."
+            )
+        else:
+            interaction_text = "You can interleave queries, searches, and submissions as needed."
+
         intro_sections = [
             self._format_and_cache_feedback(current_date).strip(),
             str(getattr(self._forecast_interface, 'source_context', '') or '').strip(),
@@ -1777,9 +1803,14 @@ Use the reasoning and insights above to inform today's forecasts.
         code_env_section = "\n".join(code_env_lines)
 
         tip_line = ""
-        if isinstance(self._memory, (StructuredMemory, ActiveMemory)):
+        if isinstance(self._memory, ActiveMemory):
             tip_line = (
                 "Tip: After submitting a forecast, consider saving your reasoning and key evidence for that QID using mem_add/mem_update. "
+                "At end of day, you will get another opportunity to update your memory."
+            )
+        elif isinstance(self._memory, StructuredMemory):
+            tip_line = (
+                "Tip: After submitting a forecast, consider saving reusable reasoning and key evidence using memory_new/memory_update. "
                 "At end of day, you will get another opportunity to update your memory."
             )
 
@@ -1799,7 +1830,7 @@ Use the reasoning and insights above to inform today's forecasts.
             (
                 "## INTERACTION FLOW\n"
                 f"{self._build_budget_overview()}"
-                "You can interleave queries, searches, memory operations, and submissions as needed. Consider using `mem_df` early to recall prior reasoning and identify which questions need attention."
+                f"{interaction_text}"
             ),
             (
                 "## SUBMISSION RULES\n"
