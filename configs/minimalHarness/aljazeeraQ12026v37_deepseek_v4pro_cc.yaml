@@ -41,6 +41,7 @@ defaults:
   scaffold: "minimalHarness"
   sandbox: true
   anthropic_base_url: "https://api.deepseek.com/anthropic"
+  handholding_version: "v3"
 
 agents:
   - model: "deepseek-v4-pro"

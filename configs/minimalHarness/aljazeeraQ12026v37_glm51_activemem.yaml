@@ -43,6 +43,7 @@ defaults:
   claude_code_resume: false
   sandbox: true
   anthropic_base_url: "https://api.z.ai/api/anthropic"
+  handholding_version: "v3"
 
 resources:
   gpus: 1

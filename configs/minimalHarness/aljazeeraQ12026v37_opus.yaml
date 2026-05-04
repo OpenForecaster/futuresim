@@ -32,6 +32,7 @@ defaults:
   scaffold: "minimalHarness"
   sandbox: true
   network_isolation: true
+  handholding_version: "v1"
 
 resources:
   gpus: 1

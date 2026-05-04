@@ -1,0 +1,86 @@
+# AllQ active-memory warmup-only run on aljazeeraQ12026v37 split with qwen/qwen3.6-plus.
+# Mirrors configs/memory/aljazeera_2026Q1_qwen36plus.yaml (active memory AllQ on
+# Q1 2026) but targets the v37 split and runs only Day 0 (the AllQ warmup phase).
+#
+# Note on OpenRouter routing: the only provider for qwen/qwen3.6-plus
+# (Alibaba) accepts tool_choice="auto" but rejects "required" / named-function
+# values with HTTP 404. We override warmup_memory_tool_choice to "auto"; the
+# memory-finalize prompt still instructs the model to call the only allowed
+# tool, so behavior is preserved in practice.
+#
+# Date math (matches configs/qwen3.5/allq_warmup_only_*.yaml pattern):
+#   sim_start = start_date - lookback_days = first calendar day of the run.
+#   end_date = sim_start (and < start_date) ⇒ a single env step (warmup only).
+#   Here start_date 2025-12-31 and lookback 7 ⇒ sim day 2025-12-24, matching
+#   Day 0 of the standard v37 runs (start_date 2025-12-31, lookback 7).
+#   resolution_start/end keep the full v37 question set loaded.
+#
+# Usage: python mpi_scripts/run_sim/submit_sim.py --config configs/memory/aljazeera_2026Q1v37_qwen36plus_warmup_only.yaml --runs 1
+
+# --- Simulation Meta ---
+sim_name: "qwen36plus_allq_warmup_only_aljazeeraQ12026v37"
+start_date: "2025-12-31"
+end_date: "2025-12-24"       # Minimal loop: warmup day only (end<start)
+resolution_start: "2025-12-31"
+resolution_end: "2026-03-28"
+lookback_days: 7
+search_cutoff_days: 0
+timegap_days: 1
+split: "aljazeeraQ12026v37"
+
+# --- Data Paths ---
+dataset: "openforesight"
+dataset_path: "${FSIM_DATASET_PATH}"
+resolved_only: false
+min_forecasters: 0
+output_base: "/fast/sgoel/forecasting/current_sim/final_runs_v37"
+warmup_parallelism: 64
+
+# --- Search Settings ---
+search_db: "${FSIM_SEARCH_DB}"
+embedding_model: "${FSIM_EMBEDDING_MODEL}"
+embedding_gpu_mem: 0.7
+articles_base: "/fast/sgoel/forecasting/news/deduped_articles/data"
+
+# --- Answer Matching ---
+matching: "openrouter"
+matcher: "deepseek/deepseek-v3.2"
+matcher_gpu_mem: 0.0
+max_model_len: 8192
+
+# --- Inference Defaults ---
+rate_limit: 32.0
+parallel: true
+
+# --- Agents Configuration ---
+defaults:
+  provider: "openrouter"
+  scaffold: "allQ"
+  temperature: 0.7
+  max_tokens: 8192
+  max_retries: 3
+  enable_memory: true
+  memory_format: "active"
+  # Alibaba's qwen/qwen3.6-plus only accepts tool_choice="auto" — see header.
+  warmup_memory_tool_choice: "auto"
+
+  max_actions: null
+  warmup_max_actions: null
+  max_total_tokens: 163840
+  warmup_max_total_tokens: 40960
+  submit_reserve_tokens: 4096
+  force_submit_threshold_tokens: 8192
+
+  memory_max_entries: 500
+  memory_update_max_total_tokens: 40960
+
+resources:
+  gpus: 1
+  cpus: 16
+  memory_gb: 80
+  disk_gb: 50
+  bid: 90
+
+agents:
+  - model: "qwen/qwen3.6-plus"
+    provider: "openrouter"

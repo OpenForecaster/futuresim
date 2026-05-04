@@ -33,6 +33,7 @@ defaults:
   scaffold: "minimalHarness"
   harness_backend: "opencode"
   opencode_path: "/home/nchandak/.opencode/bin/opencode"
+  handholding_version: "v3"
 
 resources:
   gpus: 1

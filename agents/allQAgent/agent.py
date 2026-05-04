@@ -331,7 +331,7 @@ Requirements:
             if tool.get("function", {}).get("name") == "mem_add"
         ]
         sampling_params = self._warmup_memory_sampling_params()
-        sampling_params["tool_choice"] = "required"
+        sampling_params["tool_choice"] = self.config.warmup_memory_tool_choice
 
         for attempt in range(self.WARMUP_MEMORY_MAX_RETRIES + 1):
             try:
@@ -502,7 +502,7 @@ Requirements:
             if tool.get("function", {}).get("name") == "memory_new"
         ]
         sampling_params = self._warmup_memory_sampling_params()
-        sampling_params["tool_choice"] = "required"
+        sampling_params["tool_choice"] = self.config.warmup_memory_tool_choice
 
         for attempt in range(self.WARMUP_MEMORY_MAX_RETRIES + 1):
             try:

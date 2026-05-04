@@ -259,7 +259,7 @@ def load_agents_config(config_path: str) -> dict:
     return config
 
 
-def create_inference_provider(provider: str, model: str, args, openrouter_provider_order=None):
+def create_inference_provider(provider: str, model: str, args, openrouter_provider_order=None, openrouter_provider=None):
     """Create an inference provider instance."""
     if provider == "vllm":
         from inference.vllm import VLLMInference
@@ -291,8 +291,12 @@ def create_inference_provider(provider: str, model: str, args, openrouter_provid
     elif provider == "openrouter":
         from inference.openrouter import OpenRouterInference
         kwargs = {}
+        provider_cfg = dict(openrouter_provider) if openrouter_provider else {}
         if openrouter_provider_order:
-            kwargs["provider"] = {"order": openrouter_provider_order, "allow_fallbacks": True}
+            provider_cfg.setdefault("allow_fallbacks", True)
+            provider_cfg["order"] = openrouter_provider_order
+        if provider_cfg:
+            kwargs["provider"] = provider_cfg
         return OpenRouterInference(model, **kwargs)
     elif provider == "azure":
         from inference.azure_openai import AzureOpenAIInference
@@ -457,6 +461,17 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
                 reasoning_effort=agent_def.get('reasoning_effort', defaults.get('reasoning_effort', 'high')),
                 codex_resume=bool(agent_def.get('codex_resume', defaults.get('codex_resume', False))),
                 prompt_mode=str(agent_def.get('prompt_mode', defaults.get('prompt_mode', 'default'))),
+                # Active memory hardcodes the maximal-handholding shared sections
+                # (TW nudge + imminent reminder), so the recorded version is
+                # forced to v3 regardless of any YAML setting.
+                handholding_version=(
+                    "v3"
+                    if str(agent_def.get('prompt_mode', defaults.get('prompt_mode', 'default'))) == "active_memory"
+                    else str(agent_def.get(
+                        'handholding_version',
+                        defaults.get('handholding_version', config.get('handholding_version', 'v1')),
+                    ))
+                ),
                 max_outcomes_per_question=int(agent_def.get(
                     'max_outcomes_per_question',
                     defaults.get('max_outcomes_per_question', config.get('max_outcomes_per_question', 5)),
@@ -477,6 +492,7 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
                 sandbox_proc_mode=str(agent_def.get('sandbox_proc_mode', defaults.get('sandbox_proc_mode', 'new'))),
                 network_isolation=bool(agent_def.get('network_isolation', defaults.get('network_isolation', False))),
                 egress_allowlist=list(agent_def.get('egress_allowlist', defaults.get('egress_allowlist', []))),
+                bootstrap_dir=str(agent_def.get('bootstrap_dir', defaults.get('bootstrap_dir', '')) or ''),
             )
             agent = MinimalHarnessAgent(
                 agent_id=agent_id,
@@ -491,7 +507,12 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
 
         # Create inference provider
         openrouter_provider_order = agent_def.get('openrouter_provider_order', defaults.get('openrouter_provider_order', None))
-        inference_provider = create_inference_provider(provider, model, args, openrouter_provider_order=openrouter_provider_order)
+        openrouter_provider = agent_def.get('openrouter_provider', defaults.get('openrouter_provider', None))
+        inference_provider = create_inference_provider(
+            provider, model, args,
+            openrouter_provider_order=openrouter_provider_order,
+            openrouter_provider=openrouter_provider,
+        )
         
         # Build agent config with merged settings
         max_actions = _optional_int(agent_def.get('max_actions', defaults.get('max_actions', args.max_actions)))
@@ -564,6 +585,10 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
         memory_update_max_total_tokens = int(
             agent_def.get('memory_update_max_total_tokens', defaults.get('memory_update_max_total_tokens', 50000))
         )
+        warmup_memory_tool_choice = str(agent_def.get(
+            'warmup_memory_tool_choice',
+            defaults.get('warmup_memory_tool_choice', 'required')
+        ))
         singleans = agent_def.get('singleans', defaults.get('singleans', False))
         tool_result_keep_last = _optional_int(
             agent_def.get(
@@ -624,6 +649,7 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
             memory_format=memory_format,
             memory_max_entries=memory_max_entries,
             memory_update_max_total_tokens=memory_update_max_total_tokens,
+            warmup_memory_tool_choice=warmup_memory_tool_choice,
             append_model_output_logs=bool(getattr(args, "resume", None)),
             singleans=singleans,
             tool_result_keep_last=tool_result_keep_last,

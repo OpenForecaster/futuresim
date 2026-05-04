@@ -24,6 +24,12 @@ class AgentConfig:
     memory_format: str = "structured"  # "structured" (YAML entries), "plain" (legacy text), or "active" (mem_df + meta-insights)
     memory_max_entries: int = 500  # Max number of structured memory entries
     memory_update_max_total_tokens: int = 50000  # Token budget for end-of-day memory mini-loop
+    # tool_choice value for the warmup memory finalize call ("required" forces
+    # the model to call mem_add/memory_new). Some OpenRouter providers (e.g.
+    # Alibaba's qwen/qwen3.6-plus endpoint) reject any non-"auto" value with
+    # HTTP 404; set to "auto" for those — the prompt explicitly instructs the
+    # model to call the only allowed tool, so behavior is unchanged in practice.
+    warmup_memory_tool_choice: str = "required"
     content_filter_circuit_breaker: int = 5  # Break out of loop after N consecutive content_filter responses
     append_model_output_logs: bool = False
     sampling_params: Optional[Dict[str, Any]] = None

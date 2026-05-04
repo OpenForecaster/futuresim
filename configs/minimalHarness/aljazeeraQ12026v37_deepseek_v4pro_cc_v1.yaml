@@ -1,9 +1,12 @@
-# Claude Code → z.ai (GLM-5.1) on aljazeeraQ12026v37 split (331 questions, Jan-Mar 2026)
-# Resolution dates in v37 range 2026-01-01 -> 2026-03-28, so end/resolution_end = 2026-03-28.
+# Claude Code -> DeepSeek (deepseek-v4-pro) on aljazeeraQ12026v37, handholding v1.
+# Mirrors aljazeeraQ12026v37_deepseek_v4pro_cc.yaml but pins handholding_version: "v1"
+# so we can A/B against the v3 default for the deepseek/glm/qwen families.
 #
-# Usage: python scripts/test_basic_agent.py --config configs/minimalHarness/aljazeeraQ12026v37_glm51.yaml
+# Usage:
+#   CUDA_VISIBLE_DEVICES=<idx> python scripts/test_basic_agent.py \
+#     --config configs/minimalHarness/aljazeeraQ12026v37_deepseek_v4pro_cc_v1.yaml
 
-sim_name: "claude_code_aljazeeraQ12026v37_glm51"
+sim_name: "claude_code_aljazeeraQ12026v37_deepseek_v4_pro_v1"
 
 start_date: "2025-12-31"
 end_date: "2026-03-28"
@@ -31,17 +34,11 @@ defaults:
   provider: "none"
   scaffold: "minimalHarness"
   sandbox: true
-  anthropic_base_url: "https://api.z.ai/api/anthropic"
-  handholding_version: "v3"
-
-resources:
-  gpus: 1
-  cpus: 16
-  memory_gb: 80
-  disk_gb: 50
-  bid: 35
+  sandbox_proc_mode: "host_ro"  # Condor execute nodes reject bwrap --proc
+  anthropic_base_url: "https://api.deepseek.com/anthropic"
+  handholding_version: "v1"
 
 agents:
-  - model: "glm-5.1"
+  - model: "deepseek-v4-pro"
     timeout_seconds: 86400
     claude_code_path: "/home/nchandak/.local/bin/claude"

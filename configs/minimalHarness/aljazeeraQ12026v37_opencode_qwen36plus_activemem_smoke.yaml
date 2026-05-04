@@ -1,25 +1,25 @@
-# opencode + qwen/qwen3.6-plus (via OpenRouter) on aljazeeraQ12026 split
-# (434 questions, v11, Jan-Mar 2026). Mirrors aljazeeraQ12026_deepseek_v32.yaml.
-# Reasoning effort: high (default in agent.py via --variant high).
+# 2-day smoke: opencode + OpenRouter qwen/qwen3.6-plus with active_memory mode
+# (fresh opencode `run` per day; mem.csv + meta.yaml as state bridge).
 #
-# Usage: python mpi_scripts/run_sim/submit_sim.py --config configs/minimalHarness/aljazeeraQ12026_qwen36plus.yaml --runs 1
+# Usage:
+#   python scripts/test_basic_agent.py --config configs/minimalHarness/aljazeeraQ12026v37_opencode_qwen36plus_activemem_smoke.yaml
 
-sim_name: "opencode_aljazeeraQ12026_qwen36plus"
+sim_name: "opencode_aljazeeraQ12026v37_qwen36plus_activemem_smoke"
 
 start_date: "2025-12-31"
-end_date: "2026-03-30"
+end_date: "2026-01-01"
 resolution_start: "2025-12-31"
-resolution_end: "2026-03-30"
+resolution_end: "2026-03-28"
 lookback_days: 7
 search_cutoff_days: 0
 timegap_days: 1
 
 dataset: "openforesight"
 dataset_path: "${FSIM_DATASET_PATH}"
-split: "aljazeeraQ12026"
+split: "aljazeeraQ12026v37"
 resolved_only: false
 min_forecasters: 0
-output_base: "${FSIM_OUTPUT_BASE}/final_runs"
+output_base: "/fast/sgoel/forecasting/current_sim/opencode_smoke/"
 
 search_db: "${FSIM_SEARCH_DB}"
 embedding_model: "${FSIM_EMBEDDING_MODEL}"
@@ -33,6 +33,7 @@ defaults:
   scaffold: "minimalHarness"
   harness_backend: "opencode"
   opencode_path: "/home/nchandak/.opencode/bin/opencode"
+  prompt_mode: "active_memory"
   handholding_version: "v3"
 
 resources:
@@ -44,4 +45,4 @@ resources:
 
 agents:
   - model: "qwen/qwen3.6-plus"
-    timeout_seconds: 7200
+    timeout_seconds: 3600

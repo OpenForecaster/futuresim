@@ -22,6 +22,8 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import pandas as pd
+
 from agents.base import BaseAgent
 from agents.minimalHarnessAgent.prompt import build_system_prompt
 from environment.interfaces import PredictionSubmission
@@ -89,6 +91,17 @@ class MinimalHarnessConfig:
     #   memory/{today}/{mem.csv,meta.yaml} before next_day. Requires
     #   harness_backend="codex" and codex_resume=False.
     prompt_mode: str = "default"
+    # Handholding "stay-on-it" guidance level (orthogonal to prompt_mode):
+    # - "v1": minimal (state before commit dadfc2f)
+    # - "v2": adds "never done while active" nudge (state after dadfc2f)
+    # - "v3": v2 + "questions resolving tomorrow" reminders (state after 16b1b7a)
+    # Only consumed by the default prompt_mode build (prompt.build_system_prompt)
+    # and by the MCP server's next_day response. The active_memory daily prompt
+    # is intentionally decoupled from this flag.
+    # When None (the default), resolved per-model in __init__: deepseek/qwen/glm
+    # families default to "v3" (they need the extra nudges to keep submitting),
+    # everything else defaults to "v1".
+    handholding_version: Optional[str] = None
     # Max outcomes per question — only used by prompt_mode="active_memory" today,
     # but kept on the base config so it can be plumbed cleanly from YAML.
     max_outcomes_per_question: int = 5
@@ -122,6 +135,14 @@ class MinimalHarnessConfig:
     # Allowlisted upstream targets ("host[:port]", glob ok in host). When empty,
     # falls back to DEFAULT_EGRESS_ALLOWLIST.
     egress_allowlist: List[str] = field(default_factory=list)
+    # Path to a fixedWarmup directory containing {mem.csv, meta.yaml,
+    # prediction.json}. When set, on the first act() the agent copies the
+    # memory files into workspace/memory/<prev_date>/, the prediction file into
+    # predictions/<prev_date>.json, and pushes the predictions into the env's
+    # histories with day=<prev_date> so the workspace market.csv shows
+    # my_prediction filled. <prev_date> = first sim day - 1. Used by the
+    # active_memory mode to seed Day 1 from a prior agent's warmup output.
+    bootstrap_dir: str = ""
 
 
 # Default allowlist covers the LLM provider endpoints used (or likely to be
@@ -132,6 +153,10 @@ class MinimalHarnessConfig:
 DEFAULT_EGRESS_ALLOWLIST = [
     # Anthropic / Claude Code (api, console, statsig telemetry, ...).
     "*.anthropic.com:443",
+    # Claude Code OAuth: platform.claude.com is the token-refresh endpoint;
+    # without it long-lived persistent sessions fail with 401 once the access
+    # token expires (~7-8h after spawn).
+    "*.claude.com:443",
     # OpenAI / Codex (api, auth, platform; chatgpt.com is used by codex
     # login-token refresh).
     "*.openai.com:443",
@@ -237,6 +262,7 @@ class MinimalHarnessAgent(BaseAgent):
         self._resume_attempts: Dict[date, int] = {}
         self._codex_thread_id: Optional[str] = None  # codex thread_id, captured from Day 0 stdout
         self._claude_code_session_id: Optional[str] = None  # claude session_id, captured from Day 0 stdout
+        self._bootstrap_applied: bool = False
 
         # Egress proxy state (network_isolation=True). Started lazily on first act().
         self._egress_proc: Optional[subprocess.Popen] = None
@@ -270,9 +296,9 @@ class MinimalHarnessAgent(BaseAgent):
 
         # active_memory mode wiring.
         if self.config.prompt_mode == "active_memory":
-            if self.config.harness_backend not in ("codex", "claude_code"):
+            if self.config.harness_backend not in ("codex", "claude_code", "opencode"):
                 raise ValueError(
-                    "prompt_mode='active_memory' requires harness_backend in {'codex', 'claude_code'} "
+                    "prompt_mode='active_memory' requires harness_backend in {'codex', 'claude_code', 'opencode'} "
                     f"(got {self.config.harness_backend!r})."
                 )
             if self.config.harness_backend == "codex" and self.config.codex_resume:
@@ -290,13 +316,39 @@ class MinimalHarnessAgent(BaseAgent):
             # Stateful feedback aggregator (shared across days, dedups on qid).
             from agents.basicAgent.feedback import FeedbackHandler
             self._feedback_handler: Optional[FeedbackHandler] = FeedbackHandler(self.agent_id)
-        elif self.config.prompt_mode != "default":
+        elif self.config.prompt_mode not in ("default", "no_memory"):
             raise ValueError(
                 f"Unknown prompt_mode={self.config.prompt_mode!r}; "
-                "expected 'default' or 'active_memory'."
+                "expected 'default', 'no_memory', or 'active_memory'."
             )
         else:
             self._feedback_handler = None
+
+        if self.config.handholding_version is None:
+            # Per-model default. deepseek/qwen/glm need the v3 nudges (TW-update
+            # reminder + imminent-resolution callout) to keep submitting; without
+            # them they drift into "no new evidence, skip" silence (e.g. glm-5.1
+            # only submitted on 33/95 days under v1). Other models keep v1.
+            model_lc = (self.config.model or "").lower()
+            if any(fam in model_lc for fam in ("deepseek", "qwen", "glm")):
+                self.config.handholding_version = "v3"
+            else:
+                self.config.handholding_version = "v1"
+        if self.config.handholding_version not in ("v1", "v2", "v3"):
+            raise ValueError(
+                f"Unknown handholding_version={self.config.handholding_version!r}; "
+                "expected one of 'v1', 'v2', 'v3'."
+            )
+        # Active memory's prompt builder hardcodes the maximal-handholding
+        # shared sections (TW nudge + imminent reminder). Force the field to
+        # v3 so the runtime stays consistent everywhere it's read (mcp server,
+        # logs, build_system_prompt fallbacks, future audits).
+        if self.config.prompt_mode == "active_memory" and self.config.handholding_version != "v3":
+            print(
+                f"[minimalHarness] prompt_mode='active_memory' coerces "
+                f"handholding_version {self.config.handholding_version!r} -> 'v3'."
+            )
+            self.config.handholding_version = "v3"
 
     # ── BaseAgent contract ─────────────────────────────────────────────
 
@@ -319,6 +371,20 @@ class MinimalHarnessAgent(BaseAgent):
         for d in ("memory", "articles"):
             (self.workspace / d).mkdir(parents=True, exist_ok=True)
 
+        # Expose past predictions/ as a symlink inside the workspace so the
+        # harness can always recall what it submitted on previous days
+        # (the in-CSV `my_prediction` column only carries the latest
+        # forecast per qid). _internal_dir is bind-mounted into the sandbox
+        # at the same absolute path, so the symlink resolves there too.
+        pred_link = self.workspace / "predictions"
+        if not pred_link.exists():
+            pred_link.symlink_to(self._internal_dir / "predictions")
+
+        # 0. Bootstrap from fixedWarmup (once, before first day's state.json).
+        if self.config.bootstrap_dir and not self._bootstrap_applied:
+            self._apply_bootstrap(forecast_interface, current_date)
+            self._bootstrap_applied = True
+
         # 1. Write state.json for MCP server to read.
         self._write_state(forecast_interface, current_date)
 
@@ -339,25 +405,19 @@ class MinimalHarnessAgent(BaseAgent):
         if self.config.sandbox:
             self._start_mcp_relay()
 
-        # 3c. If sandbox is on, ensure the host-side MCP relay is running so
-        # the harness can reach search_news/etc. without needing search_db
-        # bound into the sandbox. Idempotent.
-        if self.config.sandbox:
-            self._start_mcp_relay()
-
         # codex has no persistent session: each `codex exec` runs once and
         # exits. So we re-spawn codex (and its child MCP server) every day.
         # claude_code and opencode normally use a single long-lived process
         # whose MCP server polls for a per-day continue signal — but in
-        # active_memory mode claude_code also re-spawns per day so each
-        # session reads/writes structured memory files instead of carrying
-        # state in conversation context.
+        # active_memory mode they also re-spawn per day so each session
+        # reads/writes structured memory files instead of carrying state in
+        # conversation context.
         codex_per_day = self.config.harness_backend == "codex"
-        claude_code_per_day = (
-            self.config.harness_backend == "claude_code"
+        active_memory_persistent_per_day = (
+            self.config.harness_backend in ("claude_code", "opencode")
             and self.config.prompt_mode == "active_memory"
         )
-        respawn_per_day = codex_per_day or claude_code_per_day
+        respawn_per_day = codex_per_day or active_memory_persistent_per_day
 
         if not self._started or respawn_per_day:
             if respawn_per_day and self._started:
@@ -428,6 +488,75 @@ class MinimalHarnessAgent(BaseAgent):
         forecast_interface.next_day()
         return actions
 
+    # ── bootstrap ──────────────────────────────────────────────────────
+
+    def _apply_bootstrap(self, forecast_interface: Any, current_date: date) -> None:
+        """Seed Day-1 state from a fixedWarmup directory.
+
+        Copies bootstrap_dir/{mem.csv, meta.yaml} into workspace/memory/<prev>/
+        and bootstrap_dir/prediction.json into predictions/<prev>.json, then
+        injects each prediction into env.histories with day=<prev> so the
+        workspace market.csv shows my_prediction filled on Day 1.
+        """
+        from environment.scoring.base import DailyPrediction
+
+        bdir = Path(self.config.bootstrap_dir)
+        if not bdir.is_dir():
+            raise FileNotFoundError(f"bootstrap_dir not found: {bdir}")
+
+        prev_date = current_date - timedelta(days=1)
+        prev_iso = prev_date.isoformat()
+
+        mem_dst = self.workspace / "memory" / prev_iso
+        mem_dst.mkdir(parents=True, exist_ok=True)
+        for fname in ("mem.csv", "meta.yaml"):
+            src = bdir / fname
+            if src.exists():
+                shutil.copy2(src, mem_dst / fname)
+
+        pred_dst = self._internal_dir / "predictions"
+        pred_dst.mkdir(parents=True, exist_ok=True)
+        pred_src = bdir / "prediction.json"
+        if pred_src.exists():
+            shutil.copy2(pred_src, pred_dst / f"{prev_iso}.json")
+
+        injected = skipped = 0
+        if pred_src.exists():
+            preds = json.loads(pred_src.read_text())
+            histories = forecast_interface.histories
+            lock = forecast_interface._histories_lock
+            with lock:
+                for p in preds:
+                    qid = str(p.get("question_id"))
+                    outcomes = p.get("outcomes")
+                    if not qid or not outcomes:
+                        skipped += 1
+                        continue
+                    history = histories.get(qid)
+                    if history is None:
+                        skipped += 1
+                        continue
+                    history.add_prediction(DailyPrediction(
+                        agent_id=self.agent_id,
+                        question_id=qid,
+                        day=prev_date,
+                        outcomes=dict(outcomes),
+                    ))
+                    injected += 1
+            for p in preds:
+                qid = str(p.get("question_id"))
+                outcomes = p.get("outcomes")
+                if qid and outcomes and histories.get(qid) is not None:
+                    forecast_interface.logger.log_prediction(
+                        prev_date, self.agent_id, qid, dict(outcomes)
+                    )
+
+        print(
+            f"[{self.agent_id}] Bootstrap from {bdir}: "
+            f"copied memory/{prev_iso}, predictions/{prev_iso}.json; "
+            f"injected {injected} predictions ({skipped} skipped)."
+        )
+
     # ── state / config writers ─────────────────────────────────────────
 
     @staticmethod
@@ -489,29 +618,39 @@ class MinimalHarnessAgent(BaseAgent):
             json.dump(state, f, indent=2, default=str)
 
     def _protect_market_csv(self, forecast_interface: Any) -> None:
+        """Materialize a per-agent market.csv in the workspace.
+
+        The env's shared market.csv (MarketWriter) has no per-agent columns,
+        but our prompt advertises `my_prediction` / `my_prediction_date`. We
+        read the shared csv, stamp those columns from this agent's history
+        (mirroring what DfInterface does in-memory for other scaffolds), and
+        write a per-agent copy into the workspace. The shared file is also
+        chmod'd read-only as a sanity lock against accidental writes.
+        """
         csv_path = forecast_interface.get_market_csv_path()
-        if csv_path and os.path.exists(csv_path):
-            self._market_csv_path = csv_path
-            os.chmod(csv_path, 0o444)
-            # Expose market.csv inside workspace. With sandbox=False a symlink
-            # is fine. With sandbox=True the run_dir parent is not bound into
-            # the sandbox, so a symlink would resolve to a nonexistent path;
-            # hardlink instead (pd.to_csv truncates in place, so the link
-            # stays in sync across daily rewrites).
-            link = self.workspace / "market.csv"
-            if not link.exists() and not link.is_symlink():
-                if self.config.sandbox:
-                    try:
-                        os.link(csv_path, link)
-                    except OSError as e:
-                        if e.errno == 18:  # EXDEV
-                            raise RuntimeError(
-                                f"sandbox=True requires workspace and market.csv on the same filesystem "
-                                f"(hardlink failed: {csv_path} -> {link})."
-                            ) from e
-                        raise
-                else:
-                    link.symlink_to(csv_path)
+        if not (csv_path and os.path.exists(csv_path)):
+            return
+        self._market_csv_path = csv_path
+        os.chmod(csv_path, 0o444)
+
+        df = pd.read_csv(csv_path, dtype={"qid": str})
+        get_preds = getattr(forecast_interface, "get_agent_predictions", None)
+        agent_preds = get_preds(self.agent_id) if callable(get_preds) else {}
+        agent_preds = agent_preds or {}
+
+        df["my_prediction"] = df["qid"].apply(
+            lambda qid: json.dumps(agent_preds[qid]["outcomes"])
+            if qid in agent_preds and agent_preds[qid].get("outcomes") else None
+        )
+        df["my_prediction_date"] = df["qid"].apply(
+            lambda qid: str(agent_preds[qid]["date"])
+            if qid in agent_preds and agent_preds[qid].get("date") else None
+        )
+
+        workspace_csv = self.workspace / "market.csv"
+        if workspace_csv.is_symlink() or workspace_csv.exists():
+            workspace_csv.unlink()
+        df.to_csv(workspace_csv, index=False)
 
     def _unprotect_market_csv(self) -> None:
         """Restore write permission so the env can overwrite on the next day."""
@@ -560,11 +699,17 @@ class MinimalHarnessAgent(BaseAgent):
             num_questions = num_active + num_resolved
             last_active_date = getattr(forecast_interface, "last_active_date", None)
             next_active_date = getattr(forecast_interface, "next_active_date", None)
-            prompt_date = self.config.start_date or self._current_date
+            prompt_date = self._current_date or self.config.start_date
             new_articles_count = self._count_new_articles(last_active_date, prompt_date)
-        prompt = build_system_prompt(
+        if self.config.prompt_mode == "no_memory":
+            from agents.minimalHarnessAgent.prompt_no_memory import (
+                build_system_prompt as _build_system_prompt,
+            )
+        else:
+            _build_system_prompt = build_system_prompt
+        prompt = _build_system_prompt(
             workspace=str(self.workspace),
-            current_date=self.config.start_date or self._current_date,
+            current_date=self._current_date or self.config.start_date,
             start_date=self.config.start_date or self._current_date,
             end_date=self.config.end_date or self._current_date,
             source_context=source_context,
@@ -572,10 +717,13 @@ class MinimalHarnessAgent(BaseAgent):
             num_questions=num_questions,
             num_active=num_active,
             num_resolved=num_resolved,
+            max_outcomes_per_question=self.config.max_outcomes_per_question,
             search_cutoff_days=self.config.search_cutoff_days,
+            timegap_days=self.config.timegap_days,
             new_articles_count=new_articles_count,
             last_active_date=last_active_date,
             next_active_date=next_active_date,
+            handholding_version=self.config.handholding_version,
         )
         prompt_path = self._internal_dir / "system_prompt.md"
         with open(prompt_path, "w") as f:
@@ -824,7 +972,10 @@ class MinimalHarnessAgent(BaseAgent):
             "--dangerously-skip-permissions",
             "--mcp-config", str(self._internal_dir / "mcp_config.json"),
             "--strict-mcp-config",
-            "--disallowedTools", "WebSearch,WebFetch",
+            "--disallowedTools",
+            "WebSearch,WebFetch,Write,Edit,MultiEdit,NotebookEdit"
+            if self.config.prompt_mode == "no_memory"
+            else "WebSearch,WebFetch",
         ])
         # active_memory mode delivers the full daily instructions via -p, so
         # skip the standalone system prompt file (which isn't written in this
@@ -893,7 +1044,13 @@ class MinimalHarnessAgent(BaseAgent):
         """
         mcp_cmd, mcp_args = self._build_mcp_invocation()
 
-        system_prompt = (self._internal_dir / "system_prompt.md").read_text()
+        # active_memory mode delivers the full daily instructions as the user
+        # prompt each day (mirroring claude_code/codex). opencode requires a
+        # non-empty agent.prompt, so use a minimal one-liner.
+        if self.config.prompt_mode == "active_memory":
+            system_prompt = "You are a forecasting agent. Follow the per-day instructions in the user message."
+        else:
+            system_prompt = (self._internal_dir / "system_prompt.md").read_text()
 
         config = {
             "$schema": "https://opencode.ai/config.json",
@@ -1077,6 +1234,7 @@ class MinimalHarnessAgent(BaseAgent):
             "--repo-root", repo_root,
             "--search-db", self.config.search_db or "",
             "--embedding-model", self.config.embedding_model or "",
+            "--handholding-version", self.config.handholding_version,
         ]
         if embed_server_url:
             mcp_args.extend(["--embedding-server-url", embed_server_url])
@@ -1122,6 +1280,7 @@ class MinimalHarnessAgent(BaseAgent):
             "--repo-root", repo_root,
             "--search-db", self.config.search_db or "",
             "--embedding-model", self.config.embedding_model or "",
+            "--handholding-version", self.config.handholding_version,
         ]
         if embed_server_url:
             mcp_args.extend(["--embedding-server-url", embed_server_url])
@@ -1416,10 +1575,16 @@ class MinimalHarnessAgent(BaseAgent):
         return cmd
 
     def _start_opencode(self) -> None:
-        initial_prompt = (
-            "Begin forecasting. Read market.csv to see your questions, "
-            "then research and submit predictions."
-        )
+        if (
+            self.config.prompt_mode == "active_memory"
+            and self._codex_initial_prompt_override
+        ):
+            initial_prompt = self._codex_initial_prompt_override
+        else:
+            initial_prompt = (
+                "Begin forecasting. Read market.csv to see your questions, "
+                "then research and submit predictions."
+            )
         model_id = f"openrouter/{self.config.model}"
         cmd = [
             self.config.opencode_path,
@@ -1451,8 +1616,10 @@ class MinimalHarnessAgent(BaseAgent):
         if self.config.network_isolation:
             env.update(self._egress_env_overrides())
 
-        log_stdout = open(self._internal_dir / "opencode_stdout.jsonl", "w")
-        log_stderr = open(self._internal_dir / "opencode_stderr.log", "w")
+        # Append mode so per-day respawn (active_memory) doesn't truncate
+        # prior days' logs; harmless in default single-process mode.
+        log_stdout = open(self._internal_dir / "opencode_stdout.jsonl", "a")
+        log_stderr = open(self._internal_dir / "opencode_stderr.log", "a")
 
         launch_cmd = self._maybe_sandbox(cmd)
         # When sandboxed, bwrap sets cwd via --chdir; passing cwd= to Popen

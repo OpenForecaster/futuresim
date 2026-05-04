@@ -6,8 +6,8 @@
 #     --runs 1 --gpus 1 --memory 80 --time 2-00:00:00
 
 # --- Restart ---
-restart_from: "/mnt/nfs/home/ac146091/forecast-sim/logs/current_sim/final_runs_v37/ds_v32_shared_warmup_aljazeera2026Q1_1agent_r00/26-05-01-23-55-56"
-restart_from_day: "2025-12-25"
+# restart_from: "/mnt/nfs/home/ac146091/forecast-sim/logs/current_sim/final_runs_v37/ds_v32_shared_warmup_aljazeera2026Q1_1agent_r00/26-05-01-23-55-56"
+# restart_from_day: "2025-12-25"
 
 # --- Simulation Meta ---
 sim_name: "ds_v32_active_mem_aljazeera2026Q1_1agent"

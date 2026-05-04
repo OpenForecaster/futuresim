@@ -144,7 +144,14 @@ def build_daily_prompt(
      16. Begin
     """
     source_rules = _get_source_rules(source_name)
-    scoring_section = _get_scoring_section(source_name, max_outcomes_per_question)
+    # Active memory has its own handholding (`_allq_reminder`), and per design
+    # is decoupled from the build_system_prompt `handholding_version` flag —
+    # always render the maximal-handholding sections so its existing prompt
+    # (including the "questions resolve tomorrow" reminder and TW-update nudge)
+    # is preserved regardless of the user's handholding_version setting.
+    scoring_section = _get_scoring_section(
+        source_name, max_outcomes_per_question, handholding_version="v3"
+    )
     cadence_section = _build_cadence_section(
         current_date,
         start_date,
@@ -154,6 +161,7 @@ def build_daily_prompt(
         last_active_date=last_active_date,
         next_active_date=next_active_date,
         imminent_qids=imminent_qids,
+        handholding_version="v3",
     )
     memory_section = _memory_section(
         last_active_date=last_active_date,
@@ -218,6 +226,14 @@ def build_daily_prompt(
         "You have access to native tools Bash/Read/Write/Edit/Grep etc. — use them to read market.csv, browse articles/, and read/write memory/."
     )
 
+    workspace_section = (
+        "## Workspace:\n"
+        "- market.csv — Read-only snapshot of all questions (refreshed each day).\n"
+        "- articles/ — Browsable news articles organized by date as articles/YYYY/MM/DD/articles.jsonl (one JSON article per line). New date directories appear after calling `mcp__forecast__next_day`.\n"
+        "- predictions/ — Read-only record of your past submissions, one file per day as `predictions/YYYY-MM-DD.json`. Each file is a JSON list of `{\"question_id\": ..., \"outcomes\": {<outcome>: <prob>, ...}}` entries — the predictions you submitted that day. A new file appears after each `mcp__forecast__next_day`.\n"
+        "- memory/ — Your structured per-day notes directory (`memory/YYYY-MM-DD/{mem.csv, meta.yaml}`). Read prior days' files at the start of each session and write today's files before calling `mcp__forecast__next_day`."
+    )
+
     interaction_flow = (
         "## INTERACTION FLOW\n"
         "You can interleave reads, searches, memory edits, and submissions as needed. "
@@ -251,6 +267,7 @@ def build_daily_prompt(
         intro_block,
         available_data_section,
         tools_section,
+        workspace_section,
         interaction_flow,
         submission_rules,
         tip_line,

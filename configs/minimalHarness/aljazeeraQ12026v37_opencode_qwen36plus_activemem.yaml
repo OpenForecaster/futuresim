@@ -1,10 +1,16 @@
-# opencode + deepseek-v4-pro (via OpenRouter) on aljazeeraQ12026v37 split
-# (331 questions, Jan-Mar 2026). Mirrors aljazeeraQ12026_deepseek_v4_flash.yaml
-# (the canonical opencode template) but swaps split, model, and output dir.
+# Opencode -> OpenRouter (qwen/qwen3.6-plus) on aljazeeraQ12026v37 split with the
+# active_memory prompt mode: fresh opencode `run` each day; mem.csv + meta.yaml
+# are the only state bridge across days.
 #
-# Usage: python mpi_scripts/run_sim/submit_sim.py --config configs/minimalHarness/aljazeeraQ12026v37_opencode_v4pro.yaml --runs 2
+# Mirrors aljazeeraQ12026v37_deepseek_v4pro_activemem.yaml but swaps the harness
+# backend to opencode (which routes qwen via OpenRouter natively, since qwen is
+# not Anthropic-compatible).
+#
+# Usage:
+#   CUDA_VISIBLE_DEVICES=<idx> python scripts/test_basic_agent.py \
+#     --config configs/minimalHarness/aljazeeraQ12026v37_opencode_qwen36plus_activemem.yaml
 
-sim_name: "opencode_aljazeeraQ12026v37_deepseek_v4_pro"
+sim_name: "opencode_aljazeeraQ12026v37_qwen36plus_activemem"
 
 start_date: "2025-12-31"
 end_date: "2026-03-28"
@@ -33,6 +39,9 @@ defaults:
   scaffold: "minimalHarness"
   harness_backend: "opencode"
   opencode_path: "/home/nchandak/.opencode/bin/opencode"
+  # active_memory => fresh opencode run per day; mem.csv + meta.yaml are
+  # the only bridge across days.
+  prompt_mode: "active_memory"
   handholding_version: "v3"
 
 resources:
@@ -43,5 +52,5 @@ resources:
   bid: 35
 
 agents:
-  - model: "deepseek/deepseek-v4-pro"
-    timeout_seconds: 7200
+  - model: "qwen/qwen3.6-plus"
+    timeout_seconds: 86400

@@ -1,7 +1,7 @@
 """
 MCP server for Claude Code forecasting agent.
 
-Provides 4 tools: search_news, read_article, submit_forecasts, next_day.
+Provides 3 tools: search_news, submit_forecasts, next_day.
 Communicates with the driver (MinimalHarnessAgent) via file-based signals.
 
 IMPORTANT: All heavy imports (lancedb, pandas, torch, etc.) are deferred to
@@ -54,6 +54,13 @@ _today_predictions: list = []
 _search_cutoff_days: int = 0
 _search_initialized: bool = False
 _cli_args = None              # Parsed CLI args, used by _ensure_search()
+# Handholding version controls how much "stay-on-it" guidance next_day appends.
+# - "v1": minimal (no extra reminders)
+# - "v2": adds "questions still active, revise stale forecasts" message
+# - "v3": v2 + "questions resolving tomorrow" reminder
+# Default "v1" matches state before commit dadfc2f.
+_handholding_version: str = "v1"
+_HANDHOLDING_VERSIONS = ("v1", "v2", "v3")
 
 # Cumulative scoring tracker (mirrors BasicAgent's FeedbackHandler).
 _cumulative = {
@@ -290,31 +297,39 @@ def next_day() -> str:
             new_date = _state.get("current_date", "unknown")
             new_date_obj = _parse_date(new_date)
 
-            active_count = len(_state.get("questions", []))
-            tomorrow_iso = (new_date_obj + timedelta(days=1)).isoformat() if new_date_obj else None
-            imminent_qids = [
-                q.get("qid") for q in _state.get("questions", [])
-                if tomorrow_iso and q.get("resolution_date") == tomorrow_iso
-            ]
-            imminent_msg = (
-                f"**IMPORTANT**: {len(imminent_qids)} question(s) resolve tomorrow ({tomorrow_iso}): "
-                f"{imminent_qids}. Make sure your prediction on each is up-to-date before calling next_day — "
-                "stale forecasts might hurt your performance."
-                if imminent_qids else
-                f"No questions resolve tomorrow ({tomorrow_iso}), but still scan for ones "
-                "resolving soon (check the resolution_date column in market.csv)."
-            )
             response_parts = [
                 f"Day advanced to {new_date}.",
                 _build_new_articles_message(_parse_date(cur_date), new_date_obj),
-                (
+            ]
+
+            # Handholding: v2/v3 append a "still-active" reminder; v3 also
+            # appends an "imminent (resolves-tomorrow)" reminder.
+            if _handholding_version in ("v2", "v3"):
+                active_count = len(_state.get("questions", []))
+                response_parts.append(
                     f"{active_count} question(s) are still active. Re-read market.csv, "
                     "scan today's news, and resubmit any forecast where new evidence "
                     "has shifted your view before calling next_day again. A forecast "
                     "is never \"done\" while its question is still active."
-                ),
-                imminent_msg,
-            ]
+                )
+            if _handholding_version == "v3":
+                tomorrow_iso = (
+                    (new_date_obj + timedelta(days=1)).isoformat()
+                    if new_date_obj else None
+                )
+                imminent_qids = [
+                    q.get("qid") for q in _state.get("questions", [])
+                    if tomorrow_iso and q.get("resolution_date") == tomorrow_iso
+                ]
+                imminent_msg = (
+                    f"**IMPORTANT**: {len(imminent_qids)} question(s) resolve tomorrow ({tomorrow_iso}): "
+                    f"{imminent_qids}. Make sure your prediction on each is up-to-date before calling next_day — "
+                    "stale forecasts might hurt your performance."
+                    if imminent_qids else
+                    f"No questions resolve tomorrow ({tomorrow_iso}), but still scan for ones "
+                    "resolving soon (check the resolution_date column in market.csv)."
+                )
+                response_parts.append(imminent_msg)
 
             # --- Per-question resolution feedback with scores ---
             events = _state.get("resolution_events", [])
@@ -411,7 +426,7 @@ def next_day() -> str:
 # ── main ───────────────────────────────────────────────────────────────
 
 def main():
-    global _workspace, _internal_dir, _search_cutoff_days, _cli_args
+    global _workspace, _internal_dir, _search_cutoff_days, _cli_args, _handholding_version
 
     parser = argparse.ArgumentParser(description="Forecast-sim MCP server")
     parser.add_argument("--workspace", required=True, help="Path to CC workspace (predictions/)")
@@ -421,8 +436,15 @@ def main():
     parser.add_argument("--embedding-model", default="", help="Path to embedding model")
     parser.add_argument("--embedding-server-url", default="",
                         help="URL of an already-running vLLM embedding server (e.g. http://127.0.0.1:8001)")
+    parser.add_argument(
+        "--handholding-version",
+        choices=_HANDHOLDING_VERSIONS,
+        default="v1",
+        help="How much guidance next_day appends: v1 (minimal), v2 (adds still-active nudge), v3 (v2 + imminent reminder).",
+    )
     args = parser.parse_args()
     _cli_args = args
+    _handholding_version = args.handholding_version
 
     # Only set repo-root on sys.path here (lightweight).
     # All heavy imports (lancedb etc.) are deferred to _ensure_search().

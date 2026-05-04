@@ -1,16 +1,13 @@
 # Claude Code -> DeepSeek (deepseek-v4-pro) on aljazeeraQ12026v37 split with the
-# active_memory prompt mode: fresh Claude session each day; mem.csv + meta.yaml
-# are the only state bridge across days.
-#
-# Cold-start (no bootstrap) — Day 0 has no prior memory; agent builds it as it
-# goes. Mirrors aljazeeraQ12026v37_glm51_activemem.yaml but swaps the model and
-# the Anthropic-compat endpoint (deepseek.com for DeepSeek v4-pro).
+# no_memory prompt mode: the system prompt strips all references to
+# memory/notes/SKILLS.md/MEMORY.md so the agent has no instruction to maintain
+# persistent state. (Workspace bash/read/write tools still work.)
 #
 # Usage:
 #   CUDA_VISIBLE_DEVICES=<idx> python scripts/test_basic_agent.py \
-#     --config configs/minimalHarness/aljazeeraQ12026v37_deepseek_v4pro_activemem.yaml
+#     --config configs/minimalHarness/aljazeeraQ12026v37_deepseek_v4pro_nomemory.yaml
 
-sim_name: "claude_code_aljazeeraQ12026v37_deepseek_v4_pro_activemem"
+sim_name: "claude_code_aljazeeraQ12026v37_deepseek_v4_pro_nomemory"
 
 start_date: "2025-12-31"
 end_date: "2026-03-28"
@@ -37,12 +34,8 @@ matcher: "deepseek/deepseek-v3.2"
 defaults:
   provider: "none"
   scaffold: "minimalHarness"
-  harness_backend: "claude_code"
-  # active_memory => fresh claude session per day; mem.csv + meta.yaml are
-  # the only bridge across days. Mutually exclusive with claude_code_resume.
-  prompt_mode: "active_memory"
-  claude_code_resume: false
   sandbox: true
+  prompt_mode: "no_memory"
   anthropic_base_url: "https://api.deepseek.com/anthropic"
   handholding_version: "v3"
 

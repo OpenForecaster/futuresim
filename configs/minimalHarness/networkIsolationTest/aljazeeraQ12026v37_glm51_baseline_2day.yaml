@@ -34,6 +34,7 @@ defaults:
   sandbox: true
   network_isolation: false
   anthropic_base_url: "https://api.z.ai/api/anthropic"
+  handholding_version: "v3"
 
 resources:
   gpus: 1

@@ -1,25 +1,25 @@
-# opencode + qwen/qwen3.6-plus (via OpenRouter) on aljazeeraQ12026 split
-# (434 questions, v11, Jan-Mar 2026). Mirrors aljazeeraQ12026_deepseek_v32.yaml.
-# Reasoning effort: high (default in agent.py via --variant high).
+# opencode + qwen/qwen3.6-plus on aljazeeraQ12026v37, handholding v1 + sandbox.
+# Mirrors aljazeeraQ12026v37_opencode_qwen36plus.yaml but pins handholding_version: "v1"
+# and adds sandbox: true so we can A/B against the v3 default for the qwen family.
 #
-# Usage: python mpi_scripts/run_sim/submit_sim.py --config configs/minimalHarness/aljazeeraQ12026_qwen36plus.yaml --runs 1
+# Usage: python scripts/test_basic_agent.py --config configs/minimalHarness/aljazeeraQ12026v37_opencode_qwen36plus_v1.yaml
 
-sim_name: "opencode_aljazeeraQ12026_qwen36plus"
+sim_name: "opencode_aljazeeraQ12026v37_qwen36plus_v1"
 
 start_date: "2025-12-31"
-end_date: "2026-03-30"
+end_date: "2026-03-28"
 resolution_start: "2025-12-31"
-resolution_end: "2026-03-30"
+resolution_end: "2026-03-28"
 lookback_days: 7
 search_cutoff_days: 0
 timegap_days: 1
 
 dataset: "openforesight"
 dataset_path: "${FSIM_DATASET_PATH}"
-split: "aljazeeraQ12026"
+split: "aljazeeraQ12026v37"
 resolved_only: false
 min_forecasters: 0
-output_base: "${FSIM_OUTPUT_BASE}/final_runs"
+output_base: "/fast/sgoel/forecasting/current_sim/final_runs_v37/"
 
 search_db: "${FSIM_SEARCH_DB}"
 embedding_model: "${FSIM_EMBEDDING_MODEL}"
@@ -33,7 +33,9 @@ defaults:
   scaffold: "minimalHarness"
   harness_backend: "opencode"
   opencode_path: "/home/nchandak/.opencode/bin/opencode"
-  handholding_version: "v3"
+  sandbox: true
+  sandbox_proc_mode: "host_ro"  # Condor execute nodes reject bwrap --proc
+  handholding_version: "v1"
 
 resources:
   gpus: 1
