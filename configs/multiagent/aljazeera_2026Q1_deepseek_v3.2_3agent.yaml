@@ -12,7 +12,7 @@ resolution_end: "2026-03-28"
 lookback_days: 7
 search_cutoff_days: 0
 timegap_days: 1
-split: "aljazeera2026Q1"
+split: "aljazeeraQ12026v37"
 
 # --- Data Paths ---
 dataset: "openforesight"
@@ -69,7 +69,7 @@ resources:
   cpus: 16
   memory_gb: 80
   disk_gb: 50
-  bid: 150
+  bid: 50
 
 agents:
   - model: "deepseek/deepseek-v3.2"

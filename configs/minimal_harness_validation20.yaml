@@ -38,6 +38,7 @@ matcher: "deepseek/deepseek-v3.2"
 defaults:
   provider: "none"
   scaffold: "minimalHarness"
+  sandbox: true
 
 # HTCondor resources — 1 GPU for embedding model only
 resources:

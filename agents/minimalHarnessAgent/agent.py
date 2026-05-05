@@ -17,7 +17,8 @@ import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import dataclass, field
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field, replace
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -26,6 +27,7 @@ import pandas as pd
 
 from agents.base import BaseAgent
 from agents.minimalHarnessAgent.prompt import build_system_prompt
+from agents.utils.output_logger import AgentOutputLogger
 from environment.interfaces import PredictionSubmission
 
 logger = logging.getLogger(__name__)
@@ -33,6 +35,176 @@ logger = logging.getLogger(__name__)
 
 def _resolve_socat_cmd() -> str:
     return shutil.which("socat") or ("/usr/bin/socat" if os.path.exists("/usr/bin/socat") else "socat")
+
+
+def _resolve_sandbox_socat_cmd() -> str:
+    for candidate in ("/usr/bin/socat", "/bin/socat"):
+        if os.path.exists(candidate):
+            return candidate
+    return "socat"
+
+
+def _read_json_file(path: Path, default: Any = None) -> Any:
+    if not path.exists():
+        return default
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return default
+
+
+def _read_text_file(path: Path) -> str:
+    if not path.exists():
+        return ""
+    try:
+        return path.read_text()
+    except OSError:
+        return ""
+
+
+def _read_jsonl_file(path: Path) -> List[Dict[str, Any]]:
+    events: List[Dict[str, Any]] = []
+    if not path.exists():
+        return events
+    try:
+        with open(path) as f:
+            for line_no, line in enumerate(f, start=1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    events.append(json.loads(line))
+                except json.JSONDecodeError:
+                    events.append({
+                        "type": "parse_error",
+                        "line_no": line_no,
+                        "text": line,
+                    })
+    except OSError:
+        return events
+    return events
+
+
+def _render_codex_response(events: List[Dict[str, Any]], predictions: List[Dict[str, Any]]) -> str:
+    messages: List[str] = []
+    for ev in events:
+        item = ev.get("item") if isinstance(ev, dict) else None
+        if not isinstance(item, dict):
+            continue
+        if ev.get("type") == "item.completed" and item.get("type") == "agent_message":
+            text = item.get("text")
+            if text:
+                messages.append(str(text))
+
+    if predictions:
+        messages.append("Submitted predictions: " + json.dumps(predictions, sort_keys=True))
+    return "\n\n".join(messages)
+
+
+def _rewrite_warmup_index_for_aggregated_logs(agent_dir: Path) -> None:
+    index_path = agent_dir / "warmup_logs" / "index.jsonl"
+    if not index_path.exists():
+        return
+    records = _read_jsonl_file(index_path)
+    with open(index_path, "w") as f:
+        for record in records:
+            record.pop("log_dir", None)
+            record["processed_output_log"] = str(agent_dir / "model_outputs.jsonl")
+            record["raw_output_log"] = str(agent_dir / "model_raw_warmup.jsonl")
+            f.write(json.dumps(record) + "\n")
+
+
+def aggregate_codex_warmup_logs(
+    agent_id: str,
+    agent_dir: Any,
+    *,
+    remove_per_question_logs: bool = True,
+    append: bool = False,
+) -> int:
+    """Aggregate per-question Codex warmup transcripts into standard agent logs."""
+    agent_dir = Path(agent_dir)
+    warmup_logs_dir = agent_dir / "warmup_logs"
+    if not warmup_logs_dir.exists():
+        return 0
+
+    log_dirs = sorted(p for p in warmup_logs_dir.iterdir() if p.is_dir())
+    if not log_dirs:
+        _rewrite_warmup_index_for_aggregated_logs(agent_dir)
+        return 0
+
+    output_logger = AgentOutputLogger(agent_id, str(agent_dir), append=append)
+    written = 0
+    try:
+        for log_dir in log_dirs:
+            state = _read_json_file(log_dir / "state.json", {}) or {}
+            questions = state.get("questions") or []
+            qid = str((questions[0] or {}).get("qid") if questions else log_dir.name)
+            sim_date = state.get("current_date", "")
+            prompt = _read_text_file(log_dir / "prompt.md")
+            predictions = _read_json_file(log_dir / "predictions.json", []) or []
+            events = _read_jsonl_file(log_dir / "codex_stdout.jsonl")
+            stderr_text = _read_text_file(log_dir / "codex_stderr.log")
+            prompt_mode = state.get("prompt_mode", "warmup")
+            raw_stream = "warmup"
+            thread_id = next(
+                (
+                    ev.get("thread_id")
+                    for ev in events
+                    if ev.get("type") == "thread.started" and ev.get("thread_id")
+                ),
+                None,
+            )
+            tool_calls = [
+                ev.get("item", {})
+                for ev in events
+                if isinstance(ev.get("item"), dict)
+                and ev.get("item", {}).get("type") == "mcp_tool_call"
+                and ev.get("type") == "item.completed"
+            ]
+            response = _render_codex_response(events, predictions)
+            metadata = {
+                "backend": "codex",
+                "harness_backend": "codex",
+                "prompt_mode": prompt_mode,
+                "raw_stream": raw_stream,
+                "qid": qid,
+                "current_date": sim_date,
+                "search_current_date": state.get("search_current_date", sim_date),
+                "thread_id": thread_id,
+                "predictions": predictions,
+                "codex_event_count": len(events),
+                "codex_tool_call_count": len(tool_calls),
+                "codex_submit_call_count": sum(
+                    1 for item in tool_calls if item.get("tool") == "submit_forecasts"
+                ),
+                "_logger_raw_input_delta": prompt,
+                "_logger_raw_response": events,
+                "_logger_raw_metadata": {
+                    "backend": "codex",
+                    "harness_backend": "codex",
+                    "prompt_mode": prompt_mode,
+                    "raw_stream": raw_stream,
+                    "qid": qid,
+                    "current_date": sim_date,
+                    "search_current_date": state.get("search_current_date", sim_date),
+                    "thread_id": thread_id,
+                    "predictions": predictions,
+                    "codex_stderr": stderr_text,
+                    "mcp_relay_log": _read_text_file(log_dir / "mcp_relay.log"),
+                    "state": state,
+                },
+            }
+            output_logger.log_model_output(sim_date, prompt, response, metadata)
+            written += 1
+            if remove_per_question_logs:
+                shutil.rmtree(log_dir, ignore_errors=True)
+        output_logger.flush_warmup_raw()
+    finally:
+        output_logger.close()
+
+    _rewrite_warmup_index_for_aggregated_logs(agent_dir)
+    return written
 
 
 @dataclass
@@ -44,6 +216,10 @@ class MinimalHarnessConfig:
     embedding_model: str = ""
     search_type: str = "hybrid"
     search_cutoff_days: int = 0
+    freeze_search_after_start: bool = False
+    # Warmup-only per-question current/search date:
+    # effective_date = question.resolution_date - resolution_guard days.
+    resolution_guard: Optional[int] = None
     articles_base: str = ""
     start_date: Optional[date] = None
     end_date: Optional[date] = None
@@ -81,7 +257,7 @@ class MinimalHarnessConfig:
     # env. Empty => default Anthropic endpoint.
     anthropic_base_url: str = ""
     anthropic_auth_token: str = ""
-    # Daily prompt mode for codex backend.
+    # Prompt/session mode for harness backends.
     # - "default": existing behavior (AGENTS.md + 2-line "Begin forecasting..." per day,
     #   or codex_resume thread continuation).
     # - "active_memory": AllQAgent-style fresh-context-per-day. No AGENTS.md; the
@@ -90,6 +266,11 @@ class MinimalHarnessConfig:
     #   is told to read prior memory/{prev}/{mem.csv,meta.yaml} and write
     #   memory/{today}/{mem.csv,meta.yaml} before next_day. Requires
     #   harness_backend="codex" and codex_resume=False.
+    # - "warmup": AllQAgent-style fresh-context-per-question for the explicit
+    #   pre-simulation warmup hook. No AGENTS.md, no codex_resume, one Codex
+    #   session per question.
+    # - "static_search": same per-question Codex warmup shape, but the driver
+    #   injects one precomputed title-search result and exposes only submit.
     prompt_mode: str = "default"
     # Handholding "stay-on-it" guidance level (orthogonal to prompt_mode):
     # - "v1": minimal (state before commit dadfc2f)
@@ -108,6 +289,13 @@ class MinimalHarnessConfig:
     # Days between successive agent updates — passed into the cadence section
     # (used by active_memory daily prompt).
     timegap_days: int = 1
+    # Number of concurrent fresh Codex sessions during prompt_mode="warmup".
+    # Default stays conservative; configs can opt into more parallelism.
+    warmup_parallelism: int = 1
+    # Static-search ablation cache. Each file contains one title-query result
+    # at the per-question effective search date.
+    static_search_dir: str = ""
+    static_search_max_results: int = 5
     # When true, wrap the harness subprocess in bwrap so the filesystem is
     # restricted to just {workspace, _internal_dir, repo_root+venv, search_db,
     # harness runtime} plus /usr,/etc,/lib*. articles_base, dataset path,
@@ -281,6 +469,7 @@ class MinimalHarnessAgent(BaseAgent):
         self._mcp_relay_proc: Optional[subprocess.Popen] = None
         self._mcp_relay_dir: Optional[Path] = None
         self._mcp_relay_sock: Optional[Path] = None
+        self._mcp_bridge_wrapper: Optional[Path] = None
 
         if self.config.network_isolation and not self.config.sandbox:
             raise ValueError("network_isolation=True requires sandbox=True.")
@@ -316,13 +505,26 @@ class MinimalHarnessAgent(BaseAgent):
             # Stateful feedback aggregator (shared across days, dedups on qid).
             from agents.basicAgent.feedback import FeedbackHandler
             self._feedback_handler: Optional[FeedbackHandler] = FeedbackHandler(self.agent_id)
+        elif self.config.prompt_mode in {"warmup", "static_search"}:
+            if self.config.harness_backend != "codex":
+                raise ValueError(
+                    f"prompt_mode={self.config.prompt_mode!r} currently requires harness_backend='codex' "
+                    f"(got {self.config.harness_backend!r})."
+                )
+            if self.config.codex_resume:
+                raise ValueError(
+                    f"prompt_mode={self.config.prompt_mode!r} requires codex_resume=False; each question "
+                    "gets a fresh Codex session."
+                )
+            self._feedback_handler = None
         elif self.config.prompt_mode not in ("default", "no_memory"):
             raise ValueError(
                 f"Unknown prompt_mode={self.config.prompt_mode!r}; "
-                "expected 'default', 'no_memory', or 'active_memory'."
+                "expected 'default', 'no_memory', 'active_memory', 'warmup', or 'static_search'."
             )
         else:
             self._feedback_handler = None
+        self.warmed_up = False
 
         if self.config.handholding_version is None:
             # Per-model default. deepseek/qwen/glm need the v3 nudges (TW-update
@@ -360,6 +562,15 @@ class MinimalHarnessAgent(BaseAgent):
     ) -> List[Dict[str, Any]]:
         self._current_date = current_date
 
+        if (
+            self.config.prompt_mode in {"warmup", "static_search"}
+            and self.warmed_up
+            and self.config.start_date == current_date
+        ):
+            print(f"[{self.agent_id}] Skipping standard act() on Day 0 (Warmup already completed).")
+            forecast_interface.next_day()
+            return []
+
         # Internal dirs (driver/MCP coordination — harness doesn't see these).
         for d in ("signals",):
             (self._internal_dir / d).mkdir(parents=True, exist_ok=True)
@@ -386,7 +597,16 @@ class MinimalHarnessAgent(BaseAgent):
             self._bootstrap_applied = True
 
         # 1. Write state.json for MCP server to read.
-        self._write_state(forecast_interface, current_date)
+        search_current_date = (
+            self.config.start_date
+            if self.config.freeze_search_after_start
+            else None
+        )
+        self._write_state(
+            forecast_interface,
+            current_date,
+            search_current_date=search_current_date,
+        )
 
         # 2. chmod market.csv read-only so the harness can't corrupt it.
         self._protect_market_csv(forecast_interface)
@@ -568,10 +788,21 @@ class MinimalHarnessAgent(BaseAgent):
             return d.isoformat()
         return str(d)
 
-    def _write_state(self, forecast_interface: Any, current_date: date) -> None:
+    def _write_state(
+        self,
+        forecast_interface: Any,
+        current_date: date,
+        questions_override: Optional[List[Any]] = None,
+        search_current_date: Optional[date] = None,
+    ) -> None:
         """Serialize simulation state for the MCP server."""
         questions = []
-        for q in forecast_interface.list_questions():
+        visible_questions = (
+            questions_override
+            if questions_override is not None
+            else forecast_interface.list_questions()
+        )
+        for q in visible_questions:
             questions.append({
                 "qid": q.qid,
                 "title": q.title,
@@ -600,6 +831,11 @@ class MinimalHarnessAgent(BaseAgent):
 
         state = {
             "current_date": current_date.isoformat(),
+            "search_current_date": (
+                self._to_iso(search_current_date)
+                if search_current_date is not None
+                else current_date.isoformat()
+            ),
             "start_date": self._to_iso(self.config.start_date or current_date),
             "end_date": self._to_iso(self.config.end_date or current_date),
             "market_csv": forecast_interface.get_market_csv_path(),
@@ -612,10 +848,309 @@ class MinimalHarnessAgent(BaseAgent):
             "resolution_events": forecast_interface.resolution_events,
             "agent_predictions": agent_predictions,
             "total_predictions": total_predictions,
+            "max_outcomes_per_question": self.config.max_outcomes_per_question,
+            "prompt_mode": self.config.prompt_mode,
+            "submit_ends_session": self.config.prompt_mode in {"warmup", "static_search"},
+            "next_day_returns_immediately": self.config.harness_backend == "codex",
         }
         state_path = self._internal_dir / "state.json"
         with open(state_path, "w") as f:
             json.dump(state, f, indent=2, default=str)
+
+    def _get_warmup_current_date(self, current_date: date, q: Any) -> date:
+        resolution_guard = self.config.resolution_guard
+        resolution_date = getattr(q, "resolution_date", None)
+        if resolution_guard is None or resolution_date is None:
+            return current_date
+        return resolution_date - timedelta(days=resolution_guard)
+
+    def _build_warmup_prompt(
+        self,
+        forecast_interface: Any,
+        q: Any,
+        effective_current_date: date,
+    ) -> str:
+        from agents.minimalHarnessAgent.prompt import build_warmup_prompt
+
+        source_context = getattr(forecast_interface, "source_context", "") or ""
+        source_name = getattr(forecast_interface, "source_name", "openforesight")
+        static_search_text = None
+        if self.config.prompt_mode == "static_search":
+            static_search_text = self._get_static_search_text(q, effective_current_date)
+        prompt = build_warmup_prompt(
+            current_date=effective_current_date,
+            q=q,
+            source_context=source_context,
+            source_name=source_name,
+            max_outcomes_per_question=self.config.max_outcomes_per_question,
+            search_cutoff_days=self.config.search_cutoff_days,
+            static_search_text=static_search_text,
+        )
+        safe_qid = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in str(q.qid))
+        prompt_path = self._internal_dir / "warmup_prompts" / f"{safe_qid}.md"
+        prompt_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(prompt_path, "w") as f:
+            f.write(prompt)
+        return prompt
+
+    def _terminate_harness_process(self) -> None:
+        if self._harness_proc and self._harness_proc.poll() is None:
+            self._harness_proc.terminate()
+            try:
+                self._harness_proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self._harness_proc.kill()
+        self._harness_proc = None
+        for f in (getattr(self, "_stdout_log", None), getattr(self, "_stderr_log", None)):
+            if f and not f.closed:
+                f.close()
+
+    def _warmup_runtime_dir(self, safe_qid: str) -> Path:
+        return self._internal_dir / "warmup_runtime" / safe_qid
+
+    def _warmup_log_dir(self, safe_qid: str) -> Path:
+        return self._internal_dir / "warmup_logs" / safe_qid
+
+    @staticmethod
+    def _safe_qid(qid: Any) -> str:
+        return "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in str(qid))
+
+    def _static_search_root(self) -> Path:
+        if self.config.static_search_dir:
+            return Path(os.path.expanduser(os.path.expandvars(self.config.static_search_dir)))
+        return self._internal_dir / "static_search"
+
+    def _ensure_static_search_file(self, q: Any, effective_current_date: date) -> Tuple[Path, str]:
+        from agents.minimalHarnessAgent.static_search import ensure_static_search_file
+
+        return ensure_static_search_file(
+            output_dir=self._static_search_root(),
+            search_tool=self.search_tool,
+            q=q,
+            search_date=effective_current_date,
+            search_type=self.config.search_type,
+            search_cutoff_days=self.config.search_cutoff_days,
+            max_results=int(self.config.static_search_max_results or 5),
+        )
+
+    def _get_static_search_text(self, q: Any, effective_current_date: date) -> str:
+        _, text = self._ensure_static_search_file(q, effective_current_date)
+        return text
+
+    def _prepare_static_search_files(self, questions: List[Any], current_date: date) -> None:
+        root = self._static_search_root()
+        root.mkdir(parents=True, exist_ok=True)
+        index_path = root / "index.jsonl"
+        index_path.unlink(missing_ok=True)
+
+        total = len(questions)
+        print(f"[{self.agent_id}] Preparing static title-search cache in {root}...")
+        with open(index_path, "a") as index_f:
+            for i, q in enumerate(questions, start=1):
+                effective_current_date = self._get_warmup_current_date(current_date, q)
+                path, _ = self._ensure_static_search_file(q, effective_current_date)
+                index_f.write(json.dumps({
+                    "qid": str(q.qid),
+                    "title": str(q.title),
+                    "resolution_date": self._to_iso(getattr(q, "resolution_date", "")),
+                    "search_date": effective_current_date.isoformat(),
+                    "query": str(q.title),
+                    "path": str(path),
+                }) + "\n")
+                if i % 10 == 0 or i == total:
+                    print(f"[{self.agent_id}] Static Search Progress: {i}/{total}", flush=True)
+
+    def _copy_warmup_runtime_logs(
+        self,
+        runtime_dir: Path,
+        log_dir: Path,
+        qid: str,
+        current_date: date,
+    ) -> None:
+        """Preserve per-question raw logs, then allow the runtime dir to be deleted."""
+        log_dir.mkdir(parents=True, exist_ok=True)
+        copy_map = {
+            runtime_dir / "codex_stdout.jsonl": log_dir / "codex_stdout.jsonl",
+            runtime_dir / "codex_stderr.log": log_dir / "codex_stderr.log",
+            runtime_dir / "mcp_relay.log": log_dir / "mcp_relay.log",
+            runtime_dir / "state.json": log_dir / "state.json",
+            runtime_dir / "predictions" / f"{current_date.isoformat()}.json": log_dir / "predictions.json",
+            runtime_dir / "warmup_prompts" / f"{self._safe_qid(qid)}.md": log_dir / "prompt.md",
+        }
+        for src, dst in copy_map.items():
+            if src.exists():
+                shutil.copy2(src, dst)
+
+    def _stop_warmup_worker(self, worker: "MinimalHarnessAgent") -> None:
+        worker._terminate_harness_process()
+        worker._stop_egress_proxy()
+        worker._stop_mcp_relay()
+        worker._started = False
+
+    def _run_single_warmup_question(
+        self,
+        q: Any,
+        current_date: date,
+        forecast_interface: Any,
+    ) -> Tuple[str, date, List[Dict[str, Any]]]:
+        qid = str(q.qid)
+        safe_qid = self._safe_qid(qid)
+        runtime_dir = self._warmup_runtime_dir(safe_qid)
+        log_dir = self._warmup_log_dir(safe_qid)
+
+        if runtime_dir.exists():
+            shutil.rmtree(runtime_dir)
+        if log_dir.exists():
+            shutil.rmtree(log_dir)
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+
+        worker_config = replace(self.config, warmup_parallelism=1)
+        worker = MinimalHarnessAgent(
+            agent_id=self.agent_id,
+            config=worker_config,
+            search_tool=self.search_tool,
+            agent_dir=str(runtime_dir),
+            articles_base=str(self.articles_base),
+        )
+
+        effective_current_date = self._get_warmup_current_date(current_date, q)
+        try:
+            for d in ("signals", "predictions"):
+                (worker._internal_dir / d).mkdir(parents=True, exist_ok=True)
+            for d in ("memory", "articles"):
+                (worker.workspace / d).mkdir(parents=True, exist_ok=True)
+
+            if worker.config.network_isolation:
+                worker._start_egress_proxy()
+            if worker.config.sandbox:
+                worker._start_mcp_relay()
+
+            worker._current_date = current_date
+            worker._write_state(
+                forecast_interface,
+                current_date,
+                questions_override=[q],
+                search_current_date=effective_current_date,
+            )
+            worker._codex_initial_prompt_override = worker._build_warmup_prompt(
+                forecast_interface,
+                q,
+                effective_current_date,
+            )
+
+            worker._start_codex()
+            worker._started = True
+            predictions = worker._wait_for_next_day(current_date)
+            predictions = [
+                pred for pred in predictions
+                if str(pred.get("question_id", pred.get("qid", ""))) == qid
+            ]
+            return qid, effective_current_date, predictions
+        finally:
+            self._stop_warmup_worker(worker)
+            self._copy_warmup_runtime_logs(runtime_dir, log_dir, qid, current_date)
+            shutil.rmtree(runtime_dir, ignore_errors=True)
+
+    def _append_warmup_log_index(
+        self,
+        qid: str,
+        effective_current_date: date,
+        predictions: List[Dict[str, Any]],
+        error: Optional[str] = None,
+    ) -> None:
+        index_path = self._internal_dir / "warmup_logs" / "index.jsonl"
+        index_path.parent.mkdir(parents=True, exist_ok=True)
+        record = {
+            "qid": qid,
+            "search_current_date": effective_current_date.isoformat(),
+            "num_predictions": len(predictions),
+            "error": error,
+            "processed_output_log": str(self._internal_dir / "model_outputs.jsonl"),
+            "raw_output_log": str(self._internal_dir / "model_raw_warmup.jsonl"),
+        }
+        with open(index_path, "a") as f:
+            f.write(json.dumps(record) + "\n")
+
+    def warmup(self, forecast_interface: Any, current_date: date) -> None:
+        """Run AllQ-style per-question warmup with one fresh Codex session per question."""
+        if self.config.prompt_mode not in {"warmup", "static_search"}:
+            return
+
+        mode_label = self.config.prompt_mode.upper()
+        print(f"[{self.agent_id}] Starting MinimalHarness {mode_label} phase on {current_date}")
+
+        forecast_interface.current_agent_id = self.agent_id
+
+        questions = list(forecast_interface.questions.values())
+        questions.sort(key=lambda q: (self._get_warmup_current_date(current_date, q), str(q.qid)))
+        total = len(questions)
+        if self.config.prompt_mode == "static_search":
+            self._prepare_static_search_files(questions, current_date)
+
+        max_workers = max(1, min(int(self.config.warmup_parallelism or 1), total or 1))
+        print(f"[{self.agent_id}] Parallelizing MinimalHarness warmup with {max_workers} worker(s)...")
+
+        runtime_root = self._internal_dir / "warmup_runtime"
+        runtime_root.mkdir(parents=True, exist_ok=True)
+        index_path = self._internal_dir / "warmup_logs" / "index.jsonl"
+        index_path.unlink(missing_ok=True)
+
+        completed = 0
+        try:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_to_q = {
+                    executor.submit(
+                        self._run_single_warmup_question,
+                        q,
+                        current_date,
+                        forecast_interface,
+                    ): q
+                    for q in questions
+                }
+                for future in as_completed(future_to_q):
+                    q = future_to_q[future]
+                    qid = str(q.qid)
+                    effective_current_date = self._get_warmup_current_date(current_date, q)
+                    error = None
+                    try:
+                        _, effective_current_date, predictions = future.result()
+                    except Exception as e:
+                        logger.warning("Warmup question %s failed: %s", qid, e)
+                        predictions = []
+                        error = str(e)
+
+                    submitted = False
+                    for pred in predictions:
+                        try:
+                            forecast_interface.submit_prediction(PredictionSubmission(
+                                question_id=pred["question_id"],
+                                outcomes=pred["outcomes"],
+                            ))
+                            submitted = True
+                        except Exception as e:
+                            logger.warning("Failed to submit warmup prediction %s: %s", pred, e)
+
+                    self._append_warmup_log_index(qid, effective_current_date, predictions, error=error)
+                    if not submitted:
+                        logger.warning("No warmup prediction submitted for qid %s", qid)
+
+                    completed += 1
+                    if completed % 10 == 0 or completed == total:
+                        print(f"[{self.agent_id}] Warmup Progress: {completed}/{total}", flush=True)
+        finally:
+            shutil.rmtree(runtime_root, ignore_errors=True)
+
+        aggregated = aggregate_codex_warmup_logs(
+            self.agent_id,
+            self._internal_dir,
+            remove_per_question_logs=True,
+        )
+        if aggregated:
+            print(f"[{self.agent_id}] Aggregated {aggregated} Codex warmup transcript(s).", flush=True)
+
+        self._codex_initial_prompt_override = None
+        self.warmed_up = True
+        print(f"[{self.agent_id}] MinimalHarness {self.config.prompt_mode} complete.")
 
     def _protect_market_csv(self, forecast_interface: Any) -> None:
         """Materialize a per-agent market.csv in the workspace.
@@ -888,9 +1423,12 @@ class MinimalHarnessAgent(BaseAgent):
             return
 
         articles_dir = self.workspace / "articles"
-        start = (self._last_symlink_date + timedelta(days=1)) if self._last_symlink_date else (
-            self.config.start_date or current_date - timedelta(days=30)
-        )
+        if self._last_symlink_date:
+            start = self._last_symlink_date + timedelta(days=1)
+        elif self.config.start_date is not None:
+            start = min(self.config.start_date, current_date)
+        else:
+            start = current_date - timedelta(days=30)
 
         d = start
         while d <= current_date:
@@ -1197,6 +1735,13 @@ class MinimalHarnessAgent(BaseAgent):
 
     # ── MCP relay (sandbox=True) ───────────────────────────────────────
 
+    def _mcp_tool_filter_args(self) -> List[str]:
+        if self.config.prompt_mode == "static_search":
+            return ["--enabled-tools", "submit_forecasts"]
+        if self.config.prompt_mode == "warmup":
+            return ["--enabled-tools", "search_news,submit_forecasts"]
+        return []
+
     def _build_mcp_invocation(self) -> Tuple[str, List[str]]:
         """Return (command, args) for the harness' MCP config.
 
@@ -1219,7 +1764,9 @@ class MinimalHarnessAgent(BaseAgent):
                     "MCP relay socket not initialized; "
                     "_start_mcp_relay must run before _build_mcp_invocation"
                 )
-            return (_resolve_socat_cmd(), ["-", f"UNIX-CONNECT:{self._mcp_relay_sock}"])
+            if self._mcp_bridge_wrapper is not None:
+                return (str(self._mcp_bridge_wrapper), [])
+            return (_resolve_sandbox_socat_cmd(), ["-", f"UNIX-CONNECT:{self._mcp_relay_sock}"])
 
         repo_root = str(Path(__file__).resolve().parents[2])
         mcp_server_script = str(Path(__file__).resolve().parent / "mcp_server.py")
@@ -1236,6 +1783,7 @@ class MinimalHarnessAgent(BaseAgent):
             "--embedding-model", self.config.embedding_model or "",
             "--handholding-version", self.config.handholding_version,
         ]
+        mcp_args.extend(self._mcp_tool_filter_args())
         if embed_server_url:
             mcp_args.extend(["--embedding-server-url", embed_server_url])
         return (python_cmd, mcp_args)
@@ -1282,6 +1830,7 @@ class MinimalHarnessAgent(BaseAgent):
             "--embedding-model", self.config.embedding_model or "",
             "--handholding-version", self.config.handholding_version,
         ]
+        mcp_args.extend(self._mcp_tool_filter_args())
         if embed_server_url:
             mcp_args.extend(["--embedding-server-url", embed_server_url])
 
@@ -1290,6 +1839,25 @@ class MinimalHarnessAgent(BaseAgent):
             "#!/bin/sh\nexec " + shlex.join([python_cmd, *mcp_args]) + "\n"
         )
         wrapper.chmod(0o755)
+
+        bridge_wrapper = d / "connect_mcp.sh"
+        bridge_wrapper.write_text(
+            "#!/bin/sh\n"
+            f"sock={shlex.quote(str(self._mcp_relay_sock))}\n"
+            'if [ ! -S "$sock" ]; then\n'
+            '  echo "MCP relay socket missing: $sock" >&2\n'
+            "  exit 127\n"
+            "fi\n"
+            "for socat_cmd in /usr/bin/socat /bin/socat socat; do\n"
+            '  if command -v "$socat_cmd" >/dev/null 2>&1; then\n'
+            '    exec "$socat_cmd" - "UNIX-CONNECT:$sock"\n'
+            "  fi\n"
+            "done\n"
+            'echo "socat not found in sandbox" >&2\n'
+            "exit 127\n"
+        )
+        bridge_wrapper.chmod(0o755)
+        self._mcp_bridge_wrapper = bridge_wrapper
 
         # NOTE: do NOT add `stderr` to the EXEC option — that dup2's the
         # subprocess's stderr onto stdout, which corrupts the JSON-RPC
@@ -1340,6 +1908,7 @@ class MinimalHarnessAgent(BaseAgent):
                 self._mcp_relay_sock.unlink()
             except OSError:
                 pass
+        self._mcp_bridge_wrapper = None
 
     def _wrap_for_egress_bridge(self, cmd: List[str]) -> List[str]:
         """Prefix `cmd` with a /bin/sh wrapper that starts socat sidecars
@@ -1348,7 +1917,7 @@ class MinimalHarnessAgent(BaseAgent):
         network_isolation=True."""
         proxy_sock = str(self._egress_proxy_sock)
         proxy_port = self._egress_proxy_port
-        socat_cmd = shlex.quote(_resolve_socat_cmd())
+        socat_cmd = shlex.quote(_resolve_sandbox_socat_cmd())
         bridge = (
             f"{socat_cmd} TCP-LISTEN:{proxy_port},bind=127.0.0.1,fork,reuseaddr "
             f"UNIX-CONNECT:{proxy_sock} 2>/dev/null & "
@@ -1377,6 +1946,8 @@ class MinimalHarnessAgent(BaseAgent):
             "https_proxy": proxy_url,
             "HTTP_PROXY": proxy_url,
             "http_proxy": proxy_url,
+            "ALL_PROXY": proxy_url,
+            "all_proxy": proxy_url,
             "NO_PROXY": "127.0.0.1,localhost",
             "no_proxy": "127.0.0.1,localhost",
         }
@@ -1668,10 +2239,10 @@ class MinimalHarnessAgent(BaseAgent):
         mcp_cmd, mcp_args = self._build_mcp_invocation()
 
         # Codex reads AGENTS.md from cwd at startup as user instructions.
-        # active_memory mode delivers the full daily prompt as the user prompt
+        # active_memory/warmup modes deliver the full task as the user prompt
         # instead — skip the AGENTS.md write and clear any stale copy from a
         # prior config so codex can't pick it up.
-        if self.config.prompt_mode == "active_memory":
+        if self.config.prompt_mode in {"active_memory", "warmup", "static_search"}:
             stale_agents_md = self.workspace / "AGENTS.md"
             if stale_agents_md.exists():
                 stale_agents_md.unlink()
@@ -1704,6 +2275,21 @@ class MinimalHarnessAgent(BaseAgent):
             "--skip-git-repo-check",
             "--json",
         ]
+        if self.config.network_isolation:
+            proxy_url = f"http://127.0.0.1:{self._egress_proxy_port}"
+            common_args.extend(["-c", f'network.proxy_url="{proxy_url}"'])
+        if self.config.prompt_mode == "static_search":
+            common_args.extend([
+                "--disable", "shell_tool",
+                "--disable", "shell_snapshot",
+                "--disable", "apply_patch_freeform",
+                "--disable", "browser_use",
+                "--disable", "computer_use",
+                "--disable", "tool_search",
+                "--disable", "tool_suggest",
+                "--disable", "image_generation",
+                "--disable", "multi_agent",
+            ])
 
         if self.config.codex_resume and self._codex_thread_id is None:
             self._find_codex_thread_id()
@@ -1717,19 +2303,27 @@ class MinimalHarnessAgent(BaseAgent):
                 self._current_date.isoformat()
                 if self._current_date else ""
             )
-            resume_prompt = (
-                f"Simulation advanced to {day_iso}. Re-read state.json and "
-                "market.csv for the new day's questions, resolution events, "
-                "and your existing predictions; update predictions where "
-                "new info changes your view, then call next_day."
-            )
+            if self.config.prompt_mode in {"warmup", "static_search"} and self._codex_initial_prompt_override:
+                resume_prompt = (
+                    "The previous per-question warmup session was interrupted. "
+                    "Continue the same target question from the current state, "
+                    "submit the forecast if needed.\n\n"
+                    f"{self._codex_initial_prompt_override}"
+                )
+            else:
+                resume_prompt = (
+                    f"Simulation advanced to {day_iso}. Re-read state.json and "
+                    "market.csv for the new day's questions, resolution events, "
+                    "and your existing predictions; update predictions where "
+                    "new info changes your view, then call next_day."
+                )
             cmd = [
                 codex_bin, "exec", "resume", self._codex_thread_id,
                 *common_args, resume_prompt,
             ]
         else:
             if (
-                self.config.prompt_mode == "active_memory"
+                self.config.prompt_mode in {"active_memory", "warmup", "static_search"}
                 and self._codex_initial_prompt_override
             ):
                 initial_prompt = self._codex_initial_prompt_override
@@ -1833,6 +2427,7 @@ class MinimalHarnessAgent(BaseAgent):
         path = self._internal_dir / "codex_stdout.jsonl"
         if not path.exists():
             return None
+        latest_tid = None
         with open(path) as f:
             for line in f:
                 try:
@@ -1842,8 +2437,10 @@ class MinimalHarnessAgent(BaseAgent):
                 if ev.get("type") == "thread.started":
                     tid = ev.get("thread_id")
                     if tid:
-                        self._codex_thread_id = tid
-                        return tid
+                        latest_tid = tid
+        if latest_tid:
+            self._codex_thread_id = latest_tid
+            return latest_tid
         return None
 
     def _resume_opencode(self, current_date: date) -> bool:
@@ -2004,6 +2601,21 @@ class MinimalHarnessAgent(BaseAgent):
         # Read predictions from the predictions file — this is the durable record
         # of all submit_forecasts MCP calls. Each call writes to this file immediately,
         # so it survives MCP server restarts (unlike the in-memory _today_predictions).
+        if (
+            self.config.harness_backend == "codex"
+            and self._harness_proc
+            and self._harness_proc.poll() is None
+        ):
+            drain_timeout = min(30.0, max(0.0, timeout - (time.time() - start)))
+            try:
+                self._harness_proc.wait(timeout=drain_timeout)
+            except subprocess.TimeoutExpired:
+                logger.warning(
+                    "codex did not exit within %.1fs after next_day signal on %s; "
+                    "reading durable predictions anyway",
+                    drain_timeout,
+                    current_date,
+                )
         return self._read_predictions(current_date)
 
     def _read_predictions(self, current_date: date) -> List[Dict[str, Any]]:

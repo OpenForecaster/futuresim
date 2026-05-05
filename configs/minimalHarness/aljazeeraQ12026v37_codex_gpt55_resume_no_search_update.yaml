@@ -1,19 +1,19 @@
-# 2-day network-isolation smoke test: Codex CLI -> gpt-5.3-codex-spark.
-# Identical to aljazeeraQ12026v37_codex_gpt53spark_resume.yaml except:
-#   - 2-day sim window (2026-01-01 -> 2026-01-02) inside the active resolution range
-#   - network_isolation: true (bwrap --unshare-net + host allowlist proxy)
+# Codex CLI + gpt-5.5 (low reasoning) on aljazeeraQ12026v37 split with RESUME
+# mode. Search tool calls are capped at the first simulation day
+# (start_date - lookback_days = 2025-12-24).
 #
 # Usage:
-#   python scripts/test_basic_agent.py --config configs/minimalHarness/aljazeeraQ12026v37_codex_gpt53spark_netiso_2day.yaml
+#   python scripts/test_basic_agent.py --config configs/minimalHarness/aljazeeraQ12026v37_codex_gpt55_resume_no_search_update.yaml
 
-sim_name: "codex_aljazeeraQ12026v37_gpt53spark_netiso_2day"
+sim_name: "codex_aljazeeraQ12026v37_gpt55_resume_no_search_update"
 
-start_date: "2026-01-01"
-end_date: "2026-01-02"
-resolution_start: "2026-01-01"
-resolution_end: "2026-01-02"
+start_date: "2025-12-31"
+end_date: "2026-03-28"
+resolution_start: "2025-12-31"
+resolution_end: "2026-03-28"
 lookback_days: 7
 search_cutoff_days: 0
+freeze_search_after_start: true
 timegap_days: 1
 
 dataset: "openforesight"
@@ -35,10 +35,9 @@ defaults:
   scaffold: "minimalHarness"
   harness_backend: "codex"
   codex_path: "/home/nchandak/.local/bin/codex"
-  reasoning_effort: "xhigh"
+  reasoning_effort: "low"
   codex_resume: true
   sandbox: true
-  network_isolation: true
 
 resources:
   gpus: 1
@@ -48,5 +47,5 @@ resources:
   bid: 35
 
 agents:
-  - model: "gpt-5.3-codex-spark"
-    timeout_seconds: 3600
+  - model: "gpt-5.5"
+    timeout_seconds: 86400

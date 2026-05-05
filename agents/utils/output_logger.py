@@ -81,18 +81,26 @@ class AgentOutputLogger:
             raw_stream = "daily"
 
         qid = metadata.get("qid")
+        raw_input_delta = metadata.get("_logger_raw_input_delta", prompt)
+        raw_response = metadata.get("_logger_raw_response", response)
+        raw_metadata = metadata.get("_logger_raw_metadata")
+        clean_metadata = {
+            k: v for k, v in metadata.items()
+            if not k.startswith("_logger_")
+        }
+        if raw_metadata is None:
+            raw_metadata = clean_metadata.copy()
         prompt_text = self._render_prompt_text(prompt)
         raw_record = {
             "sim_date": str(sim_date),
             "agent_id": self.agent_id,
             "qid": qid,
             "prompt": prompt_text,
-            "input_delta": prompt,
-            "response": response,
-            "metadata": metadata,
+            "input_delta": raw_input_delta,
+            "response": raw_response,
+            "metadata": raw_metadata,
         }
 
-        clean_metadata = metadata.copy()
         clean_response = response
         reasoning = clean_metadata.get("reasoning")
         if reasoning and "<reasoning>" not in (clean_response or ""):

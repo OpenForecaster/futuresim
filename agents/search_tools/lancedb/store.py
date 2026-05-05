@@ -16,7 +16,7 @@ class LanceDBSearchTool(BaseSearchTool):
     """LanceDB-based search with hybrid search and date filtering."""
     
     TABLE_NAME = "articles"
-    _hybrid_warned = True
+    _hybrid_warned = False
     
     def __init__(self, db_path: str, embedding_model=None, model_path: str = None):
         """
@@ -102,11 +102,9 @@ class LanceDBSearchTool(BaseSearchTool):
             where_clauses.append(f"date >= timestamp '{min_date.isoformat()}T00:00:00'")
         where = " AND ".join(where_clauses) if where_clauses else None
         
-        def _execute(results_builder):
+        def _execute(results_builder, *, prefilter: bool):
             if where:
-                # Use prefilter=False consistently across search modes for reproducibility.
-                # In current LanceDB hybrid, prefilter=True is wired incorrectly.
-                results_builder = results_builder.where(where, prefilter=False)
+                results_builder = results_builder.where(where, prefilter=prefilter)
             return results_builder.limit(max_results).to_list()
 
         def _sanitize_fts_query(q: str, *, keep_quotes: bool = True) -> str:
@@ -159,7 +157,7 @@ class LanceDBSearchTool(BaseSearchTool):
             if search_type == "keyword":
                 try:
                     results = self._table.search(query, query_type="fts")
-                    rows = _execute(results)
+                    rows = _execute(results, prefilter=True)
                 except Exception as e:
                     if _is_fts_parser_error(e):
                         retry_err: Optional[Exception] = None
@@ -169,7 +167,7 @@ class LanceDBSearchTool(BaseSearchTool):
                             print(f"[LanceDB] Retrying FTS with sanitized query: {q2}")
                             try:
                                 results = self._table.search(q2, query_type="fts")
-                                rows = _execute(results)
+                                rows = _execute(results, prefilter=True)
                                 break
                             except Exception as e2:
                                 retry_err = e2
@@ -197,11 +195,14 @@ class LanceDBSearchTool(BaseSearchTool):
                         return []
                     if search_type == "semantic":
                         results = self._table.search(query_embedding)
-                        rows = _execute(results)
+                        rows = _execute(results, prefilter=True)
                     else:  # hybrid - use separate vector() and text()
                         try:
                             results = self._table.search(query_type="hybrid").vector(query_embedding).text(query)
-                            rows = _execute(results)
+                            # LanceDB 0.29.x HybridQueryBuilder passes this flag
+                            # through inverted to its inner vector/FTS builders.
+                            # prefilter=False here gives true date prefiltering.
+                            rows = _execute(results, prefilter=False)
                         except Exception as e:
                             if _is_fts_parser_error(e):
                                 retry_err: Optional[Exception] = None
@@ -211,7 +212,7 @@ class LanceDBSearchTool(BaseSearchTool):
                                     print(f"[LanceDB] Retrying hybrid with sanitized query: {q2}")
                                     try:
                                         results = self._table.search(query_type="hybrid").vector(query_embedding).text(q2)
-                                        rows = _execute(results)
+                                        rows = _execute(results, prefilter=False)
                                         return self._to_results(rows)
                                     except Exception as e2:
                                         retry_err = e2
@@ -223,7 +224,7 @@ class LanceDBSearchTool(BaseSearchTool):
                                 print(f"[LanceDB] Hybrid search unavailable, falling back to semantic: {e}")
                                 LanceDBSearchTool._hybrid_warned = True
                             results = self._table.search(query_embedding)
-                            rows = _execute(results)
+                            rows = _execute(results, prefilter=True)
             return self._to_results(rows)
         except Exception as e:
             print(f"[LanceDB] Search failed ({search_type}): {e}")

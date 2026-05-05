@@ -6,3 +6,7 @@
 	path = third_party/SkyRL
 	url = https://github.com/shash42/SkyRL.git
 	branch = main
+[submodule "forecast-sim-overleaf"]
+	path = forecast-sim-overleaf
+	url = https://github.com/nikhilchandak/forecast-sim-overleaf.git
+	branch = main

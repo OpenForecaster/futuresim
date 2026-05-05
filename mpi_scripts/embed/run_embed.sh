@@ -34,8 +34,8 @@ MODEL="Qwen3-Embedding-8B"
 MODEL_PATH="${FSIM_EMBEDDING_MODEL:-/is/cluster/fast/sgoel/models/Qwen3-Embedding-8B}"
 
 # Date range (2023 onwards)
-START_DATE="2023-01-01"
-END_DATE="2026-03-31"
+START_DATE="${FSIM_NEWS_START_DATE:-2023-01-01}"
+END_DATE="${FSIM_NEWS_END_DATE:-2026-03-31}"
 
 # Worker config (passed from submit_job.py)
 WORKER_ID=${1:-0}

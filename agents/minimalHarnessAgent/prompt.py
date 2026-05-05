@@ -410,3 +410,88 @@ Column descriptions of the DataFrame (market.csv):
 ---
 
 Begin."""
+
+
+def build_warmup_prompt(
+    current_date,
+    q,
+    source_context: str = "",
+    source_name: str = "openforesight",
+    max_outcomes_per_question: int = 5,
+    search_cutoff_days: int = 0,
+    static_search_text: Optional[str] = None,
+) -> str:
+    """Focused one-question prompt for minimalHarness Codex warmup mode."""
+    source_rules = _get_source_rules(source_name)
+    scoring_section = _get_scoring_section(source_name, max_outcomes_per_question)
+    submit_only = static_search_text is not None
+
+    search_results_desc = _search_results_description()
+    cutoff_desc = "today's date"
+    if search_cutoff_days > 0:
+        cutoff_date = current_date - timedelta(days=search_cutoff_days) if hasattr(current_date, "__sub__") else current_date
+        cutoff_desc = f"{_iso(cutoff_date)} (today - {search_cutoff_days} days)"
+    search_tool_line = (
+        f"- `mcp__forecast__search_news(query, from_date?, to_date?)`: search the news corpus for evidence. "
+        f"`to_date` is capped at {cutoff_desc}. {search_results_desc}\n"
+    )
+    if submit_only:
+        evidence_section = f"""\
+## STATIC RETRIEVED ARTICLES
+The following evidence was retrieved before this session by running the target question title as one date-capped hybrid news search query. Use this evidence as the only research context for this question.
+
+{static_search_text.strip()}
+"""
+        tools_section = f"""\
+## TOOLS YOU SHOULD USE
+Only one MCP tool is available in this session:
+- `mcp__forecast__submit_forecasts(question_id, outcomes)`: submit exactly one forecast for qid `{q.qid}`.
+
+Do not use search, article browsing, shell/file tools, or any other tools. Make the forecast from the question text and static retrieved articles above.
+"""
+        after_submit_rule = "After a successful forecast submission, stop; the harness will end this isolated question session."
+    else:
+        evidence_section = ""
+        tools_section = f"""\
+## TOOLS YOU SHOULD USE
+Use the MCP forecasting tools. Native web access is disabled; use only the date-capped news corpus.
+{search_tool_line}- `mcp__forecast__submit_forecasts(question_id, outcomes)`: submit exactly one forecast for qid `{q.qid}`.
+"""
+        after_submit_rule = "After a successful forecast submission, stop; the harness will end this isolated question session."
+
+    prompt = f"""\
+You are a forecasting agent. Your goal is to make accurate and calibrated predictions. Today is {current_date}.
+
+This is an isolated per-question warmup session. Work only on the target question below; do not use notes or predictions from other questions.
+
+Target Question: {q.title} (ID: {q.qid})
+
+Background: {q.background}
+Resolution Criteria: {q.resolution_criteria}
+Answer Type: {q.answer_type}
+
+{source_context.strip()}
+
+{source_rules.strip()}
+
+{scoring_section}
+
+{evidence_section}
+{tools_section}
+
+
+## SUBMISSION RULES
+- qid must be {q.qid}
+- Each `mcp__forecast__submit_forecasts` call must contain exactly one forecast for this one question.
+- You may submit again in this session to revise qid {q.qid}; the latest submission is what counts.
+- You can submit up to {max_outcomes_per_question} outcomes.
+- Outcome names must be REAL predicted answers (e.g., person names, locations, numbers, dates).
+- NEVER use placeholders like "Unknown", "TBD", "Other", or "N/A".
+- Probabilities must sum to <= 1.0.
+- {after_submit_rule}
+
+---
+
+Begin.
+"""
+    return prompt

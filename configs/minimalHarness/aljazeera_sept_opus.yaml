@@ -26,6 +26,7 @@ matcher: "deepseek/deepseek-v3.2"
 defaults:
   provider: "none"
   scaffold: "minimalHarness"
+  sandbox: true
 
 resources:
   gpus: 1

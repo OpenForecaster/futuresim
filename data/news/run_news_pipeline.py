@@ -68,8 +68,8 @@ EMBEDDINGS_DIR = f"{NEWS_BASE}/deduped_articles/embeddings"
 LANCEDB_DIR = f"{NEWS_BASE}/deduped_articles/lance"
 
 # Date range for new articles
-START_DATE = "2025-08-01"
-END_DATE = "2026-03-31"
+START_DATE = os.getenv("FSIM_NEWS_PIPELINE_START_DATE", "2025-08-01")
+END_DATE = os.getenv("FSIM_NEWS_PIPELINE_END_DATE", "2026-03-31")
 
 # Legacy deduped dirs to include in parquet merge
 LEGACY_DEDUPED_DIRS = [

@@ -10,6 +10,7 @@ up and the tools won't be available.
 """
 
 import argparse
+import contextlib
 import json
 import os
 import sys
@@ -78,7 +79,8 @@ def _reload_state() -> None:
     _state = _read_json(_internal_dir / "state.json")
     _today_predictions = []
     if _search_handler is not None:
-        _search_handler.set_date(_parse_date(_state["current_date"]))
+        search_date = _state.get("search_current_date") or _state["current_date"]
+        _search_handler.set_date(_parse_date(search_date))
 
 
 def _build_new_articles_message(previous_date: Optional[date], current_date: Optional[date]) -> str:
@@ -88,13 +90,15 @@ def _build_new_articles_message(previous_date: Optional[date], current_date: Opt
             "New articles are available in articles/ or via the search_news MCP tool."
         )
 
-    _ensure_search()
+    with contextlib.redirect_stdout(sys.stderr):
+        _ensure_search()
     if _search_handler is not None and _search_handler.is_available:
         max_date = current_date - timedelta(days=_search_cutoff_days)
-        count = _search_handler.count_articles(
-            min_date=previous_date,
-            max_date=max_date,
-        )
+        with contextlib.redirect_stdout(sys.stderr):
+            count = _search_handler.count_articles(
+                min_date=previous_date,
+                max_date=max_date,
+            )
         if count is not None:
             return (
                 f"{count:,} new articles have been published since your last update "
@@ -150,7 +154,8 @@ def _ensure_search() -> None:
         search_tool=_search_tool,
         search_cutoff_days=_search_cutoff_days,
     )
-    _search_handler.set_date(_parse_date(_state["current_date"]))
+    search_date = _state.get("search_current_date") or _state["current_date"]
+    _search_handler.set_date(_parse_date(search_date))
 
 
 # ── embedding client ───────────────────────────────────────────────────
@@ -200,20 +205,22 @@ def search_news(
         from_date: Optional earliest article date (YYYY-MM-DD).
         to_date: Optional latest article date (YYYY-MM-DD). Capped to sim date.
     """
-    _ensure_search()
+    with contextlib.redirect_stdout(sys.stderr):
+        _ensure_search()
 
     if _search_handler is None or not _search_handler.is_available:
         return "Search is not available for this simulation run."
 
     max_results = min(max_results, 10)
     search_type = _state.get("search_type", "hybrid")
-    result_text, err = _search_handler.search(
-        query,
-        max_results=max_results,
-        search_type=search_type,
-        min_date=_parse_date(from_date),
-        max_date=_parse_date(to_date),
-    )
+    with contextlib.redirect_stdout(sys.stderr):
+        result_text, err = _search_handler.search(
+            query,
+            max_results=max_results,
+            search_type=search_type,
+            min_date=_parse_date(from_date),
+            max_date=_parse_date(to_date),
+        )
     if err:
         return f"Search error: {err}"
     return result_text or "No articles found matching your query."
@@ -265,6 +272,16 @@ def submit_forecasts(question_id: str, outcomes: dict[str, float]) -> str:
     with open(pred_path, "w") as f:
         json.dump(merged, f, default=str)
 
+    if _state.get("submit_ends_session"):
+        signal_dir = _internal_dir / "signals"
+        signal_dir.mkdir(parents=True, exist_ok=True)
+        _write_json(signal_dir / f"next_day_{cur_date}.json", {
+            "predictions": merged,
+            "date": cur_date,
+            "reason": "submit_ends_session",
+        })
+        return f"Prediction recorded for question {question_id}: {outcomes}. Session complete."
+
     return f"Prediction recorded for question {question_id}: {outcomes}"
 
 
@@ -283,6 +300,9 @@ def next_day() -> str:
         "predictions": _today_predictions,
         "date": cur_date,
     })
+
+    if _state.get("next_day_returns_immediately"):
+        return "Day complete. The simulator will advance after this session exits."
 
     # Poll for continue signal, consuming it so the next next_day call blocks.
     poll_interval = 0.5
@@ -442,6 +462,8 @@ def main():
         default="v1",
         help="How much guidance next_day appends: v1 (minimal), v2 (adds still-active nudge), v3 (v2 + imminent reminder).",
     )
+    parser.add_argument("--enabled-tools", default="",
+                        help="Comma-separated MCP tools to expose. Empty exposes all tools.")
     args = parser.parse_args()
     _cli_args = args
     _handholding_version = args.handholding_version
@@ -459,6 +481,12 @@ def main():
     # Load state (lightweight — just reads a JSON file).
     _reload_state()
     _search_cutoff_days = _state.get("search_cutoff_days", 0)
+
+    enabled_tools = {name.strip() for name in args.enabled_tools.split(",") if name.strip()}
+    if enabled_tools:
+        for tool_name in list(mcp._tool_manager._tools.keys()):
+            if tool_name not in enabled_tools:
+                mcp.remove_tool(tool_name)
 
     # Start the MCP server IMMEDIATELY — heavy init happens on first tool call.
     mcp.run()

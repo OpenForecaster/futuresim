@@ -417,6 +417,10 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
             from agents.minimalHarnessAgent.agent import MinimalHarnessAgent, MinimalHarnessConfig
             agent_id = f"minimalHarness_{model.replace('/', '_').replace('.', '')}_{i+1:03d}"
             cc_search_cutoff = agent_def.get('search_cutoff_days', defaults.get('search_cutoff_days', getattr(args, 'search_cutoff_days', 0)))
+            cc_freeze_search_after_start = _as_bool(agent_def.get(
+                'freeze_search_after_start',
+                defaults.get('freeze_search_after_start', getattr(args, 'freeze_search_after_start', False))
+            ))
             harness_backend = agent_def.get('harness_backend', defaults.get('harness_backend', 'claude_code'))
             openrouter_api_key = ''
             if harness_backend == 'opencode':
@@ -449,6 +453,10 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
                 embedding_model=getattr(args, 'embedding_model', '') or '',
                 search_type=agent_def.get('search_type', defaults.get('search_type', 'hybrid')),
                 search_cutoff_days=cc_search_cutoff,
+                freeze_search_after_start=cc_freeze_search_after_start,
+                resolution_guard=_optional_int(
+                    agent_def.get('resolution_guard', defaults.get('resolution_guard', getattr(args, 'resolution_guard', None)))
+                ),
                 articles_base=config.get('articles_base', os.environ.get('FSIM_ARTICLES_BASE', '')),
                 start_date=args.sim_start_date,
                 end_date=getattr(args, 'end_date', None),
@@ -479,6 +487,18 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
                 timegap_days=int(agent_def.get(
                     'timegap_days',
                     defaults.get('timegap_days', config.get('timegap_days', 1)),
+                )),
+                warmup_parallelism=int(agent_def.get(
+                    'warmup_parallelism',
+                    defaults.get('warmup_parallelism', config.get('warmup_parallelism', 1)),
+                )),
+                static_search_dir=agent_def.get(
+                    'static_search_dir',
+                    defaults.get('static_search_dir', config.get('static_search_dir', '')),
+                ),
+                static_search_max_results=int(agent_def.get(
+                    'static_search_max_results',
+                    defaults.get('static_search_max_results', config.get('static_search_max_results', 5)),
                 )),
                 claude_code_resume=bool(
                     agent_def.get('claude_code_resume', defaults.get('claude_code_resume', False))
@@ -946,7 +966,6 @@ def main():
                        help="GPU memory fraction for matcher model (0.0-1.0, default 0.3)")
     parser.add_argument("--search_cutoff_days", type=int, default=0,
                        help="Days before current date to cutoff search results (default 0)")
-    
     # Config file
     parser.add_argument("--config", help="Path to YAML configuration file to load arguments from")
     
@@ -1646,12 +1665,13 @@ def main():
             warmup_interface.source_name = getattr(env, 'source_name', 'openforesight')
             warmup_interface.source_context = getattr(env, 'source_context', '')
             
-            # Only AllQAgent uses the explicit "warmup" (day-0 all-questions sweep).
-            # AllQDailyAgent ("allqd") should behave identically on every day, so we do not
-            # run a separate phase 0 for it.
+            # Agents with an explicit warmup method use the pre-simulation
+            # all-questions sweep. AllQDailyAgent ("allqd") should behave
+            # identically on every day, so we do not run a separate phase 0 for it.
             for agent in agents:
-                if isinstance(agent, AllQAgent) and not isinstance(agent, AllQDailyAgent):
-                    agent.warmup(warmup_interface, env.current_date)
+                warmup_fn = getattr(agent, "warmup", None)
+                if callable(warmup_fn) and not isinstance(agent, AllQDailyAgent):
+                    warmup_fn(warmup_interface, env.current_date)
         else:
             print("  No active questions for warmup.")
 

@@ -195,6 +195,7 @@ class VLLMInference:
                  enable_prefix_caching: bool = True,
                  cuda_visible_devices: Optional[str] = None,
                  language_model_only: bool = False,
+                 enforce_eager: bool = False,
                  **kwargs):
         """
         Initialize VLLM inference.
@@ -215,6 +216,7 @@ class VLLMInference:
                 repeated chat prefixes. Good default for agent/matcher chat
                 servers; keep disabled for embedding/pooling servers.
             language_model_only: Skip vision encoder for multimodal models (vLLM >=0.12).
+            enforce_eager: Disable vLLM torch.compile/CUDA graph execution.
             **kwargs: Additional args (ignored for server mode)
         """
         global _NEXT_PORT, _VLLM_SERVERS
@@ -246,6 +248,7 @@ class VLLMInference:
         self.enable_prefix_caching = bool(enable_prefix_caching)
         self.cuda_visible_devices = cuda_visible_devices
         self.language_model_only = language_model_only
+        self.enforce_eager = bool(enforce_eager)
 
         # GPT-OSS uses the Harmony format. vLLM supports it, but tool calling is
         # expected via /v1/responses rather than /v1/chat/completions.
@@ -275,6 +278,7 @@ class VLLMInference:
                     and (info.get('tool_call_parser') or None) == self.tool_call_parser
                     and (info.get('tool_parser_plugin') or None) == self.tool_parser_plugin
                     and bool(info.get('enable_prefix_caching', False)) == self.enable_prefix_caching
+                    and bool(info.get('enforce_eager', False)) == self.enforce_eager
                 ):
                     self._port = int(port)
                     self._server_started = True
@@ -338,6 +342,9 @@ class VLLMInference:
             if self.language_model_only:
                 cmd += ["--language-model-only"]
 
+            if self.enforce_eager:
+                cmd += ["--enforce-eager"]
+
             if self.enable_prefix_caching:
                 cmd += ["--enable-prefix-caching"]
         
@@ -383,6 +390,7 @@ class VLLMInference:
                     'tool_call_parser': self.tool_call_parser,
                     'tool_parser_plugin': self.tool_parser_plugin,
                     'enable_prefix_caching': self.enable_prefix_caching,
+                    'enforce_eager': self.enforce_eager,
                 }
         
             # Immediately check if process died
@@ -433,6 +441,7 @@ class VLLMInference:
                             'tool_call_parser': self.tool_call_parser,
                             'tool_parser_plugin': self.tool_parser_plugin,
                             'enable_prefix_caching': self.enable_prefix_caching,
+                            'enforce_eager': self.enforce_eager,
                         }
                     time.sleep(0.5)
                     if proc.poll() is not None:

@@ -36,8 +36,8 @@ OUTPUT_DIR="${FSIM_NEWS_LANCEDB_DIR:-${NEWS_BASE}/deduped_articles/lance}"
 MODEL="Qwen3-Embedding-8B"
 
 # Date range
-START_DATE="2023-01-01"
-END_DATE="2026-03-31"
+START_DATE="${FSIM_NEWS_START_DATE:-2023-01-01}"
+END_DATE="${FSIM_NEWS_END_DATE:-2026-03-31}"
 
 # Activate environment
 source "${REPO_DIR}/.venv/bin/activate"

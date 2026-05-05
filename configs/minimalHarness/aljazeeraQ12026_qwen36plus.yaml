@@ -34,6 +34,7 @@ defaults:
   harness_backend: "opencode"
   opencode_path: "/home/nchandak/.opencode/bin/opencode"
   handholding_version: "v3"
+  sandbox: true
 
 resources:
   gpus: 1

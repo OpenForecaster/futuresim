@@ -7,6 +7,7 @@ class _DummySearchBuilder:
     def __init__(self):
         self._rows = []
         self.last_prefilter = None
+        self.last_limit = None
 
     def vector(self, _v):
         return self
@@ -19,10 +20,16 @@ class _DummySearchBuilder:
         return self
 
     def limit(self, _n):
+        self.last_limit = _n
         return self
 
     def to_list(self):
         return self._rows
+
+
+class _RaisingSearchBuilder(_DummySearchBuilder):
+    def to_list(self):
+        raise PermissionError("fts denied")
 
 
 class _DummyTable:
@@ -157,9 +164,10 @@ def test_hybrid_where_uses_prefilter_false_workaround():
     assert len(tool._table.calls) == 1
     assert tool._table.calls[0]["kwargs"].get("query_type") == "hybrid"
     assert tool._table.calls[0]["builder"].last_prefilter is False
+    assert tool._table.calls[0]["builder"].last_limit == 5
 
 
-def test_keyword_where_uses_prefilter_false_default():
+def test_keyword_where_uses_prefilter_true_default():
     tool = _mk_tool(_DummyEmbedModelGood())
     out = tool.search(
         "test query", max_results=5, min_date=date(2025, 4, 1), max_date=date(2025, 4, 24), search_type="keyword"
@@ -167,4 +175,35 @@ def test_keyword_where_uses_prefilter_false_default():
     assert out == []
     assert len(tool._table.calls) == 1
     assert tool._table.calls[0]["kwargs"].get("query_type") == "fts"
-    assert tool._table.calls[0]["builder"].last_prefilter is False
+    assert tool._table.calls[0]["builder"].last_prefilter is True
+    assert tool._table.calls[0]["builder"].last_limit == 5
+
+
+def test_hybrid_fallback_semantic_uses_true_prefilter():
+    table = _DummyTable()
+
+    def search(*args, **kwargs):
+        if kwargs.get("query_type") == "hybrid":
+            builder = _RaisingSearchBuilder()
+        else:
+            builder = _DummySearchBuilder()
+            builder._rows = [{
+                "article_id": "a1",
+                "title": "semantic hit",
+                "source": "example",
+                "content": "snippet",
+            }]
+        table.calls.append({"args": args, "kwargs": kwargs, "builder": builder})
+        return builder
+
+    table.search = search
+    tool = _mk_tool_with_table(_DummyEmbedModelGood(), table)
+
+    out = tool.search("test query", max_results=5, max_date=date(2025, 4, 24), search_type="hybrid")
+
+    assert len(out) == 1
+    assert out[0].article_id == "a1"
+    assert table.calls[0]["kwargs"].get("query_type") == "hybrid"
+    assert table.calls[0]["builder"].last_prefilter is False
+    assert table.calls[1]["args"] == ([0.1, 0.2, 0.3],)
+    assert table.calls[1]["builder"].last_prefilter is True
