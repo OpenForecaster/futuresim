@@ -63,6 +63,15 @@ _cli_args = None              # Parsed CLI args, used by _ensure_search()
 _handholding_version: str = "v1"
 _HANDHOLDING_VERSIONS = ("v1", "v2", "v3")
 
+# active_memory2 mode: server-side memory store. Lazily instantiated on first
+# memory tool call or next_day, then persisted read-only for that session date.
+_memory_tools_enabled: bool = False
+_agent_id: str = "agent"
+_active_memory = None  # type: ignore[assignment]
+_memory_phase_active: bool = False
+_session_touched_qids: set[str] = set()
+_session_forecast_qids: set[str] = set()
+
 # Cumulative scoring tracker (mirrors BasicAgent's FeedbackHandler).
 _cumulative = {
     "brier_sum": 0.0,
@@ -75,9 +84,11 @@ _cumulative = {
 
 def _reload_state() -> None:
     """Re-read state.json from internal dir and update search handler date."""
-    global _state, _today_predictions
+    global _state, _today_predictions, _session_touched_qids, _session_forecast_qids
     _state = _read_json(_internal_dir / "state.json")
     _today_predictions = []
+    _session_touched_qids = set()
+    _session_forecast_qids = set()
     if _search_handler is not None:
         search_date = _state.get("search_current_date") or _state["current_date"]
         _search_handler.set_date(_parse_date(search_date))
@@ -188,6 +199,162 @@ class _VLLMEmbeddingClient:
         return [_EmbeddingOutput(item["embedding"]) for item in data["data"]]
 
 
+# ── active_memory2 helpers ─────────────────────────────────────────────
+
+def _ensure_active_memory():
+    """Lazy-init the server-side ActiveMemory and load the prior day's snapshot.
+
+    Called from every memory tool and from next_day before saving. Returns the
+    instance, or None when memory tools aren't enabled.
+    """
+    global _active_memory
+    if not _memory_tools_enabled:
+        return None
+    if _active_memory is not None:
+        return _active_memory
+
+    from agents.utils.memory import ActiveMemory
+
+    _active_memory = ActiveMemory(_agent_id, memory_dir=str(_workspace), max_entries=500)
+    cur = _parse_date(_state.get("current_date"))
+    if cur is not None:
+        _active_memory.set_date(cur)
+    return _active_memory
+
+
+def _save_active_memory_for_today() -> None:
+    """Persist mem.csv + meta.yaml for the current sim date and chmod read-only.
+
+    No-op when memory tools are disabled.
+    Files are written to workspace/memory/{current_date}/{mem.csv,meta.yaml};
+    after writing, both files are chmod'd to 0o444 and the date directory to
+    0o555 so the harness physically can't overwrite or delete the snapshot.
+    """
+    am = _ensure_active_memory()
+    if am is None:
+        return
+    cur = _parse_date(_state.get("current_date"))
+    if cur is None:
+        return
+    am.save(cur)
+    date_dir = Path(_workspace) / "memory" / str(cur)
+    if not date_dir.exists():
+        return
+    for fname in ("mem.csv", "meta.yaml"):
+        f = date_dir / fname
+        if f.exists():
+            try:
+                os.chmod(f, 0o444)
+            except OSError:
+                pass
+    try:
+        os.chmod(date_dir, 0o555)
+    except OSError:
+        pass
+
+
+def _build_resolution_recap() -> str:
+    """Concise recap of resolved questions available to the memory phase."""
+    events = _state.get("resolution_events", []) or []
+    if not events:
+        return "No questions resolved since your last session."
+
+    lines = ["Questions resolved since your last session:"]
+    for ev in events:
+        qid = ev.get("qid", ev.get("question_id", "?"))
+        title = ev.get("title", "")
+        gt = ev.get("ground_truth", "?")
+        if title:
+            lines.append(f"- Q{qid}: {title} -> {gt}")
+        else:
+            lines.append(f"- Q{qid} -> {gt}")
+    return "\n".join(lines)
+
+
+def _build_feedback_recap(previous_label: str, active_count: int, *, mutate: bool) -> str:
+    """Render AllQ-style resolved-question and cumulative-performance recap."""
+    events = _state.get("resolution_events", [])
+    new_events = [
+        ev for ev in events
+        if ev.get("qid") not in _cumulative["processed_qids"]
+    ]
+    if not new_events:
+        return ""
+
+    lines = [f"## RESULTS SINCE YOUR LAST SESSION ({previous_label})", ""]
+    brier_sum = _cumulative["brier_sum"]
+    tw_peer_sum = _cumulative["tw_peer_sum"]
+    accuracy_count = _cumulative["accuracy_count"]
+    resolved_count = _cumulative["resolved_count"]
+
+    for ev in new_events:
+        qid = ev.get("qid", ev.get("question_id", "?"))
+        title = ev.get("title", "")
+        gt = ev.get("ground_truth", "?")
+        agents_data = ev.get("agents", {})
+        my_stats = None
+        for _, stats in agents_data.items():
+            if isinstance(stats, dict):
+                my_stats = stats
+                break
+
+        if my_stats:
+            brier = float(my_stats.get("brier", 0))
+            tw_peer = float(my_stats.get("tw_peer", 0))
+            best_outcome = my_stats.get("best_outcome", "?")
+            best_prob = float(my_stats.get("best_prob", 0))
+            is_accurate = my_stats.get("is_accurate", False)
+            brier_sum += brier
+            tw_peer_sum += tw_peer
+            resolved_count += 1
+            if is_accurate:
+                accuracy_count += 1
+
+            agent_preds = _state.get("agent_predictions", {})
+            pred_dist = agent_preds.get(str(qid), {})
+            if pred_dist:
+                dist_items = sorted(pred_dist.items(), key=lambda kv: -kv[1])
+                dist_str = ", ".join(f"{o}: {p:.2f}" for o, p in dist_items)
+                dist_str = "{" + dist_str + "}"
+            else:
+                dist_str = f"{{{best_outcome}: {best_prob:.2f}}}"
+
+            lines.append(
+                f"- \"{title}\"\n"
+                f"  Your prediction distribution: {dist_str} | Truth: {gt}\n"
+                f"  Brier: {brier:+.2f} | TW-Score: {tw_peer:+.2f}"
+            )
+        else:
+            resolved_count += 1
+            lines.append(f"- \"{title}\" → {gt}")
+
+        if mutate:
+            _cumulative["processed_qids"].add(qid)
+
+    denom = resolved_count + active_count
+    total_preds = _state.get("total_predictions", 0)
+    if denom > 0:
+        avg_brier = brier_sum / denom
+        accuracy = accuracy_count / denom * 100
+        lines.extend([
+            "",
+            "## YOUR CUMULATIVE PERFORMANCE TILL TODAY",
+            f"- Total Predictions: {total_preds} ({resolved_count} resolved, {active_count} active)",
+            f"- accuracy: {accuracy:.1f}% | brier skill score: {avg_brier:.3f} | time weighted score: {tw_peer_sum:.2f}",
+            "  accuracy = fraction of ALL questions (resolved + active) where your top outcome matched the truth (0 credit for questions you did not predict or that have not resolved); "
+            "brier skill score = mean brier skill score across ALL questions (0 for questions you did not predict or that have not resolved); "
+            "time weighted score = sum of brier skill scores across all resolved questions, across all days you held your respective predictions",
+        ])
+
+    if mutate:
+        _cumulative["brier_sum"] = brier_sum
+        _cumulative["tw_peer_sum"] = tw_peer_sum
+        _cumulative["accuracy_count"] = accuracy_count
+        _cumulative["resolved_count"] = resolved_count
+
+    return "\n".join(lines)
+
+
 # ── tools ──────────────────────────────────────────────────────────────
 
 @mcp.tool()
@@ -234,18 +401,49 @@ def submit_forecasts(question_id: str, outcomes: dict[str, float]) -> str:
         question_id: The qid of the question to predict on.
         outcomes: A dict mapping outcome strings to probabilities, e.g. {"Yes": 0.7, "No": 0.3}. Must sum to <= 1.0.
     """
-    max_outcomes = _state.get("max_outcomes_per_question", 5)
+    if _memory_tools_enabled and _memory_phase_active:
+        return (
+            "Error: you are in the memory-update phase. Do not submit more forecasts now; "
+            "update memory and call next_day() again to advance."
+        )
+
+    question_id = str(question_id).strip()
+    active_qids = {
+        str(q.get("qid"))
+        for q in _state.get("questions", [])
+        if isinstance(q, dict) and q.get("qid") is not None
+    }
+    if active_qids and question_id not in active_qids:
+        return f"Error: question_id {question_id!r} is not an active question in market.csv."
+
+    if not isinstance(outcomes, dict) or not outcomes:
+        return "Error: outcomes must be a non-empty object mapping outcome names to probabilities."
+
+    try:
+        max_outcomes = int(_state.get("max_outcomes_per_question", 5) or 5)
+    except (TypeError, ValueError):
+        max_outcomes = 5
     if len(outcomes) > max_outcomes:
         return f"Error: {len(outcomes)} outcomes exceeds maximum of {max_outcomes} per question."
-    total = sum(outcomes.values())
+
+    normalized_outcomes = {}
+    for outcome, prob in outcomes.items():
+        try:
+            value = float(prob)
+        except (TypeError, ValueError):
+            return f"Error: probability for {outcome!r} must be numeric."
+        if value < 0 or value > 1:
+            return f"Error: probability {value} for '{outcome}' is out of [0, 1] range."
+        normalized_outcomes[str(outcome)] = value
+
+    total = sum(normalized_outcomes.values())
     if total > 1.0 + 1e-6:
         return f"Error: probabilities sum to {total:.4f} which exceeds 1.0."
-    for outcome, prob in outcomes.items():
-        if prob < 0 or prob > 1:
-            return f"Error: probability {prob} for '{outcome}' is out of [0, 1] range."
 
-    pred = {"question_id": question_id, "outcomes": outcomes}
+    pred = {"question_id": question_id, "outcomes": normalized_outcomes}
     _today_predictions.append(pred)
+    _session_touched_qids.add(question_id)
+    _session_forecast_qids.add(question_id)
 
     # Merge with any predictions already in the file (e.g. written via Bash).
     # Later submissions for the same qid overwrite earlier ones.
@@ -280,9 +478,9 @@ def submit_forecasts(question_id: str, outcomes: dict[str, float]) -> str:
             "date": cur_date,
             "reason": "submit_ends_session",
         })
-        return f"Prediction recorded for question {question_id}: {outcomes}. Session complete."
+        return f"Prediction recorded for question {question_id}: {normalized_outcomes}. Session complete."
 
-    return f"Prediction recorded for question {question_id}: {outcomes}"
+    return f"Prediction recorded for question {question_id}: {normalized_outcomes}"
 
 
 @mcp.tool()
@@ -292,7 +490,35 @@ def next_day() -> str:
     Returns context for the new day: new date, resolution events, and whether the simulation is complete.
     Call this only after submitting predictions for all active questions.
     """
+    global _memory_phase_active
     cur_date = _state["current_date"]
+
+    if _memory_tools_enabled and not _memory_phase_active:
+        from agents.minimalHarnessAgent.prompt_active_memory2 import (
+            build_memory_update_prompt,
+        )
+
+        am = _ensure_active_memory()
+        _memory_phase_active = True
+        if am is None:
+            return (
+                "Entered memory-update phase. Use memory tools to update notes, then "
+                "call next_day() again to advance."
+            )
+        return build_memory_update_prompt(
+            current_date=_parse_date(cur_date) or date.today(),
+            mem_summary=am.mem_summary(expanded_qids=_session_touched_qids),
+            meta_index=am.get_index() or "",
+            mem_count=am.mem_count,
+            meta_count=am.entry_count,
+            max_meta_entries=am._max_entries,
+            resolution_recap=_build_feedback_recap(cur_date, len(_state.get("questions", [])), mutate=False),
+            touched_qids=sorted(_session_touched_qids),
+        )
+
+    # active_memory2: persist the day's mem.csv + meta.yaml (and chmod read-only)
+    # before the driver advances. No-op when memory tools aren't enabled.
+    _save_active_memory_for_today()
 
     signal_dir = _internal_dir / "signals"
     signal_dir.mkdir(parents=True, exist_ok=True)
@@ -313,6 +539,7 @@ def next_day() -> str:
             cont = _read_json(p)
             p.unlink(missing_ok=True)
             _reload_state()
+            _memory_phase_active = False
             status = cont.get("status", "day_advanced")
             new_date = _state.get("current_date", "unknown")
             new_date_obj = _parse_date(new_date)
@@ -351,87 +578,9 @@ def next_day() -> str:
                 )
                 response_parts.append(imminent_msg)
 
-            # --- Per-question resolution feedback with scores ---
-            events = _state.get("resolution_events", [])
-            new_events = [
-                ev for ev in events
-                if ev.get("qid") not in _cumulative["processed_qids"]
-            ]
-            if new_events:
-                response_parts.append(
-                    f"\n## RESULTS SINCE YOUR LAST SESSION ({cur_date} -> {new_date})\n"
-                )
-                for ev in new_events:
-                    qid = ev.get("qid", ev.get("question_id", "?"))
-                    title = ev.get("title", "")
-                    gt = ev.get("ground_truth", "?")
-                    _cumulative["processed_qids"].add(qid)
-                    # Count every resolved question toward the denominator, so
-                    # accuracy/brier are computed across the whole question set
-                    # (unpredicted questions contribute 0 to both).
-                    _cumulative["resolved_count"] += 1
-
-                    # Extract per-agent scoring from the event.
-                    agents_data = ev.get("agents", {})
-                    my_stats = None
-                    # Find this agent's stats (there should be only one agent).
-                    for aid, stats in agents_data.items():
-                        if isinstance(stats, dict):
-                            my_stats = stats
-                            break
-
-                    if my_stats:
-                        brier = float(my_stats.get("brier", 0))
-                        tw_peer = float(my_stats.get("tw_peer", 0))
-                        best_outcome = my_stats.get("best_outcome", "?")
-                        best_prob = float(my_stats.get("best_prob", 0))
-                        is_accurate = my_stats.get("is_accurate", False)
-                        _cumulative["brier_sum"] += brier
-                        _cumulative["tw_peer_sum"] += tw_peer
-                        if is_accurate:
-                            _cumulative["accuracy_count"] += 1
-
-                        # Show full prediction distribution (matching BasicAgent).
-                        agent_preds = _state.get("agent_predictions", {})
-                        pred_dist = agent_preds.get(str(qid), {})
-                        if pred_dist:
-                            dist_items = sorted(pred_dist.items(), key=lambda kv: -kv[1])
-                            dist_str = ", ".join(f"{o}: {p:.2f}" for o, p in dist_items)
-                            dist_str = "{" + dist_str + "}"
-                        else:
-                            dist_str = f"{{{best_outcome}: {best_prob:.2f}}}"
-
-                        verdict = "✓ CORRECT" if is_accurate else "✗ WRONG"
-                        response_parts.append(
-                            f"- \"{title}\"\n"
-                            f"  Your prediction distribution: {dist_str} | Truth: {gt}\n"
-                            f"  Brier: {brier:+.2f} | TW-Score: {tw_peer:+.2f}"
-                        )
-                    else:
-                        response_parts.append(f"- \"{title}\" → {gt}")
-
-                # --- Cumulative performance summary ---
-                # Denominator is ALL questions: resolved + currently active.
-                # Unpredicted (and still-active) questions contribute 0.
-                rc = _cumulative["resolved_count"]
-                active_count = len(_state.get("questions", []))
-                denom = rc + active_count
-                total_preds = _state.get("total_predictions", 0)
-                if denom > 0:
-                    avg_brier = _cumulative["brier_sum"] / denom
-                    accuracy = _cumulative["accuracy_count"] / denom * 100
-                    response_parts.append(
-                        f"\n## YOUR CUMULATIVE PERFORMANCE TILL TODAY\n"
-                        f"- Total Predictions: {total_preds} ({rc} resolved, {active_count} active)\n"
-                        f"- accuracy: {accuracy:.1f}% | brier skill score: {avg_brier:.3f} | "
-                        f"time weighted score: {_cumulative['tw_peer_sum']:.2f}\n"
-                        f"  accuracy = fraction of ALL questions (resolved + active) where your top "
-                        f"outcome matched the truth (0 credit for questions you did not predict or "
-                        f"that have not resolved); "
-                        f"brier skill score = mean brier skill score across ALL questions "
-                        f"(0 for questions you did not predict or that have not resolved); "
-                        f"time weighted score = sum of brier skill scores across all resolved questions, across all days you held your respective predictions"
-                    )
+            feedback_recap = _build_feedback_recap(f"{cur_date} -> {new_date}", len(_state.get("questions", [])), mutate=True)
+            if feedback_recap:
+                response_parts.append("\n" + feedback_recap)
 
             if status == "simulation_complete":
                 response_parts.append("\nSimulation is complete. No more days to process.")
@@ -443,10 +592,122 @@ def next_day() -> str:
         time.sleep(poll_interval)
 
 
+# ── active_memory2 memory tools ────────────────────────────────────────
+
+def _register_memory_tools() -> None:
+    """Register the 7 ActiveMemory MCP tools. Called from main() only when
+    --enable-memory-tools is set, so the tool list stays minimal otherwise.
+
+    Mirrors the chat-tool surface that AllQAgent uses with ActiveMemory:
+      mem_add / mem_update / mem_delete           — per-question mem_df rows
+      memory_retrieve / memory_new / memory_update / memory_delete — meta-insights
+    All mutations stay in-memory until next_day, when the day's snapshot is
+    written to workspace/memory/{date}/{mem.csv,meta.yaml} and chmod'd 0o444.
+    """
+
+    @mcp.tool()
+    def mem_add(qid: str, question: str, memory: str, category: str = "") -> str:
+        """Add or upsert a per-question memory entry in mem_df.
+
+        Args:
+            qid: Question ID.
+            question: Short question title for context.
+            memory: Reasoning, evidence, or prediction rationale (truncated to 1000 chars).
+            category: Optional topic category (e.g. 'politics', 'sports').
+        """
+        am = _ensure_active_memory()
+        if am is None:
+            return "Error: memory tools are not enabled for this run."
+        am.mem_add(qid=qid, question=question, memory=memory, category=category or "")
+        _session_touched_qids.add(str(qid).strip())
+        return f"mem_df row {qid!r}: added/updated."
+
+    @mcp.tool()
+    def mem_update(qid: str, memory: str, category: str = "") -> str:
+        """Update an existing mem_df entry's memory (and optionally category).
+
+        If the qid doesn't exist yet, this falls back to an add with an empty question.
+        """
+        am = _ensure_active_memory()
+        if am is None:
+            return "Error: memory tools are not enabled for this run."
+        am.mem_update(qid=qid, memory=memory, category=(category or None))
+        _session_touched_qids.add(str(qid).strip())
+        return f"mem_df row {qid!r}: updated."
+
+    @mcp.tool()
+    def mem_delete(qid: str) -> str:
+        """Delete a per-question mem_df entry by qid."""
+        am = _ensure_active_memory()
+        if am is None:
+            return "Error: memory tools are not enabled for this run."
+        _session_touched_qids.add(str(qid).strip())
+        if am.mem_delete(qid):
+            return f"mem_df row {qid!r}: deleted."
+        return f"mem_df row {qid!r}: not found."
+
+    @mcp.tool()
+    def memory_retrieve(name: str) -> str:
+        """Fetch the full content of a meta-insight entry by name."""
+        am = _ensure_active_memory()
+        if am is None:
+            return "Error: memory tools are not enabled for this run."
+        result = am.retrieve(name)
+        if result is None:
+            return f"Meta-insight {name!r}: not found."
+        return result
+
+    @mcp.tool()
+    def memory_new(name: str, description: str, content: str) -> str:
+        """Create a new meta-insight entry (cross-question lessons / patterns).
+
+        Args:
+            name: Short, lowercase-hyphenated name (primary key).
+            description: One-line summary shown in the index.
+            content: Full insight, reasoning chain, or pattern.
+        """
+        am = _ensure_active_memory()
+        if am is None:
+            return "Error: memory tools are not enabled for this run."
+        try:
+            stored = am.add_entry(name=name, description=description, content=content)
+            return f"Meta-insight {stored!r}: created."
+        except ValueError as e:
+            return f"Error: {e}"
+
+    @mcp.tool()
+    def memory_update(name: str, description: str = "", content: str = "") -> str:
+        """Update an existing meta-insight entry. Provide only the fields you want to change."""
+        am = _ensure_active_memory()
+        if am is None:
+            return "Error: memory tools are not enabled for this run."
+        kwargs = {}
+        if description:
+            kwargs["description"] = description
+        if content:
+            kwargs["content"] = content
+        if not kwargs:
+            return "Error: provide at least one of description or content."
+        if not am.update_entry(name, **kwargs):
+            return f"Meta-insight {name!r}: not found."
+        return f"Meta-insight {name!r}: updated."
+
+    @mcp.tool()
+    def memory_delete(name: str) -> str:
+        """Delete a meta-insight entry by name."""
+        am = _ensure_active_memory()
+        if am is None:
+            return "Error: memory tools are not enabled for this run."
+        if not am.delete_entry(name):
+            return f"Meta-insight {name!r}: not found."
+        return f"Meta-insight {name!r}: deleted."
+
+
 # ── main ───────────────────────────────────────────────────────────────
 
 def main():
     global _workspace, _internal_dir, _search_cutoff_days, _cli_args, _handholding_version
+    global _memory_tools_enabled, _agent_id
 
     parser = argparse.ArgumentParser(description="Forecast-sim MCP server")
     parser.add_argument("--workspace", required=True, help="Path to CC workspace (predictions/)")
@@ -464,9 +725,17 @@ def main():
     )
     parser.add_argument("--enabled-tools", default="",
                         help="Comma-separated MCP tools to expose. Empty exposes all tools.")
+    parser.add_argument("--agent-id", default="agent",
+                        help="Agent ID, used as the ActiveMemory owner label when --enable-memory-tools is set.")
+    parser.add_argument("--enable-memory-tools", action="store_true",
+                        help="Register MCP memory tools (mem_add/update/delete + memory_retrieve/new/update/delete) "
+                             "for prompt_mode='active_memory2'. Persists workspace/memory/{date}/{mem.csv,meta.yaml} "
+                             "on next_day and chmods the snapshot read-only.")
     args = parser.parse_args()
     _cli_args = args
     _handholding_version = args.handholding_version
+    _memory_tools_enabled = args.enable_memory_tools
+    _agent_id = args.agent_id
 
     # Only set repo-root on sys.path here (lightweight).
     # All heavy imports (lancedb etc.) are deferred to _ensure_search().
@@ -481,6 +750,11 @@ def main():
     # Load state (lightweight — just reads a JSON file).
     _reload_state()
     _search_cutoff_days = _state.get("search_cutoff_days", 0)
+
+    # Register the optional memory tools BEFORE mcp.run() so they appear in the
+    # initial tool-list handshake.
+    if _memory_tools_enabled:
+        _register_memory_tools()
 
     enabled_tools = {name.strip() for name in args.enabled_tools.split(",") if name.strip()}
     if enabled_tools:

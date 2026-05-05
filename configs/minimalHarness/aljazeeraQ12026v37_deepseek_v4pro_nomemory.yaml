@@ -3,6 +3,11 @@
 # memory/notes/SKILLS.md/MEMORY.md so the agent has no instruction to maintain
 # persistent state. (Workspace bash/read/write tools still work.)
 #
+# As of the per-day-respawn fix, no_memory + claude_code now spawns a fresh
+# claude session each simulation day (no --resume, no in-context carryover),
+# mirroring codex no_memory's per-day fresh-thread semantics. Mirrors the
+# codex_gpt55_nomemory.yaml flag set as closely as possible.
+#
 # Usage:
 #   CUDA_VISIBLE_DEVICES=<idx> python scripts/test_basic_agent.py \
 #     --config configs/minimalHarness/aljazeeraQ12026v37_deepseek_v4pro_nomemory.yaml
@@ -35,9 +40,13 @@ defaults:
   provider: "none"
   scaffold: "minimalHarness"
   sandbox: true
+  network_isolation: true
+  # no_memory => fresh claude session per day (no --resume, no carryover) AND
+  # the system prompt does not advertise memory/notes/SKILLS.md.
   prompt_mode: "no_memory"
+  claude_code_resume: false
   anthropic_base_url: "https://api.deepseek.com/anthropic"
-  handholding_version: "v3"
+  handholding_version: "v1"
 
 resources:
   gpus: 1

@@ -34,6 +34,8 @@ defaults:
   harness_backend: "opencode"
   opencode_path: "/home/nchandak/.opencode/bin/opencode"
   handholding_version: "v3"
+  sandbox: true
+  sandbox_proc_mode: "host_ro"  # Condor execute nodes reject bwrap --proc
 
 resources:
   gpus: 1

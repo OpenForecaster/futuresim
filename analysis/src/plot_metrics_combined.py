@@ -12,6 +12,8 @@ except ImportError:
     print("Error: matplotlib is not installed. Please install it using 'pip install matplotlib'.")
     sys.exit(1)
 
+import plot_config  # noqa: F401  (applies project-wide science+serif style)
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Plot all daily metrics in a single combined vertical figure.")

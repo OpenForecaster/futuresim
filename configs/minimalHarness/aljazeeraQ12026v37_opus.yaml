@@ -33,6 +33,9 @@ defaults:
   sandbox: true
   network_isolation: true
   handholding_version: "v1"
+  # Some Condor nodes reject `bwrap --proc`; host_ro keeps filesystem
+  # sandboxing intact while binding /proc read-only.
+  sandbox_proc_mode: "host_ro"
 
 resources:
   gpus: 1

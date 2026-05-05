@@ -447,6 +447,7 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
                         anthropic_auth_token = os.environ.get('DEEPSEEK_API_KEY', '') or os.environ.get('ANTHROPIC_AUTH_TOKEN', '')
                 else:
                     anthropic_auth_token = os.environ.get('ANTHROPIC_AUTH_TOKEN', '')
+            prompt_mode = str(agent_def.get('prompt_mode', defaults.get('prompt_mode', 'default')))
             cc_config = MinimalHarnessConfig(
                 model=model,
                 search_db=getattr(args, 'search_db', '') or '',
@@ -468,13 +469,13 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
                 codex_path=agent_def.get('codex_path', defaults.get('codex_path', 'codex')),
                 reasoning_effort=agent_def.get('reasoning_effort', defaults.get('reasoning_effort', 'high')),
                 codex_resume=bool(agent_def.get('codex_resume', defaults.get('codex_resume', False))),
-                prompt_mode=str(agent_def.get('prompt_mode', defaults.get('prompt_mode', 'default'))),
+                prompt_mode=prompt_mode,
                 # Active memory hardcodes the maximal-handholding shared sections
                 # (TW nudge + imminent reminder), so the recorded version is
                 # forced to v3 regardless of any YAML setting.
                 handholding_version=(
                     "v3"
-                    if str(agent_def.get('prompt_mode', defaults.get('prompt_mode', 'default'))) == "active_memory"
+                    if prompt_mode in ("active_memory", "active_memory2")
                     else str(agent_def.get(
                         'handholding_version',
                         defaults.get('handholding_version', config.get('handholding_version', 'v1')),
@@ -502,7 +503,7 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
                 )),
                 claude_code_resume=bool(
                     agent_def.get('claude_code_resume', defaults.get('claude_code_resume', False))
-                    or (args.resume and str(agent_def.get('prompt_mode', defaults.get('prompt_mode', 'default'))) != 'active_memory')
+                    or (args.resume and prompt_mode not in ("active_memory", "active_memory2"))
                 ),
                 openrouter_api_key=openrouter_api_key,
                 anthropic_base_url=anthropic_base_url,

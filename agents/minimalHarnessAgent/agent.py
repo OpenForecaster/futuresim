@@ -271,6 +271,12 @@ class MinimalHarnessConfig:
     #   session per question.
     # - "static_search": same per-question Codex warmup shape, but the driver
     #   injects one precomputed title-search result and exposes only submit.
+    # - "active_memory2": same fresh-context-per-day flow as "active_memory", but
+    #   memory is mutated through MCP tools (mem_add/mem_update/mem_delete +
+    #   memory_retrieve/memory_new/memory_update/memory_delete) instead of native
+    #   filesystem reads/writes. The MCP server owns an ActiveMemory instance,
+    #   loads the prior day's memory at startup, and persists today's mem.csv +
+    #   meta.yaml on next_day before the harness exits.
     prompt_mode: str = "default"
     # Handholding "stay-on-it" guidance level (orthogonal to prompt_mode):
     # - "v1": minimal (state before commit dadfc2f)
@@ -283,8 +289,7 @@ class MinimalHarnessConfig:
     # families default to "v3" (they need the extra nudges to keep submitting),
     # everything else defaults to "v1".
     handholding_version: Optional[str] = None
-    # Max outcomes per question — only used by prompt_mode="active_memory" today,
-    # but kept on the base config so it can be plumbed cleanly from YAML.
+    # Max outcomes per question — used by the prompt and MCP submit validation.
     max_outcomes_per_question: int = 5
     # Days between successive agent updates — passed into the cadence section
     # (used by active_memory daily prompt).
@@ -483,22 +488,23 @@ class MinimalHarnessAgent(BaseAgent):
         # config.prompt_mode == "active_memory"). Read by _start_codex.
         self._codex_initial_prompt_override: Optional[str] = None
 
-        # active_memory mode wiring.
-        if self.config.prompt_mode == "active_memory":
+        # active_memory / active_memory2 mode wiring.
+        if self.config.prompt_mode in ("active_memory", "active_memory2"):
             if self.config.harness_backend not in ("codex", "claude_code", "opencode"):
                 raise ValueError(
-                    "prompt_mode='active_memory' requires harness_backend in {'codex', 'claude_code', 'opencode'} "
+                    f"prompt_mode={self.config.prompt_mode!r} requires harness_backend in "
+                    "{'codex', 'claude_code', 'opencode'} "
                     f"(got {self.config.harness_backend!r})."
                 )
             if self.config.harness_backend == "codex" and self.config.codex_resume:
                 raise ValueError(
-                    "prompt_mode='active_memory' requires codex_resume=False; "
+                    f"prompt_mode={self.config.prompt_mode!r} requires codex_resume=False; "
                     "this mode delivers AllQ-style fresh-context-per-day with "
                     "memory files, not a persistent codex thread."
                 )
             if self.config.harness_backend == "claude_code" and self.config.claude_code_resume:
                 raise ValueError(
-                    "prompt_mode='active_memory' requires claude_code_resume=False; "
+                    f"prompt_mode={self.config.prompt_mode!r} requires claude_code_resume=False; "
                     "this mode delivers fresh-context-per-day with memory files, "
                     "not a persistent claude session."
                 )
@@ -520,7 +526,7 @@ class MinimalHarnessAgent(BaseAgent):
         elif self.config.prompt_mode not in ("default", "no_memory"):
             raise ValueError(
                 f"Unknown prompt_mode={self.config.prompt_mode!r}; "
-                "expected 'default', 'no_memory', 'active_memory', 'warmup', or 'static_search'."
+                "expected 'default', 'no_memory', 'active_memory', 'warmup', 'static_search', or 'active_memory2'."
             )
         else:
             self._feedback_handler = None
@@ -545,9 +551,12 @@ class MinimalHarnessAgent(BaseAgent):
         # shared sections (TW nudge + imminent reminder). Force the field to
         # v3 so the runtime stays consistent everywhere it's read (mcp server,
         # logs, build_system_prompt fallbacks, future audits).
-        if self.config.prompt_mode == "active_memory" and self.config.handholding_version != "v3":
+        if (
+            self.config.prompt_mode in ("active_memory", "active_memory2")
+            and self.config.handholding_version != "v3"
+        ):
             print(
-                f"[minimalHarness] prompt_mode='active_memory' coerces "
+                f"[minimalHarness] prompt_mode={self.config.prompt_mode!r} coerces "
                 f"handholding_version {self.config.handholding_version!r} -> 'v3'."
             )
             self.config.handholding_version = "v3"
@@ -629,15 +638,17 @@ class MinimalHarnessAgent(BaseAgent):
         # exits. So we re-spawn codex (and its child MCP server) every day.
         # claude_code and opencode normally use a single long-lived process
         # whose MCP server polls for a per-day continue signal — but in
-        # active_memory mode they also re-spawn per day so each session
-        # reads/writes structured memory files instead of carrying state in
-        # conversation context.
+        # active_memory{,2} and no_memory modes they also re-spawn per day so
+        # each day starts with a fresh conversation (active_memory bridges
+        # state through structured memory files; active_memory2 bridges via
+        # MCP memory tools backed by the same files; no_memory has no bridge,
+        # mirroring codex no_memory's per-day fresh-thread semantics).
         codex_per_day = self.config.harness_backend == "codex"
-        active_memory_persistent_per_day = (
+        fresh_session_per_day = (
             self.config.harness_backend in ("claude_code", "opencode")
-            and self.config.prompt_mode == "active_memory"
+            and self.config.prompt_mode in ("active_memory", "active_memory2", "no_memory")
         )
-        respawn_per_day = codex_per_day or active_memory_persistent_per_day
+        respawn_per_day = codex_per_day or fresh_session_per_day
 
         if not self._started or respawn_per_day:
             if respawn_per_day and self._started:
@@ -656,8 +667,8 @@ class MinimalHarnessAgent(BaseAgent):
                 for old in signal_dir.glob("next_day_*.json"):
                     old.unlink(missing_ok=True)
 
-            if self.config.prompt_mode == "active_memory":
-                # active_memory mode replaces AGENTS.md + 2-line per-day prompt
+            if self.config.prompt_mode in ("active_memory", "active_memory2"):
+                # active_memory{,2} mode replaces AGENTS.md + 2-line per-day prompt
                 # with a full daily user prompt (mirroring AllQAgent). Skip the
                 # system_prompt.md write entirely.
                 self._build_active_memory_prompt(forecast_interface, current_date)
@@ -848,10 +859,10 @@ class MinimalHarnessAgent(BaseAgent):
             "resolution_events": forecast_interface.resolution_events,
             "agent_predictions": agent_predictions,
             "total_predictions": total_predictions,
-            "max_outcomes_per_question": self.config.max_outcomes_per_question,
             "prompt_mode": self.config.prompt_mode,
             "submit_ends_session": self.config.prompt_mode in {"warmup", "static_search"},
             "next_day_returns_immediately": self.config.harness_backend == "codex",
+            "max_outcomes_per_question": int(self.config.max_outcomes_per_question),
         }
         state_path = self._internal_dir / "state.json"
         with open(state_path, "w") as f:
@@ -1267,14 +1278,20 @@ class MinimalHarnessAgent(BaseAgent):
     def _build_active_memory_prompt(
         self, forecast_interface: Any, current_date: date
     ) -> None:
-        """Compose the per-day active_memory user prompt and stash it for _start_codex.
+        """Compose the per-day active_memory{,2} user prompt and stash it for _start_codex.
 
         Mirrors BasicAgent / AllQAgent daily prompt construction:
           - feedback aggregated via FeedbackHandler (cumulative across days),
           - prior day's meta-insight index loaded from disk via ActiveMemory,
           - AllQ "already-predicted" reminder with current predicted/active counts.
+
+        prompt_mode="active_memory2" routes to prompt_active_memory2.build_daily_prompt,
+        which advertises the MCP memory tools instead of native filesystem reads/writes.
         """
-        from agents.minimalHarnessAgent.prompt_active_memory import build_daily_prompt
+        if self.config.prompt_mode == "active_memory2":
+            from agents.minimalHarnessAgent.prompt_active_memory2 import build_daily_prompt
+        else:
+            from agents.minimalHarnessAgent.prompt_active_memory import build_daily_prompt
         from agents.utils.memory import ActiveMemory
 
         source_context = getattr(forecast_interface, "source_context", "") or ""
@@ -1284,6 +1301,8 @@ class MinimalHarnessAgent(BaseAgent):
         num_resolved = len(getattr(forecast_interface, "resolved_questions", []))
         num_questions = num_active + num_resolved
         last_active_date = getattr(forecast_interface, "last_active_date", None)
+        if last_active_date is None:
+            last_active_date = self._find_latest_memory_date_before(current_date)
         next_active_date = getattr(forecast_interface, "next_active_date", None)
         new_articles_count = self._count_new_articles(last_active_date, current_date)
 
@@ -1339,10 +1358,35 @@ class MinimalHarnessAgent(BaseAgent):
             imminent_qids=imminent_qids,
         )
         # Persist for debugging / offline review.
-        prompt_path = self._internal_dir / f"active_memory_prompt_{current_date.isoformat()}.md"
+        prompt_path = (
+            self._internal_dir
+            / f"{self.config.prompt_mode}_prompt_{current_date.isoformat()}.md"
+        )
         with open(prompt_path, "w") as f:
             f.write(prompt)
         self._codex_initial_prompt_override = prompt
+
+    def _find_latest_memory_date_before(self, current_date: date) -> Optional[date]:
+        """Return the latest persisted ActiveMemory snapshot before current_date."""
+        memory_root = self.workspace / "memory"
+        if not memory_root.exists():
+            return None
+
+        latest: Optional[date] = None
+        for entry in memory_root.iterdir():
+            if not entry.is_dir():
+                continue
+            try:
+                entry_date = date.fromisoformat(entry.name)
+            except ValueError:
+                continue
+            if entry_date >= current_date:
+                continue
+            if not ((entry / "mem.csv").exists() or (entry / "meta.yaml").exists()):
+                continue
+            if latest is None or entry_date > latest:
+                latest = entry_date
+        return latest
 
     def _count_new_articles(
         self,
@@ -1479,7 +1523,7 @@ class MinimalHarnessAgent(BaseAgent):
                 "where new info changes your view, and call next_day."
             )
         elif (
-            self.config.prompt_mode == "active_memory"
+            self.config.prompt_mode in ("active_memory", "active_memory2")
             and self._codex_initial_prompt_override
         ):
             initial_prompt = self._codex_initial_prompt_override
@@ -1515,10 +1559,10 @@ class MinimalHarnessAgent(BaseAgent):
             if self.config.prompt_mode == "no_memory"
             else "WebSearch,WebFetch",
         ])
-        # active_memory mode delivers the full daily instructions via -p, so
+        # active_memory{,2} mode delivers the full daily instructions via -p, so
         # skip the standalone system prompt file (which isn't written in this
         # mode anyway).
-        if self.config.prompt_mode != "active_memory":
+        if self.config.prompt_mode not in ("active_memory", "active_memory2"):
             cmd.extend([
                 "--system-prompt-file", str(self._internal_dir / "system_prompt.md"),
             ])
@@ -1582,10 +1626,10 @@ class MinimalHarnessAgent(BaseAgent):
         """
         mcp_cmd, mcp_args = self._build_mcp_invocation()
 
-        # active_memory mode delivers the full daily instructions as the user
+        # active_memory{,2} mode delivers the full daily instructions as the user
         # prompt each day (mirroring claude_code/codex). opencode requires a
         # non-empty agent.prompt, so use a minimal one-liner.
-        if self.config.prompt_mode == "active_memory":
+        if self.config.prompt_mode in ("active_memory", "active_memory2"):
             system_prompt = "You are a forecasting agent. Follow the per-day instructions in the user message."
         else:
             system_prompt = (self._internal_dir / "system_prompt.md").read_text()
@@ -1782,10 +1826,13 @@ class MinimalHarnessAgent(BaseAgent):
             "--search-db", self.config.search_db or "",
             "--embedding-model", self.config.embedding_model or "",
             "--handholding-version", self.config.handholding_version,
+            "--agent-id", self.agent_id,
         ]
         mcp_args.extend(self._mcp_tool_filter_args())
         if embed_server_url:
             mcp_args.extend(["--embedding-server-url", embed_server_url])
+        if self.config.prompt_mode == "active_memory2":
+            mcp_args.append("--enable-memory-tools")
         return (python_cmd, mcp_args)
 
     def _start_mcp_relay(self) -> None:
@@ -1829,10 +1876,13 @@ class MinimalHarnessAgent(BaseAgent):
             "--search-db", self.config.search_db or "",
             "--embedding-model", self.config.embedding_model or "",
             "--handholding-version", self.config.handholding_version,
+            "--agent-id", self.agent_id,
         ]
         mcp_args.extend(self._mcp_tool_filter_args())
         if embed_server_url:
             mcp_args.extend(["--embedding-server-url", embed_server_url])
+        if self.config.prompt_mode == "active_memory2":
+            mcp_args.append("--enable-memory-tools")
 
         wrapper = d / "launch_mcp.sh"
         wrapper.write_text(
@@ -2147,7 +2197,7 @@ class MinimalHarnessAgent(BaseAgent):
 
     def _start_opencode(self) -> None:
         if (
-            self.config.prompt_mode == "active_memory"
+            self.config.prompt_mode in ("active_memory", "active_memory2")
             and self._codex_initial_prompt_override
         ):
             initial_prompt = self._codex_initial_prompt_override
@@ -2238,11 +2288,10 @@ class MinimalHarnessAgent(BaseAgent):
         """
         mcp_cmd, mcp_args = self._build_mcp_invocation()
 
-        # Codex reads AGENTS.md from cwd at startup as user instructions.
-        # active_memory/warmup modes deliver the full task as the user prompt
-        # instead — skip the AGENTS.md write and clear any stale copy from a
-        # prior config so codex can't pick it up.
-        if self.config.prompt_mode in {"active_memory", "warmup", "static_search"}:
+        # These modes deliver the full task as the user prompt instead of
+        # AGENTS.md; clear any stale copy from a prior config so Codex can't
+        # pick it up.
+        if self.config.prompt_mode in {"active_memory", "warmup", "static_search", "active_memory2"}:
             stale_agents_md = self.workspace / "AGENTS.md"
             if stale_agents_md.exists():
                 stale_agents_md.unlink()
@@ -2323,7 +2372,7 @@ class MinimalHarnessAgent(BaseAgent):
             ]
         else:
             if (
-                self.config.prompt_mode in {"active_memory", "warmup", "static_search"}
+                self.config.prompt_mode in {"active_memory", "warmup", "static_search", "active_memory2"}
                 and self._codex_initial_prompt_override
             ):
                 initial_prompt = self._codex_initial_prompt_override

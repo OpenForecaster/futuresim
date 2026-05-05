@@ -1,4 +1,6 @@
 import json
+import sys
+import types
 from datetime import date
 from types import SimpleNamespace
 
@@ -6,7 +8,34 @@ import pytest
 
 from agents.minimalHarnessAgent import agent as minimal_agent
 from agents.minimalHarnessAgent.prompt import build_warmup_prompt
+from agents.minimalHarnessAgent.prompt_active_memory2 import build_daily_prompt
 from agents.search_tools.base import BaseSearchTool, SearchResult
+
+
+def _install_fake_mcp():
+    class DummyFastMCP:
+        def __init__(self, *args, **kwargs):
+            self._tool_manager = types.SimpleNamespace(_tools={})
+
+        def tool(self):
+            def decorator(fn):
+                self._tool_manager._tools[fn.__name__] = fn
+                return fn
+            return decorator
+
+        def remove_tool(self, name):
+            self._tool_manager._tools.pop(name, None)
+
+        def run(self):
+            return None
+
+    mcp_mod = types.ModuleType("mcp")
+    server_mod = types.ModuleType("mcp.server")
+    fastmcp_mod = types.ModuleType("mcp.server.fastmcp")
+    fastmcp_mod.FastMCP = DummyFastMCP
+    sys.modules.setdefault("mcp", mcp_mod)
+    sys.modules.setdefault("mcp.server", server_mod)
+    sys.modules["mcp.server.fastmcp"] = fastmcp_mod
 
 
 def _capture_codex_cmd(tmp_path, monkeypatch, *, resume: bool):
@@ -192,6 +221,27 @@ def test_codex_warmup_launch_uses_user_prompt_without_agents_md(tmp_path, monkey
     assert captured["cmd"][-1] == "single question prompt"
     assert "-C" in captured["cmd"]
     assert not (workspace / "AGENTS.md").exists()
+
+
+def test_active_memory2_mcp_invocation_enables_memory_tools(tmp_path):
+    internal_dir = tmp_path / "agent_active_memory2"
+    cfg = minimal_agent.MinimalHarnessConfig(
+        model="gpt-5.5",
+        harness_backend="codex",
+        prompt_mode="active_memory2",
+        codex_path="codex",
+    )
+    agent = minimal_agent.MinimalHarnessAgent(
+        "agent_001",
+        cfg,
+        agent_dir=str(internal_dir),
+    )
+    agent._detect_embedding_server = lambda: ""
+
+    _, args = agent._build_mcp_invocation()
+
+    assert "--enable-memory-tools" in args
+    assert args[args.index("--agent-id") + 1] == "agent_001"
 
 
 def test_codex_warmup_rejects_resume_mode(tmp_path):
@@ -609,6 +659,7 @@ def test_static_search_file_uses_title_query_and_effective_date(tmp_path):
 
 
 def test_submit_forecasts_can_end_static_search_session(tmp_path, monkeypatch):
+    _install_fake_mcp()
     from agents.minimalHarnessAgent import mcp_server
 
     monkeypatch.setattr(mcp_server, "_internal_dir", tmp_path)
@@ -630,6 +681,7 @@ def test_submit_forecasts_can_end_static_search_session(tmp_path, monkeypatch):
 
 
 def test_codex_next_day_returns_immediately_without_continue_signal(tmp_path, monkeypatch):
+    _install_fake_mcp()
     from agents.minimalHarnessAgent import mcp_server
 
     monkeypatch.setattr(mcp_server, "_internal_dir", tmp_path)
@@ -687,3 +739,81 @@ def test_codex_wait_for_next_day_drains_process_before_reading_predictions(tmp_p
     assert proc.waited is True
     assert proc.wait_timeout == 30.0
     assert preds == [{"qid": "Q1", "outcomes": {"Yes": 0.7, "No": 0.3}, "question_id": "Q1"}]
+
+
+def test_write_state_includes_configured_outcome_limit(tmp_path):
+    internal_dir = tmp_path / "agent_state_active_memory"
+    internal_dir.mkdir()
+    cfg = minimal_agent.MinimalHarnessConfig(max_outcomes_per_question=7)
+    agent = minimal_agent.MinimalHarnessAgent(
+        "agent_001",
+        cfg,
+        agent_dir=str(internal_dir),
+    )
+
+    question = SimpleNamespace(
+        qid="Q1",
+        title="Question?",
+        background="",
+        resolution_criteria="",
+        answer_type="string",
+        resolution_date=date(2026, 1, 10),
+        options=[],
+    )
+    forecast_interface = SimpleNamespace(
+        list_questions=lambda: [question],
+        resolution_events=[],
+        get_agent_predictions=lambda agent_id: {},
+        get_market_csv_path=lambda: str(tmp_path / "market.csv"),
+    )
+
+    agent._write_state(forecast_interface, date(2026, 1, 5))
+
+    state = json.loads((internal_dir / "state.json").read_text())
+    assert state["max_outcomes_per_question"] == 7
+
+
+def test_active_memory_prompt_uses_bootstrapped_memory_date(tmp_path):
+    internal_dir = tmp_path / "agent_bootstrap_memory"
+    cfg = minimal_agent.MinimalHarnessConfig(prompt_mode="active_memory2")
+    agent = minimal_agent.MinimalHarnessAgent(
+        "agent_001",
+        cfg,
+        agent_dir=str(internal_dir),
+    )
+    prior_dir = agent.workspace / "memory" / "2026-01-04"
+    prior_dir.mkdir(parents=True)
+    (prior_dir / "mem.csv").write_text("qid,question,last_updated,memory,category\n")
+
+    latest = agent._find_latest_memory_date_before(date(2026, 1, 5))
+
+    assert latest == date(2026, 1, 4)
+
+
+def test_active_memory2_prompt_uses_allq_cleared_context_cadence():
+    prompt = build_daily_prompt(
+        current_date=date(2026, 1, 5),
+        start_date=date(2026, 1, 1),
+        end_date=date(2026, 1, 31),
+        last_active_date=date(2026, 1, 4),
+        next_active_date=date(2026, 1, 6),
+        source_context="",
+        source_name="openforesight",
+        feedback_text="",
+        meta_index="",
+        num_questions=2,
+        num_active=2,
+        num_resolved=0,
+        predicted_count=1,
+        active_count=2,
+        max_outcomes_per_question=5,
+        search_cutoff_days=0,
+        timegap_days=1,
+    )
+
+    assert "Your context is cleared after every session" in prompt
+    assert "your memory (along with past predictions)" in prompt
+    assert "market.csv" in prompt
+    assert "## MEMORY WORKFLOW" in prompt
+    assert "promote it into a meta-insight" in prompt
+    assert "first call enters memory-update mode" in prompt

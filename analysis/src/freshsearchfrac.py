@@ -27,6 +27,8 @@ except ImportError:
     print("Error: matplotlib is not installed. Please install it with 'pip install matplotlib'.")
     sys.exit(1)
 
+import plot_config  # noqa: F401  (applies project-wide science+serif style)
+
 
 PUBLISHED_DATE_RE = re.compile(r"PUBLISHED:\s*([0-9]{4}-[0-9]{2}-[0-9]{2})")
 SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")

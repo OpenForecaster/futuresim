@@ -33,6 +33,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+import plot_config  # noqa: F401  (applies project-wide science+serif style)
+
 
 @dataclass
 class RunArtifacts:

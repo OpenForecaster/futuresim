@@ -32,6 +32,7 @@ defaults:
   provider: "none"
   scaffold: "minimalHarness"
   sandbox: true
+  sandbox_proc_mode: "host_ro"  # Condor execute nodes reject bwrap --proc
   anthropic_base_url: "https://api.z.ai/api/anthropic"
   handholding_version: "v1"
 

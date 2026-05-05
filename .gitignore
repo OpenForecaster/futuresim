@@ -91,6 +91,7 @@ prompt_rendered/
 
 # Plotting
 plots/
+reports/
 
 numactl-2.0.16/
 

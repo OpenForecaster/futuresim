@@ -19,6 +19,8 @@ except ImportError as e:
     print(f"Error: missing dependency — {e}")
     sys.exit(1)
 
+import plot_config  # noqa: F401  (applies project-wide science+serif style)
+
 
 def parse_args():
     parser = argparse.ArgumentParser(

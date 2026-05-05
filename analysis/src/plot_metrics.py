@@ -11,6 +11,8 @@ except ImportError:
     print("Error: matplotlib is not installed. Please install it using 'pip install matplotlib'.")
     sys.exit(1)
 
+import plot_config  # noqa: F401  (applies project-wide science+serif style)
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Plot daily metrics from simulation.")
     parser.add_argument("--input_csv", type=str, required=True, help="Path to daily_metrics.csv")

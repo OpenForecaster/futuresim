@@ -38,7 +38,14 @@ defaults:
   anthropic_base_url: "https://api.deepseek.com/anthropic"
   handholding_version: "v1"
 
+resources:
+  gpus: 1
+  cpus: 16
+  memory_gb: 80
+  disk_gb: 50
+  bid: 35
+
 agents:
   - model: "deepseek-v4-pro"
-    timeout_seconds: 86400
+    timeout_seconds: 7200
     claude_code_path: "/home/nchandak/.local/bin/claude"
