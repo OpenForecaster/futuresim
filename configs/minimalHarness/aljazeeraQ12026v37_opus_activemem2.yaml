@@ -50,7 +50,7 @@ resources:
   cpus: 16
   memory_gb: 80
   disk_gb: 50
-  bid: 35
+  bid: 100
 
 agents:
   - model: "claude-opus-4-6"

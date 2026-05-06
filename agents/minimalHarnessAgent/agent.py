@@ -600,8 +600,13 @@ class MinimalHarnessAgent(BaseAgent):
         if not pred_link.exists():
             pred_link.symlink_to(self._internal_dir / "predictions")
 
-        # 0. Bootstrap from fixedWarmup (once, before first day's state.json).
-        if self.config.bootstrap_dir and not self._bootstrap_applied:
+        # 0. Bootstrap from fixedWarmup only on the true first sim day.
+        # Env-level resumes may start mid-run with copied memory already present.
+        if (
+            self.config.bootstrap_dir
+            and not self._bootstrap_applied
+            and (self.config.start_date is None or current_date == self.config.start_date)
+        ):
             self._apply_bootstrap(forecast_interface, current_date)
             self._bootstrap_applied = True
 
@@ -1179,6 +1184,21 @@ class MinimalHarnessAgent(BaseAgent):
         self._market_csv_path = csv_path
         os.chmod(csv_path, 0o444)
 
+        if (
+            self.config.prompt_mode == "no_memory"
+            and self.config.bootstrap_dir
+            and self._bootstrap_applied
+            and not getattr(self, "_bootstrap_market_csv_used", False)
+        ):
+            bootstrap_market_csv = Path(self.config.bootstrap_dir) / "market.csv"
+            if bootstrap_market_csv.exists():
+                workspace_csv = self.workspace / "market.csv"
+                if workspace_csv.is_symlink() or workspace_csv.exists():
+                    workspace_csv.unlink()
+                shutil.copy2(bootstrap_market_csv, workspace_csv)
+                self._bootstrap_market_csv_used = True
+                return
+
         df = pd.read_csv(csv_path, dtype={"qid": str})
         get_preds = getattr(forecast_interface, "get_agent_predictions", None)
         agent_preds = get_preds(self.agent_id) if callable(get_preds) else {}
@@ -1545,6 +1565,11 @@ class MinimalHarnessAgent(BaseAgent):
         ]
         if resume_session_id:
             cmd.extend(["--resume", resume_session_id])
+        if self.config.prompt_mode == "no_memory":
+            disallowed_tools = "WebSearch,WebFetch,Write,Edit,MultiEdit,NotebookEdit"
+        else:
+            disallowed_tools = "WebSearch,WebFetch"
+
         cmd.extend([
             "-p", initial_prompt,
             "--verbose",
@@ -1555,9 +1580,7 @@ class MinimalHarnessAgent(BaseAgent):
             "--mcp-config", str(self._internal_dir / "mcp_config.json"),
             "--strict-mcp-config",
             "--disallowedTools",
-            "WebSearch,WebFetch,Write,Edit,MultiEdit,NotebookEdit"
-            if self.config.prompt_mode == "no_memory"
-            else "WebSearch,WebFetch",
+            disallowed_tools,
         ])
         # active_memory{,2} mode delivers the full daily instructions via -p, so
         # skip the standalone system prompt file (which isn't written in this

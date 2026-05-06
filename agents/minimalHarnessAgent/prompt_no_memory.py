@@ -7,8 +7,9 @@ taking notes are stripped:
 - The cadence section no longer mentions persistent workspace files.
 - The Workspace listing no longer mentions memory/.
 
-The agent still has full Bash/Read/Write tool access, but the prompt does not
-suggest using those for note-taking or memory.
+The Claude Code backend disallows Write/Edit tools in this mode. Bash/Read
+remain available for read-only inspection, and the prompt does not suggest
+note-taking or memory.
 """
 
 from datetime import date, timedelta
@@ -328,6 +329,7 @@ Column descriptions of the DataFrame (market.csv):
 ## Rules
 - No web access is available. Use `mcp__forecast__search_news` and articles/ for information.
 - market.csv is read-only. DO NOT modify it.
+- You may use Bash/Read for read-only inspection of market.csv, predictions/, and articles/.
 - You have no Write/Edit tools.
 - Your job is to maximize your time-weighted score (TW-score).
 

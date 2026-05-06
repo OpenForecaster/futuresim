@@ -142,47 +142,58 @@ def prepare_restart_directory(source_dir: str, restart_day: str, output_dir: str
     if os.path.exists(src_agents):
         for agent_name in os.listdir(src_agents):
             src_agent_dir = os.path.join(src_agents, agent_name)
-            src_memory_dir = os.path.join(src_agent_dir, "memory")
-            
-            if os.path.isdir(src_memory_dir):
-                dst_agent_dir = os.path.join(output_dir, "agents", agent_name)
-                dst_memory_dir = os.path.join(dst_agent_dir, "memory")
-                os.makedirs(dst_memory_dir, exist_ok=True)
-                
-                for entry in os.listdir(src_memory_dir):
-                    entry_path = os.path.join(src_memory_dir, entry)
-                    # Support all memory formats:
-                    #   plain:      YYYY-MM-DD.txt
-                    #   structured: YYYY-MM-DD.yaml
-                    #   active (old): YYYY-MM-DD.yaml + memo_YYYY-MM-DD.csv
-                    #   active (new): YYYY-MM-DD/ directory with mem.csv + meta.yaml
-                    if os.path.isdir(entry_path):
-                        # New directory format: memory/YYYY-MM-DD/
-                        try:
-                            dir_date = date.fromisoformat(entry)
-                            if dir_date < restart_date:
-                                shutil.copytree(
-                                    entry_path,
-                                    os.path.join(dst_memory_dir, entry)
-                                )
-                        except ValueError:
-                            continue
-                    elif entry.endswith(".txt") or entry.endswith(".yaml"):
-                        try:
-                            file_date = date.fromisoformat(entry.rsplit(".", 1)[0])
-                            if file_date < restart_date:
-                                shutil.copy(entry_path, os.path.join(dst_memory_dir, entry))
-                        except ValueError:
-                            continue
-                    elif entry.startswith("memo_") and entry.endswith(".csv"):
-                        try:
-                            file_date = date.fromisoformat(entry[len("memo_"):-len(".csv")])
-                            if file_date < restart_date:
-                                shutil.copy(entry_path, os.path.join(dst_memory_dir, entry))
-                        except ValueError:
-                            continue
-                            
-                print(f"  Copied memory for agent: {agent_name}")
+            memory_dirs = (
+                (
+                    os.path.join(src_agent_dir, "memory"),
+                    os.path.join(output_dir, "agents", agent_name, "memory"),
+                    "memory",
+                ),
+                (
+                    os.path.join(src_agent_dir, "workspace", "memory"),
+                    os.path.join(output_dir, "agents", agent_name, "workspace", "memory"),
+                    "workspace/memory",
+                ),
+            )
+
+            for src_memory_dir, dst_memory_dir, memory_label in memory_dirs:
+                if os.path.isdir(src_memory_dir):
+                    os.makedirs(dst_memory_dir, exist_ok=True)
+
+                    for entry in os.listdir(src_memory_dir):
+                        entry_path = os.path.join(src_memory_dir, entry)
+                        # Support all memory formats:
+                        #   plain:      YYYY-MM-DD.txt
+                        #   structured: YYYY-MM-DD.yaml
+                        #   active (old): YYYY-MM-DD.yaml + memo_YYYY-MM-DD.csv
+                        #   active (new): YYYY-MM-DD/ directory with mem.csv + meta.yaml
+                        if os.path.isdir(entry_path):
+                            # New directory format: memory/YYYY-MM-DD/
+                            try:
+                                dir_date = date.fromisoformat(entry)
+                                if dir_date < restart_date:
+                                    shutil.copytree(
+                                        entry_path,
+                                        os.path.join(dst_memory_dir, entry),
+                                        dirs_exist_ok=True,
+                                    )
+                            except ValueError:
+                                continue
+                        elif entry.endswith(".txt") or entry.endswith(".yaml"):
+                            try:
+                                file_date = date.fromisoformat(entry.rsplit(".", 1)[0])
+                                if file_date < restart_date:
+                                    shutil.copy(entry_path, os.path.join(dst_memory_dir, entry))
+                            except ValueError:
+                                continue
+                        elif entry.startswith("memo_") and entry.endswith(".csv"):
+                            try:
+                                file_date = date.fromisoformat(entry[len("memo_"):-len(".csv")])
+                                if file_date < restart_date:
+                                    shutil.copy(entry_path, os.path.join(dst_memory_dir, entry))
+                            except ValueError:
+                                continue
+
+                    print(f"  Copied {memory_label} for agent: {agent_name}")
 
             # Also copy timing stats (and other per-day lightweight logs) so the restarted
             # run directory has a continuous history.
