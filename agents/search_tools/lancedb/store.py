@@ -97,7 +97,11 @@ class LanceDBSearchTool(BaseSearchTool):
         # Use timestamp literals (not date) to work with hybrid/FTS search (LanceDB bug #1636)
         where_clauses = []
         if max_date:
-            where_clauses.append(f"date <= timestamp '{max_date.isoformat()}T23:59:59'")
+            max_ts = f"{max_date.isoformat()}T23:59:59"
+            where_clauses.append(
+                f"date <= timestamp '{max_ts}' "
+                f"AND (date_publish IS NULL OR date_publish <= timestamp '{max_ts}')"
+            )
         if min_date:
             where_clauses.append(f"date >= timestamp '{min_date.isoformat()}T00:00:00'")
         where = " AND ".join(where_clauses) if where_clauses else None
@@ -279,7 +283,11 @@ class LanceDBSearchTool(BaseSearchTool):
             if min_date:
                 where_clauses.append(f"date >= timestamp '{min_date.isoformat()}T00:00:00'")
             if max_date:
-                where_clauses.append(f"date <= timestamp '{max_date.isoformat()}T23:59:59'")
+                max_ts = f"{max_date.isoformat()}T23:59:59"
+                where_clauses.append(
+                    f"date <= timestamp '{max_ts}' "
+                    f"AND (date_publish IS NULL OR date_publish <= timestamp '{max_ts}')"
+                )
             where = " AND ".join(where_clauses) if where_clauses else None
             if where:
                 return self._table.count_rows(where)

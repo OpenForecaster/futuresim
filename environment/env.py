@@ -53,6 +53,7 @@ class SimulationEnvironment:
                  min_forecasters: int = 0,
                  resolved_only: bool = False,
                  matcher_cache_path: Optional[str] = None,
+                 matcher_max_concurrency: int = 300,
                  max_outcomes_per_question: int = 5):
         
         # Handle positional args shift if someone called with positional args (unlikely in this codebase but safe)
@@ -75,6 +76,7 @@ class SimulationEnvironment:
         self.subsample_per_month = subsample_per_month
         self.timegap_days = max(1, int(timegap_days or 1))
         self.max_outcomes_per_question = max(1, int(max_outcomes_per_question or 1))
+        self.matcher_max_concurrency = max(1, int(matcher_max_concurrency or 300))
         
         # Logging and market state
         self.resume_dir = resume_dir

@@ -297,6 +297,8 @@ class MinimalHarnessConfig:
     # Number of concurrent fresh Codex sessions during prompt_mode="warmup".
     # Default stays conservative; configs can opt into more parallelism.
     warmup_parallelism: int = 1
+    # Optional qid filter for targeted warmup reruns.
+    warmup_qids: List[str] = field(default_factory=list)
     # Static-search ablation cache. Each file contains one title-query result
     # at the per-question effective search date.
     static_search_dir: str = ""
@@ -625,8 +627,8 @@ class MinimalHarnessAgent(BaseAgent):
         # 2. chmod market.csv read-only so the harness can't corrupt it.
         self._protect_market_csv(forecast_interface)
 
-        # 3. Update article symlinks up to current date.
-        self._update_article_symlinks(current_date)
+        # 3. Update article symlinks up to the same date visible to search.
+        self._update_article_symlinks(search_current_date or current_date)
 
         # 3b. If network_isolation is on, ensure the host-side egress proxy is
         # running before we spawn (or re-spawn) the harness. Idempotent.
@@ -1099,6 +1101,14 @@ class MinimalHarnessAgent(BaseAgent):
 
         questions = list(forecast_interface.questions.values())
         questions.sort(key=lambda q: (self._get_warmup_current_date(current_date, q), str(q.qid)))
+        if self.config.warmup_qids:
+            requested_qids = {str(qid) for qid in self.config.warmup_qids}
+            questions = [q for q in questions if str(q.qid) in requested_qids]
+            missing_qids = requested_qids - {str(q.qid) for q in questions}
+            if missing_qids:
+                raise ValueError(
+                    f"warmup_qids not found in active questions: {sorted(missing_qids)}"
+                )
         total = len(questions)
         if self.config.prompt_mode == "static_search":
             self._prepare_static_search_files(questions, current_date)
@@ -1421,7 +1431,12 @@ class MinimalHarnessAgent(BaseAgent):
             or current_date is None
         ):
             return None
-        max_date = current_date - timedelta(days=self.config.search_cutoff_days)
+        effective_current_date = current_date
+        if self.config.freeze_search_after_start and self.config.start_date is not None:
+            effective_current_date = min(current_date, self.config.start_date)
+        max_date = effective_current_date - timedelta(days=self.config.search_cutoff_days)
+        if last_active_date > max_date:
+            return 0
         try:
             return self.search_tool.count_articles(
                 min_date=last_active_date,
@@ -1500,7 +1515,23 @@ class MinimalHarnessAgent(BaseAgent):
             if src.exists():
                 dst = articles_dir / f"{d.year}" / f"{d.month:02d}" / f"{d.day:02d}" / "articles.jsonl"
                 dst.parent.mkdir(parents=True, exist_ok=True)
-                if not dst.exists():
+                if self.config.freeze_search_after_start:
+                    cutoff = current_date.isoformat()
+                    tmp = dst.with_suffix(".jsonl.tmp")
+                    with open(src) as inp, open(tmp, "w") as out:
+                        for line in inp:
+                            article = json.loads(line)
+                            article_date = str(article.get("date") or "")[:10]
+                            publish_date = str(article.get("date_publish") or "")[:10]
+                            if article_date and article_date > cutoff:
+                                continue
+                            if publish_date and publish_date > cutoff:
+                                continue
+                            out.write(line)
+                    if dst.exists() or dst.is_symlink():
+                        dst.unlink()
+                    tmp.replace(dst)
+                elif not dst.exists():
                     if self.config.sandbox:
                         try:
                             os.link(src, dst)

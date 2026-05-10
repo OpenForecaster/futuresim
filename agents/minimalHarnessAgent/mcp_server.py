@@ -101,10 +101,17 @@ def _build_new_articles_message(previous_date: Optional[date], current_date: Opt
             "New articles are available in articles/ or via the search_news MCP tool."
         )
 
+    search_date = _parse_date(_state.get("search_current_date")) or current_date
+    max_date = search_date - timedelta(days=_search_cutoff_days)
+    if search_date < current_date or previous_date > max_date:
+        return (
+            f"No new articles are available beyond the current search date "
+            f"{max_date.isoformat()}; search_news and articles/ remain capped there."
+        )
+
     with contextlib.redirect_stdout(sys.stderr):
         _ensure_search()
     if _search_handler is not None and _search_handler.is_available:
-        max_date = current_date - timedelta(days=_search_cutoff_days)
         with contextlib.redirect_stdout(sys.stderr):
             count = _search_handler.count_articles(
                 min_date=previous_date,

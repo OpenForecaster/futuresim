@@ -104,23 +104,33 @@ async def _async_openrouter_chat(
     }
 
     max_retries = min(3, max(1, int(max_retries)))
+    last_error: Optional[BaseException] = None
     for attempt in range(max_retries):
         try:
             async with semaphore:
                 resp = await client.post(API_URL, json=payload)
             if resp.status_code == 429:
+                last_error = RuntimeError("OpenRouter HTTP 429 rate limit")
                 await asyncio.sleep(5 * (attempt + 1))
                 continue
             resp.raise_for_status()
             data = resp.json()
             if "choices" in data:
                 content = data["choices"][0]["message"]["content"] or ""
-                return content, data.get("usage", {})
-        except Exception:
+                if content.strip():
+                    return content, data.get("usage", {})
+                last_error = RuntimeError("OpenRouter returned empty matcher content")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(2 * (attempt + 1))
+                    continue
+            else:
+                last_error = RuntimeError(f"OpenRouter returned invalid matcher response: {data}")
+        except Exception as exc:
+            last_error = exc
             if attempt < max_retries - 1:
                 await asyncio.sleep(2 * (attempt + 1))
 
-    return "", {}
+    return "", {"_matcher_error": str(last_error) if last_error else "unknown error"}
 
 
 async def async_batch_openrouter_chat(
@@ -394,6 +404,8 @@ class AnswerMatcher:
 
         # Ask LLM
         result = self._llm_is_equivalent(predicted, ground_truth, question_id, question_title, match_type)
+        if result is None:
+            return False
         self._cache[cache_key] = result
         if self.cache_path:
             self._cache_dirty = True
@@ -403,7 +415,7 @@ class AnswerMatcher:
     
     def _llm_is_equivalent(self, predicted: str, ground_truth: str,
                            question_id: str = None, question_title: str = None,
-                           match_type: str = "is_equivalent") -> bool:
+                           match_type: str = "is_equivalent") -> Optional[bool]:
         """Query LLM for semantic equivalence."""
         prompt = build_is_equivalent_prompt(
             predicted=predicted,
@@ -420,6 +432,26 @@ class AnswerMatcher:
         finally:
             duration = time.perf_counter() - started
             self._record_timing(duration, usage.get("cost", 0))
+        if not response or not response.strip():
+            if self.logger:
+                input_data = {
+                    "type": match_type,
+                    "predicted": predicted,
+                    "ground_truth": ground_truth,
+                }
+                if question_id:
+                    input_data["question_id"] = question_id
+                if question_title:
+                    input_data["question_title"] = question_title
+                self.logger.log_matcher(
+                    input_data=input_data,
+                    output_data={"response": response, "is_equivalent": False},
+                    metadata={
+                        "duration_seconds": round(duration, 4),
+                        "error": "empty_response",
+                    },
+                )
+            return None
         
         is_equiv = parse_is_equivalent_response(response)
         
@@ -500,6 +532,18 @@ class AnswerMatcher:
         for j, (response_text, usage) in enumerate(responses):
             idx = pending_indices[j]
             predicted, ground_truth, qid, qtitle, cache_key = pending_meta[j]
+            if not response_text or not response_text.strip():
+                fallback = self._llm_is_equivalent(
+                    predicted,
+                    ground_truth,
+                    qid,
+                    qtitle,
+                    match_type="check_guess",
+                )
+                results[idx] = False if fallback is None else fallback
+                if fallback is not None:
+                    self._cache[cache_key] = fallback
+                continue
             is_equiv = parse_is_equivalent_response(response_text)
             self._cache[cache_key] = is_equiv
             self._record_timing(per_call_duration, usage.get("cost", 0))
@@ -618,6 +662,26 @@ class AnswerMatcher:
         finally:
             duration = time.perf_counter() - started
             self._record_timing(duration, usage.get("cost", 0))
+        if not response_text or not response_text.strip():
+            if self.logger:
+                input_data = {
+                    "type": "find_match",
+                    "candidate": candidate,
+                    "existing": existing_outcomes,
+                }
+                if question_id:
+                    input_data["question_id"] = question_id
+                if question_title:
+                    input_data["question_title"] = question_title
+                self.logger.log_matcher(
+                    input_data=input_data,
+                    output_data={"response": response_text, "matched": None},
+                    metadata={
+                        "duration_seconds": round(duration, 4),
+                        "error": "empty_response",
+                    },
+                )
+            return None
         match_result = parse_find_match_response(response_text, existing_outcomes)
         
         # Log

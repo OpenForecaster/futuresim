@@ -504,6 +504,10 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
                     'warmup_parallelism',
                     defaults.get('warmup_parallelism', config.get('warmup_parallelism', 1)),
                 )),
+                warmup_qids=list(agent_def.get(
+                    'warmup_qids',
+                    defaults.get('warmup_qids', config.get('warmup_qids', [])),
+                ) or []),
                 static_search_dir=agent_def.get(
                     'static_search_dir',
                     defaults.get('static_search_dir', config.get('static_search_dir', '')),
@@ -966,6 +970,8 @@ def main():
                        help="Answer matching mode: 'exact', 'openrouter', or 'vllm'")
     parser.add_argument("--matcher", default=MATCHER_PATH,
                        help="Matcher model: OpenRouter model ID or VLLM model path")
+    parser.add_argument("--matcher_max_concurrency", type=int, default=300,
+                       help="Max concurrent OpenRouter answer-matcher requests during cache warmup (default 300)")
     
     # Search settings
     parser.add_argument("--search_db", default="",
@@ -1614,6 +1620,7 @@ def main():
         timegap_days=args.timegap_days,
         resume_dir=args.resume if args.resume else None,
         matcher_cache_path=matcher_cache_path,
+        matcher_max_concurrency=args.matcher_max_concurrency,
         max_outcomes_per_question=env_max_outcomes_per_question,
     )
     

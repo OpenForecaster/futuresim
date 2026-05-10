@@ -139,7 +139,8 @@ def warmup_matcher_cache(env, questions) -> None:
                     items.append((outcome, gt, q.qid, q.title))
 
     if items:
-        env.matcher.warmup_cache(items, max_concurrency=300)
+        max_concurrency = max(1, int(getattr(env, "matcher_max_concurrency", 300) or 300))
+        env.matcher.warmup_cache(items, max_concurrency=max_concurrency)
 
 
 def get_env_matcher_timing_snapshot(env) -> Dict[str, float]:

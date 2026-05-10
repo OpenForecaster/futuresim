@@ -108,12 +108,19 @@ def rescore(env) -> None:
         env.current_date = iter_date
 
         if iter_date in resolutions_by_date:
+            resolving = []
             for qid in resolutions_by_date[iter_date]:
                 q = env.q_pool.get_question(qid)
                 if q and qid in env.prediction_histories:
-                    env._resolve_question(q)
-                    env.resolved_questions.append(q)
-                    env.q_pool._resolved.add(qid)
+                    resolving.append(q)
+            if resolving and env.matcher:
+                env._warmup_matcher_cache(resolving)
+
+            for q in resolving:
+                qid = str(q.qid)
+                env._resolve_question(q)
+                env.resolved_questions.append(q)
+                env.q_pool._resolved.add(qid)
 
         active_questions = [
             env.q_pool.get_question(qid)

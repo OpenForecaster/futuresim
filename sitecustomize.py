@@ -26,6 +26,16 @@ What is still needed vs upstream:
   **list**; `RotaryEmbeddingConfigMixin.convert_rope_params_to_dict` uses set union (`|`) and
   crashes. We coerce non-set iterables to `set(...)` before the original method runs.
 
+- **Qwen3.5 RoPE buffer device mismatch under FSDP2 CPU offload** — HF `Qwen3_5RotaryEmbedding`
+  assumes `self.inv_freq` already lives on the same device as the current hidden states. With
+  FSDP2 CPU offload, that buffer can still be on CPU during a later forward/logprob pass. We
+  materialize a local copy on the compute device only when a mismatch is detected.
+
+- **Ray dashboard agent `psutil` bus errors on MPI HTCondor nodes** — Ray's reporter module asks
+  `psutil` for per-process `memory_info` / `memory_full_info`, and on some B200 nodes that path
+  crashes the whole dashboard agent (which then fate-shares the raylet). We drop just those two
+  optional attrs from the reporter's process snapshot list on cluster jobs.
+
 Removed as redundant with v0.1.0 + the tokenizer shim:
 
 - **InferenceEngineClient prompt_token_ids normalization** — v0.1.0 uses `return_dict=True`
@@ -36,6 +46,7 @@ Removed as redundant with v0.1.0 + the tokenizer shim:
 from __future__ import annotations
 
 import inspect
+import os
 
 
 def _is_qwen35_config(config) -> bool:
@@ -369,3 +380,95 @@ def _patch_transformers_rope_ignore_keys_to_set() -> None:
 
 
 _patch_transformers_rope_ignore_keys_to_set()
+
+
+def _patch_qwen35_rope_inv_freq_device_mismatch() -> None:
+    """
+    Make Qwen3.5 rotary embedding robust to FSDP2 CPU offload.
+
+    Under FSDP2 CPU offload, the rotary `inv_freq` buffer can remain on CPU while the
+    active hidden states / position ids for a forward pass are already on a CUDA device.
+    HF's stock implementation assumes these devices already match and fails in the
+    matrix multiply. Keep behavior unchanged in the common case and only materialize a
+    temporary device-local copy when a mismatch is actually present.
+    """
+
+    try:
+        import torch
+        import transformers.models.qwen3_5.modeling_qwen3_5 as qwen35_modeling
+    except Exception:
+        return
+
+    rotary_cls = getattr(qwen35_modeling, "Qwen3_5TextRotaryEmbedding", None)
+    if rotary_cls is None:
+        rotary_cls = getattr(qwen35_modeling, "Qwen3_5RotaryEmbedding", None)
+    if rotary_cls is None:
+        return
+
+    maybe_autocast = qwen35_modeling.maybe_autocast
+
+    if getattr(rotary_cls, "_forecast_sim_rope_device_patch", False):
+        return
+
+    def _patched_forward(self, x, position_ids):
+        if position_ids.ndim == 2:
+            position_ids = position_ids[None, ...].expand(3, position_ids.shape[0], -1)
+
+        inv_freq = self.inv_freq
+        if inv_freq.device != x.device:
+            inv_freq = inv_freq.to(device=x.device, non_blocking=True)
+
+        inv_freq_expanded = inv_freq[None, None, :, None].float().expand(3, position_ids.shape[1], -1, 1)
+        position_ids_expanded = position_ids[:, :, None, :].float()
+
+        device_type = x.device.type if isinstance(x.device.type, str) and x.device.type != "mps" else "cpu"
+        with maybe_autocast(device_type=device_type, enabled=False):
+            freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(2, 3)
+            freqs = self.apply_interleaved_mrope(freqs, self.mrope_section)
+            emb = torch.cat((freqs, freqs), dim=-1)
+            cos = emb.cos() * self.attention_scaling
+            sin = emb.sin() * self.attention_scaling
+
+        return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
+
+    rotary_cls.forward = _patched_forward
+    rotary_cls._forecast_sim_rope_device_patch = True
+
+
+_patch_qwen35_rope_inv_freq_device_mismatch()
+
+
+def _patch_ray_reporter_psutil_attrs() -> None:
+    """
+    Avoid unstable per-process psutil memory probes in Ray's dashboard reporter.
+
+    On some MPI HTCondor B200 nodes, Ray's dashboard agent can crash with a fatal
+    Bus error while `psutil` gathers `memory_info` / `memory_full_info` for worker
+    processes. Ray then fate-shares the raylet with that sidecar and kills the whole
+    node. The reporter only uses those attrs for observability; the training stack
+    does not depend on them.
+    """
+
+    raw = os.environ.get("FSIM_RAY_SAFE_REPORTER_PSUTIL", "1").strip().lower()
+    if raw in {"0", "false", "no"}:
+        return
+
+    try:
+        import ray.dashboard.modules.reporter.reporter_agent as reporter_agent
+    except Exception:
+        return
+
+    if getattr(reporter_agent, "_forecast_sim_safe_psutil_patch", False):
+        return
+
+    original_attrs = getattr(reporter_agent, "PSUTIL_PROCESS_ATTRS", None)
+    if not original_attrs:
+        return
+
+    reporter_agent.PSUTIL_PROCESS_ATTRS = [
+        attr for attr in original_attrs if attr not in {"memory_info", "memory_full_info"}
+    ]
+    reporter_agent._forecast_sim_safe_psutil_patch = True
+
+
+_patch_ray_reporter_psutil_attrs()

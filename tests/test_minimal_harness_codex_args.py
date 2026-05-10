@@ -471,6 +471,62 @@ def test_codex_warmup_parallel_submits_predictions_and_cleans_runtime(tmp_path, 
     assert all(record["raw_output_log"].endswith("model_raw_warmup.jsonl") for record in index_records)
 
 
+def test_codex_warmup_qids_filters_targeted_reruns(tmp_path, monkeypatch):
+    q1 = SimpleNamespace(
+        qid="Q1",
+        title="Will X happen?",
+        background="Background",
+        resolution_criteria="Criteria",
+        answer_type="binary",
+        resolution_date=date(2026, 1, 10),
+        options=["Yes", "No"],
+    )
+    q2 = SimpleNamespace(
+        qid="Q2",
+        title="Will Y happen?",
+        background="Background",
+        resolution_criteria="Criteria",
+        answer_type="binary",
+        resolution_date=date(2026, 1, 11),
+        options=["Yes", "No"],
+    )
+
+    class DummyForecastInterface:
+        def __init__(self):
+            self.questions = {q.qid: q for q in (q1, q2)}
+            self.submissions = []
+            self.current_agent_id = None
+
+        def submit_prediction(self, submission):
+            self.submissions.append(submission)
+
+    seen_qids = []
+
+    def fake_run_single(self, q, current_date, forecast_interface):
+        seen_qids.append(str(q.qid))
+        effective_date = self._get_warmup_current_date(current_date, q)
+        return str(q.qid), effective_date, [
+            {"question_id": str(q.qid), "outcomes": {"Yes": 0.6, "No": 0.4}}
+        ]
+
+    monkeypatch.setattr(minimal_agent.MinimalHarnessAgent, "_run_single_warmup_question", fake_run_single)
+
+    cfg = minimal_agent.MinimalHarnessConfig(
+        harness_backend="codex",
+        prompt_mode="warmup",
+        codex_resume=False,
+        warmup_qids=["Q2"],
+        sandbox=False,
+    )
+    agent = minimal_agent.MinimalHarnessAgent("agent_001", cfg, agent_dir=str(tmp_path / "agent"))
+    forecast_interface = DummyForecastInterface()
+
+    agent.warmup(forecast_interface, date(2026, 3, 28))
+
+    assert seen_qids == ["Q2"]
+    assert [sub.question_id for sub in forecast_interface.submissions] == ["Q2"]
+
+
 def test_static_search_prompt_is_submit_only():
     q = SimpleNamespace(
         qid="Q1",
