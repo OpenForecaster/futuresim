@@ -187,8 +187,12 @@ def inject_env_matcher_timing_into_agent_logs(env, sim_date: date, day_matcher: 
         return
 
     target_date = str(sim_date)
+    agent_output_dirs = getattr(env, "agent_output_dirs", {}) or {}
     for agent in env.agents:
-        stats_path = os.path.join(env.output_dir, "agents", agent.agent_id, "timing_stats.jsonl")
+        agent_output_dir = agent_output_dirs.get(str(agent.agent_id))
+        if not agent_output_dir:
+            continue
+        stats_path = os.path.join(agent_output_dir, "timing_stats.jsonl")
         if not os.path.exists(stats_path):
             continue
 

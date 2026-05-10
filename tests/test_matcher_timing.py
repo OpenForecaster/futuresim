@@ -1,6 +1,11 @@
+import json
+from datetime import date
+from types import SimpleNamespace
+
 from agents.utils.timing import AgentTimer
 import environment.ansmatching as ansmatching
 from environment.ansmatching import AnswerMatcher
+from environment.scorekeeping import inject_env_matcher_timing_into_agent_logs
 
 
 class DummyInference:
@@ -81,3 +86,41 @@ def test_find_match_records_timing_for_batch_match_call():
     assert inference.calls == 1
     assert len(durations) == 1
     assert durations[0] >= 0.0
+
+
+def test_env_matcher_timing_uses_agent_output_dir_mapping(tmp_path):
+    mapped_dir = tmp_path / "custom_agent_dir"
+    legacy_dir = tmp_path / "agents" / "agent_a"
+    mapped_dir.mkdir()
+    legacy_dir.mkdir(parents=True)
+
+    original_row = {
+        "date": "2025-01-01",
+        "llm_count": 2,
+        "feedback_matcher_count": 99,
+    }
+    (mapped_dir / "timing_stats.jsonl").write_text(json.dumps(original_row) + "\n", encoding="utf-8")
+    (legacy_dir / "timing_stats.jsonl").write_text(json.dumps(original_row) + "\n", encoding="utf-8")
+
+    env = SimpleNamespace(
+        agents=[SimpleNamespace(agent_id="agent_a")],
+        output_dir=str(tmp_path),
+        agent_output_dirs={"agent_a": str(mapped_dir)},
+    )
+    inject_env_matcher_timing_into_agent_logs(
+        env,
+        date(2025, 1, 1),
+        {
+            "matcher_count": 3,
+            "matcher_total_seconds": 1.25,
+            "matcher_avg_seconds": 0.417,
+            "matcher_cost": 0.01,
+        },
+    )
+
+    mapped_row = json.loads((mapped_dir / "timing_stats.jsonl").read_text(encoding="utf-8"))
+    legacy_row = json.loads((legacy_dir / "timing_stats.jsonl").read_text(encoding="utf-8"))
+    assert mapped_row["matcher_count"] == 3
+    assert mapped_row["matcher_total_seconds"] == 1.25
+    assert "feedback_matcher_count" not in mapped_row
+    assert legacy_row == original_row

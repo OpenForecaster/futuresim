@@ -1,4 +1,4 @@
-"""Tests for ``environment.forecast_metrics`` helpers used by SkyRL warmup eval."""
+"""Tests for ``environment.forecast_metrics`` helpers."""
 
 from datetime import date
 

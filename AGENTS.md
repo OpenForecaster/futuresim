@@ -29,5 +29,5 @@ This repo is shared across multiple users and clusters. Optimize for collaborati
 
 ## Where / How to implement in this repoistory
 
-- Keep clear separation of roles between agents/ (agent specific logic), env/ (environment specific logic applicable that must apply to all agents) and skyrl_integration/ (skyrl specific or rl speciifc implementation)
+- Keep clear separation of roles between agents/ (agent specific logic) and env/ (environment specific logic that must apply to all agents).
 - Try to keep all scaffolds in agents/ as aligned as possible in instructions, prompts, and information shown, with the obvious exception of scaffold-specific changes for a particular type of agent. We want to ensure each agent gets its native i/o format, but apart from that all the environment specific details shown to the agents should be similar/equivalent across scaffolds.

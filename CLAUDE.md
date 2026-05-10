@@ -63,8 +63,6 @@ python scripts/test_basic_agent.py \
 python mpi_scripts/run_sim/submit_sim.py --config configs/shared/metaculus_sim.yaml --runs 3
 ```
 
-SkyRL training uses the **same repo `.venv`** as the rest of forecast-sim: run `uv sync` at the repo root, then `cd third_party/SkyRL && uv sync --active --extra fsdp` so the SkyRL submodule’s dependencies install into that env (see `.agents/skills/skyrl-training/references/setup-and-launch.md`). FlashAttention is optional — install manually if needed.
-
 ## Architecture
 
 ### Core Loop (`environment/env.py`)

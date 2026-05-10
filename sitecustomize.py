@@ -1,70 +1,11 @@
-"""Runtime compatibility shims loaded automatically by Python (repo `PYTHONPATH`).
+"""Runtime compatibility shims loaded automatically by Python.
 
-Targets **NovaSky SkyRL v0.1.0** (`skyrl-v0.1.0`). We do not keep compatibility with older
-SkyRL versions; delete or adjust these shims when bumping the submodule.
-
-What is still needed vs upstream:
-
-- **`init_custom_process_group` / `torch.__version__` string compare** — SkyRL still uses
-  ``str(torch.__version__) >= "2.6"`` to pick ``backend_options`` vs ``pg_options``, which
-  breaks for **2.10+** (lexicographic ``"2.10" < "2.6"``). We patch using
-  ``inspect.signature(_new_process_group_helper)`` instead.
-
-- **FSDP wrap policy for Qwen3.5 text checkpoints** — `get_fsdp_wrap_policy` still raises if
-  `_no_split_modules` lists vision layers that are not present on the loaded text module. We
-  filter to classes that actually exist and keep the FSDP2 apply path aligned.
-
-- **Qwen3.5 HF → vLLM weight names** — Policy FSDP state dicts still expose `model.*` while
-  vLLM’s Qwen3.5 stack expects `language_model.*`. We remap names in `FSDPWeightExtractor.extract_weights`
-  only (v0.1.0 dropped `get_weight_metadata` on this class).
-
-- **`apply_chat_template` tokenize output** — Some Qwen tokenizers return `BatchEncoding` when
-  `tokenize=True` without `return_dict`; `skyrl_gym_generator` still calls it that way. We
-  normalize to raw token-id lists on `PreTrainedTokenizerBase`.
-
-- **`ignore_keys_at_rope_validation` list vs set** — Qwen3.5 MoE `config.json` can supply a JSON
-  **list**; `RotaryEmbeddingConfigMixin.convert_rope_params_to_dict` uses set union (`|`) and
-  crashes. We coerce non-set iterables to `set(...)` before the original method runs.
-
-- **Qwen3.5 RoPE buffer device mismatch under FSDP2 CPU offload** — HF `Qwen3_5RotaryEmbedding`
-  assumes `self.inv_freq` already lives on the same device as the current hidden states. With
-  FSDP2 CPU offload, that buffer can still be on CPU during a later forward/logprob pass. We
-  materialize a local copy on the compute device only when a mismatch is detected.
-
-- **Ray dashboard agent `psutil` bus errors on MPI HTCondor nodes** — Ray's reporter module asks
-  `psutil` for per-process `memory_info` / `memory_full_info`, and on some B200 nodes that path
-  crashes the whole dashboard agent (which then fate-shares the raylet). We drop just those two
-  optional attrs from the reporter's process snapshot list on cluster jobs.
-
-Removed as redundant with v0.1.0 + the tokenizer shim:
-
-- **InferenceEngineClient prompt_token_ids normalization** — v0.1.0 uses `return_dict=True`
-  for the prompts-only path; multi-turn ids come from the same tokenizer `apply_chat_template`
-  calls fixed by the patch above, so monkey-patching the client is unnecessary.
+These patches cover small Qwen/Transformers issues that affect the core
+forecast-sim inference stack. Keep this file narrow: release branches should not
+carry training-framework-specific shims here.
 """
 
 from __future__ import annotations
-
-import inspect
-import os
-
-
-def _is_qwen35_config(config) -> bool:
-    model_type = str(getattr(config, "model_type", "")).strip().lower()
-    return model_type.startswith("qwen3_5")
-
-
-def _remap_qwen35_weight_name(name: str) -> str:
-    """Map HF trainer names to vLLM Qwen3.5 conditional-generation names."""
-    if not isinstance(name, str):
-        return name
-    if name.startswith("language_model.") or name.startswith("visual."):
-        return name
-    if name == "model" or name.startswith("model."):
-        return f"language_model.{name}"
-    if name == "lm_head" or name.startswith("lm_head."):
-        return f"language_model.{name}"
-    return name
 
 
 def _extract_input_ids(value):
@@ -81,244 +22,8 @@ def _extract_input_ids(value):
     return value
 
 
-def _patch_skyrl_fsdp_wrap_policy_for_qwen35() -> None:
-    """
-    Make SkyRL FSDP wrap-policy robust to missing multimodal layer classes.
-
-    Qwen3.5 text checkpoints can advertise vision block names in `_no_split_modules`
-    even though those classes do not exist in the instantiated text model.
-    """
-
-    try:
-        import torch.nn as nn
-        from transformers.trainer_pt_utils import get_module_class_from_name
-        from skyrl.backends.skyrl_train.distributed import fsdp_utils
-        from skyrl.backends.skyrl_train.distributed import fsdp_strategy
-    except Exception:
-        return
-
-    if getattr(fsdp_utils, "_forecast_sim_fsdp_wrap_patch", False):
-        return
-
-    original_get_fsdp_wrap_policy = fsdp_utils.get_fsdp_wrap_policy
-
-    def _patched_get_fsdp_wrap_policy(module, config=None, is_lora=False):
-        try:
-            return original_get_fsdp_wrap_policy(module=module, config=config, is_lora=is_lora)
-        except Exception as exc:
-            if "Could not find the transformer layer class to wrap in the model." not in str(exc):
-                raise
-
-        if config is not None and hasattr(config, "get"):
-            layer_names = config.get("transformer_layer_cls_to_wrap", None)
-        else:
-            layer_names = None
-
-        if not layer_names:
-            layer_names = getattr(module, "_no_split_modules", None)
-        if not layer_names:
-            return None
-
-        if isinstance(layer_names, str):
-            layer_names = [layer_names]
-
-        valid_layer_names = [
-            layer_name for layer_name in layer_names if get_module_class_from_name(module, layer_name) is not None
-        ]
-        if not valid_layer_names:
-            return None
-
-        if config is not None and hasattr(config, "items"):
-            filtered_config = dict(config)
-        else:
-            filtered_config = {}
-        filtered_config["transformer_layer_cls_to_wrap"] = valid_layer_names
-
-        return original_get_fsdp_wrap_policy(module=module, config=filtered_config, is_lora=is_lora)
-
-    def _normalize_layer_names(layer_names) -> list[str]:
-        if layer_names is None:
-            return []
-        if isinstance(layer_names, (str, bytes)):
-            raw_names = [layer_names]
-        elif isinstance(layer_names, (list, tuple, set)):
-            raw_names = list(layer_names)
-        else:
-            raw_names = [layer_names]
-
-        normalized: list[str] = []
-        for value in raw_names:
-            if value is None:
-                continue
-            if isinstance(value, str):
-                name = value
-            elif hasattr(value, "__name__"):
-                name = str(value.__name__)
-            else:
-                name = str(value)
-            if name and name not in normalized:
-                normalized.append(name)
-        return normalized
-
-    def _patched_apply_fsdp2(model, fsdp_kwargs, config):
-        wrap_policy = getattr(config, "wrap_policy", {}) or {}
-        configured_layer_names = (
-            wrap_policy.get("transformer_layer_cls_to_wrap", None) if hasattr(wrap_policy, "get") else None
-        )
-
-        layer_names = _normalize_layer_names(configured_layer_names)
-        if not layer_names:
-            layer_names = _normalize_layer_names(getattr(model, "_no_split_modules", None))
-        if not layer_names:
-            layer_names = sorted(
-                {module.__class__.__name__ for module in model.modules() if "DecoderLayer" in module.__class__.__name__}
-            )
-
-        modules = []
-        for _, module in model.named_modules():
-            if module.__class__.__name__ in layer_names or (
-                isinstance(module, nn.Embedding) and not model.config.tie_word_embeddings
-            ):
-                modules.append(module)
-
-        for module in modules:
-            fsdp_utils.fully_shard(module, **fsdp_kwargs)
-        fsdp_utils.fully_shard(model, **fsdp_kwargs)
-
-    fsdp_utils.get_fsdp_wrap_policy = _patched_get_fsdp_wrap_policy
-    fsdp_strategy.get_fsdp_wrap_policy = _patched_get_fsdp_wrap_policy
-    fsdp_utils.apply_fsdp2 = _patched_apply_fsdp2
-    fsdp_strategy.apply_fsdp2 = _patched_apply_fsdp2
-    fsdp_utils._forecast_sim_fsdp_wrap_patch = True
-
-
-_patch_skyrl_fsdp_wrap_policy_for_qwen35()
-
-
-def _patch_skyrl_custom_process_group_for_new_torch() -> None:
-    """
-    Patch SkyRL custom process-group helper: choose ``backend_options`` vs ``pg_options``
-    from the real ``_new_process_group_helper`` signature, not string torch version compare.
-    """
-
-    try:
-        from torch.distributed.distributed_c10d import Backend, PrefixStore, _world, default_pg_timeout, rendezvous
-        from skyrl.backends.skyrl_train.distributed import utils as dist_utils
-    except Exception:
-        return
-
-    if getattr(dist_utils, "_forecast_sim_custom_pg_patch", False):
-        return
-
-    helper_params = inspect.signature(dist_utils._new_process_group_helper).parameters
-    if "backend_options" in helper_params:
-        options_kwarg = "backend_options"
-    elif "pg_options" in helper_params:
-        options_kwarg = "pg_options"
-    else:
-        options_kwarg = None
-
-    def _patched_init_custom_process_group(
-        backend=None,
-        init_method=None,
-        timeout=None,
-        world_size=-1,
-        rank=-1,
-        store=None,
-        group_name=None,
-        pg_options=None,
-    ):
-        assert (store is None) or (init_method is None), "Cannot specify both init_method and store."
-
-        if store is not None:
-            assert world_size > 0, "world_size must be positive if using store"
-            assert rank >= 0, "rank must be non-negative if using store"
-        elif init_method is None:
-            init_method = "env://"
-
-        backend_obj = Backend(backend) if backend else Backend("undefined")
-        timeout = timeout or default_pg_timeout
-
-        if store is None:
-            rendezvous_iterator = rendezvous(init_method, rank, world_size, timeout=timeout)
-            store, rank, world_size = next(rendezvous_iterator)
-            store.set_timeout(timeout)
-            store = PrefixStore(group_name, store)
-
-        helper_kwargs = {
-            "group_name": group_name,
-            "timeout": timeout,
-        }
-        if options_kwarg is not None:
-            helper_kwargs[options_kwarg] = pg_options
-
-        pg, _ = dist_utils._new_process_group_helper(
-            world_size,
-            rank,
-            [],
-            backend_obj,
-            store,
-            **helper_kwargs,
-        )
-        _world.pg_group_ranks[pg] = {i: i for i in range(world_size)}
-        return pg
-
-    dist_utils.init_custom_process_group = _patched_init_custom_process_group
-    dist_utils._forecast_sim_custom_pg_patch = True
-
-
-_patch_skyrl_custom_process_group_for_new_torch()
-
-
-def _patch_skyrl_qwen35_weight_name_mapping() -> None:
-    """
-    Patch FSDP weight extraction names for Qwen3.5 -> vLLM sync.
-
-    SkyRL policy FSDP weights expose names like `model.*` while vLLM's
-    Qwen3_5ForConditionalGeneration expects `language_model.*`.
-    """
-
-    try:
-        from skyrl.backends.skyrl_train.workers.fsdp import fsdp_worker
-    except Exception:
-        return
-
-    if getattr(fsdp_worker, "_forecast_sim_qwen35_name_patch", False):
-        return
-
-    original_extract_weights = fsdp_worker.FSDPWeightExtractor.extract_weights
-
-    def _is_qwen35(extractor) -> bool:
-        model = getattr(extractor, "model", None)
-        config = getattr(model, "config", None)
-        if config is None:
-            wrapped = getattr(model, "_fsdp_wrapped_module", None)
-            config = getattr(wrapped, "config", None)
-        return _is_qwen35_config(config)
-
-    def _patched_extract_weights(self, dtype):
-        if not _is_qwen35(self):
-            yield from original_extract_weights(self, dtype)
-            return
-
-        for chunk in original_extract_weights(self, dtype):
-            chunk.names = [_remap_qwen35_weight_name(name) for name in chunk.names]
-            yield chunk
-
-    fsdp_worker.FSDPWeightExtractor.extract_weights = _patched_extract_weights
-    fsdp_worker._forecast_sim_qwen35_name_patch = True
-
-
-_patch_skyrl_qwen35_weight_name_mapping()
-
-
 def _patch_qwen_chat_template_tokenize_output() -> None:
-    """
-    Normalize Qwen chat-template tokenize output to token-id lists.
-
-    Some tokenizer implementations return BatchEncoding for tokenize=True even
-    when return_dict is not requested; SkyRL gym generator assumes plain token-id lists.
-    """
+    """Normalize Qwen chat-template tokenize output to token-id lists."""
 
     try:
         from transformers.tokenization_utils_base import PreTrainedTokenizerBase
@@ -339,8 +44,7 @@ def _patch_qwen_chat_template_tokenize_output() -> None:
         if not tokenize or return_dict or return_tensors is not None:
             return output
 
-        normalized = _extract_input_ids(output)
-        return normalized
+        return _extract_input_ids(output)
 
     PreTrainedTokenizerBase.apply_chat_template = _patched_apply_chat_template
     PreTrainedTokenizerBase._forecast_sim_chat_template_patch = True
@@ -351,11 +55,10 @@ _patch_qwen_chat_template_tokenize_output()
 
 def _patch_transformers_rope_ignore_keys_to_set() -> None:
     """
-    Qwen3.5 MoE HF configs may pass `ignore_keys_at_rope_validation` as a **list**
-    (from JSON). `RotaryEmbeddingConfigMixin.convert_rope_params_to_dict` then does
-    `ignore_keys | {"partial_rotary_factor"}`, which raises **TypeError** (list | set).
+    Qwen3.5 MoE HF configs may pass `ignore_keys_at_rope_validation` as a list.
 
-    Upstream expects a set; coerce any non-set iterable to `set(...)`.
+    Some Transformers versions then use set union (`|`) on that value and crash.
+    Coerce non-set iterables to `set(...)` before the original method runs.
     """
 
     try:
@@ -366,109 +69,15 @@ def _patch_transformers_rope_ignore_keys_to_set() -> None:
     if getattr(RotaryEmbeddingConfigMixin, "_forecast_sim_rope_ignore_keys_patch", False):
         return
 
-    _orig = RotaryEmbeddingConfigMixin.convert_rope_params_to_dict
+    original_convert = RotaryEmbeddingConfigMixin.convert_rope_params_to_dict
 
     def _patched(self, ignore_keys_at_rope_validation=None, **kwargs):
-        if ignore_keys_at_rope_validation is not None and not isinstance(
-            ignore_keys_at_rope_validation, set
-        ):
+        if ignore_keys_at_rope_validation is not None and not isinstance(ignore_keys_at_rope_validation, set):
             ignore_keys_at_rope_validation = set(ignore_keys_at_rope_validation)
-        return _orig(self, ignore_keys_at_rope_validation=ignore_keys_at_rope_validation, **kwargs)
+        return original_convert(self, ignore_keys_at_rope_validation=ignore_keys_at_rope_validation, **kwargs)
 
     RotaryEmbeddingConfigMixin.convert_rope_params_to_dict = _patched
     RotaryEmbeddingConfigMixin._forecast_sim_rope_ignore_keys_patch = True
 
 
 _patch_transformers_rope_ignore_keys_to_set()
-
-
-def _patch_qwen35_rope_inv_freq_device_mismatch() -> None:
-    """
-    Make Qwen3.5 rotary embedding robust to FSDP2 CPU offload.
-
-    Under FSDP2 CPU offload, the rotary `inv_freq` buffer can remain on CPU while the
-    active hidden states / position ids for a forward pass are already on a CUDA device.
-    HF's stock implementation assumes these devices already match and fails in the
-    matrix multiply. Keep behavior unchanged in the common case and only materialize a
-    temporary device-local copy when a mismatch is actually present.
-    """
-
-    try:
-        import torch
-        import transformers.models.qwen3_5.modeling_qwen3_5 as qwen35_modeling
-    except Exception:
-        return
-
-    rotary_cls = getattr(qwen35_modeling, "Qwen3_5TextRotaryEmbedding", None)
-    if rotary_cls is None:
-        rotary_cls = getattr(qwen35_modeling, "Qwen3_5RotaryEmbedding", None)
-    if rotary_cls is None:
-        return
-
-    maybe_autocast = qwen35_modeling.maybe_autocast
-
-    if getattr(rotary_cls, "_forecast_sim_rope_device_patch", False):
-        return
-
-    def _patched_forward(self, x, position_ids):
-        if position_ids.ndim == 2:
-            position_ids = position_ids[None, ...].expand(3, position_ids.shape[0], -1)
-
-        inv_freq = self.inv_freq
-        if inv_freq.device != x.device:
-            inv_freq = inv_freq.to(device=x.device, non_blocking=True)
-
-        inv_freq_expanded = inv_freq[None, None, :, None].float().expand(3, position_ids.shape[1], -1, 1)
-        position_ids_expanded = position_ids[:, :, None, :].float()
-
-        device_type = x.device.type if isinstance(x.device.type, str) and x.device.type != "mps" else "cpu"
-        with maybe_autocast(device_type=device_type, enabled=False):
-            freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(2, 3)
-            freqs = self.apply_interleaved_mrope(freqs, self.mrope_section)
-            emb = torch.cat((freqs, freqs), dim=-1)
-            cos = emb.cos() * self.attention_scaling
-            sin = emb.sin() * self.attention_scaling
-
-        return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
-
-    rotary_cls.forward = _patched_forward
-    rotary_cls._forecast_sim_rope_device_patch = True
-
-
-_patch_qwen35_rope_inv_freq_device_mismatch()
-
-
-def _patch_ray_reporter_psutil_attrs() -> None:
-    """
-    Avoid unstable per-process psutil memory probes in Ray's dashboard reporter.
-
-    On some MPI HTCondor B200 nodes, Ray's dashboard agent can crash with a fatal
-    Bus error while `psutil` gathers `memory_info` / `memory_full_info` for worker
-    processes. Ray then fate-shares the raylet with that sidecar and kills the whole
-    node. The reporter only uses those attrs for observability; the training stack
-    does not depend on them.
-    """
-
-    raw = os.environ.get("FSIM_RAY_SAFE_REPORTER_PSUTIL", "1").strip().lower()
-    if raw in {"0", "false", "no"}:
-        return
-
-    try:
-        import ray.dashboard.modules.reporter.reporter_agent as reporter_agent
-    except Exception:
-        return
-
-    if getattr(reporter_agent, "_forecast_sim_safe_psutil_patch", False):
-        return
-
-    original_attrs = getattr(reporter_agent, "PSUTIL_PROCESS_ATTRS", None)
-    if not original_attrs:
-        return
-
-    reporter_agent.PSUTIL_PROCESS_ATTRS = [
-        attr for attr in original_attrs if attr not in {"memory_info", "memory_full_info"}
-    ]
-    reporter_agent._forecast_sim_safe_psutil_patch = True
-
-
-_patch_ray_reporter_psutil_attrs()

@@ -2,7 +2,7 @@ from datetime import date
 
 import pandas as pd
 
-from environment.safe_executor import QueryExecutor
+from agents.utils.query_executor import QueryExecutor
 
 
 def _sample_df() -> pd.DataFrame:

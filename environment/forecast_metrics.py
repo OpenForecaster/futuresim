@@ -1,6 +1,4 @@
-"""
-Forecast quality metrics shared by ``SimulationEnvironment`` (``daily_metrics.csv``)
-and SkyRL OpenForesight warmup eval (``rollout_metrics`` / W&B).
+"""Forecast quality metrics shared by ``SimulationEnvironment`` and eval helpers.
 
 Single source of truth for top-1 accuracy, truth probability mass (``exp_acc``), and
 Brier skill from ``BaseScorer.score_prediction`` (``BrierScorer`` → ``1 - Σ(p−y)²``).
@@ -182,7 +180,7 @@ def forecast_scalar_metrics(
 
 @dataclass(frozen=True)
 class OpenForesightEvalEpisode:
-    """One SkyRL episode after ``get_metrics()`` (internal aggregation input)."""
+    """One OpenForesight eval episode after metric extraction."""
 
     valid_submit: bool
     brier_skill: float
@@ -218,7 +216,7 @@ def rollup_openforesight_eval_metrics(episodes: Sequence[OpenForesightEvalEpisod
 
 
 def episodes_from_fs_metric_dicts(metrics: List[Dict[str, Any]]) -> List[OpenForesightEvalEpisode]:
-    """Parse SkyRL per-episode ``get_metrics()`` rows (``fs_*`` scratch keys)."""
+    """Parse per-episode metric rows from ``fs_*`` scratch keys."""
     out: List[OpenForesightEvalEpisode] = []
     for m in metrics:
         valid = float(m.get("fs_valid_submit", 0.0)) >= 0.5

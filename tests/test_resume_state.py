@@ -42,3 +42,20 @@ def test_add_agent_preserves_restored_stats():
     assert env.agent_raw_brier[new_aid] == 0.0
     assert env.agent_snapshot_peer[new_aid] == 0.0
     assert env.agent_exp_acc_sum[new_aid] == 0.0
+
+
+def test_add_agent_can_register_output_dir_without_full_init(tmp_path):
+    env = SimulationEnvironment.__new__(SimulationEnvironment)
+    env.agents = []
+    env.agent_scores = {}
+    env.agent_correct = {}
+    env.agent_wrong = {}
+    env.agent_questions = {}
+    env.agent_raw_brier = {}
+    env.agent_snapshot_peer = {}
+    env.agent_exp_acc_sum = {}
+
+    agent = SimpleNamespace(agent_id="agent_a")
+    SimulationEnvironment.add_agent(env, agent, output_dir=str(tmp_path / "agent_a"))
+
+    assert env.agent_output_dirs == {"agent_a": str(tmp_path / "agent_a")}

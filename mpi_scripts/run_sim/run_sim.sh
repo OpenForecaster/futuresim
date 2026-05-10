@@ -98,7 +98,7 @@ for pkg in ("cublas", "cuda_runtime", "cudnn", "cufft", "curand", "cusolver"):
 PY
     )
 
-    # SkyRL and modern vLLM both expect the V1 engine path.
+    # Modern vLLM expects the V1 engine path.
     export VLLM_USE_V1="${VLLM_USE_V1:-1}"
 }
 

@@ -537,6 +537,7 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
                 agent_dir=os.path.join(output_dir, 'agents', agent_id),
                 articles_base=config.get('articles_base', os.environ.get('FSIM_ARTICLES_BASE', '')),
             )
+            agent.agent_output_dir = os.path.join(output_dir, 'agents', agent_id)
             agents.append(agent)
             print(f"  Created agent: {agent_id} (Minimal Harness) [Scaffold: {scaffold}]")
             continue
@@ -805,6 +806,7 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
                 "'gptossallq', and 'minimalHarness' are supported."
             )
         
+        agent.agent_output_dir = agent_dir
         agents.append(agent)
         print(f"  Created agent: {agent_id} ({provider}:{model}) [Scaffold: {scaffold}]")
     
@@ -1579,12 +1581,14 @@ def main():
                 agent_dir=os.path.join(output_dir, 'agents', agent_id),
                 articles_base=getattr(args, 'articles_base', os.environ.get('FSIM_ARTICLES_BASE', '')),
             )
+            agent.agent_output_dir = os.path.join(output_dir, 'agents', agent_id)
         else:
             raise ValueError(
                 f"Unknown scaffold: {args.scaffold}. Only 'basic', 'allQ', 'allqd', 'og', "
                 "'qwenbasic', 'qwenallq', 'mirobasic', 'miroallq', 'gptossbasic', "
                 "'gptossallq', and 'minimalHarness' are supported."
             )
+        agent.agent_output_dir = getattr(agent, "agent_output_dir", agent_dir)
         agents.append(agent)
         print(f"  Created agent: {agent_id}")
     else:
@@ -1622,6 +1626,11 @@ def main():
         matcher_cache_path=matcher_cache_path,
         matcher_max_concurrency=args.matcher_max_concurrency,
         max_outcomes_per_question=env_max_outcomes_per_question,
+        agent_output_dirs={
+            agent.agent_id: str(agent.agent_output_dir)
+            for agent in agents
+            if getattr(agent, "agent_output_dir", None)
+        },
     )
     
     # Add all agents

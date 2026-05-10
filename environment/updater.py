@@ -8,8 +8,6 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
-from agents.utils.output_logger import AgentOutputLogger
-
 
 def _daily_metrics_header(single_agent: bool) -> str:
     """
@@ -37,8 +35,8 @@ class SimLogger:
     """
     Thread-safe centralized logging for simulation events.
 
-    Shared environment artifacts stay here. Agent transcript logging remains
-    supported for backward compatibility with older callers/tests.
+    Shared environment artifacts stay here. Agent transcript logging lives in
+    the agent layer.
     """
 
     def __init__(self, output_dir: str = ".", append: bool = False):
@@ -62,22 +60,6 @@ class SimLogger:
 
         self._matcher_lock = Lock()
         self.matcher_file = open(os.path.join(output_dir, "matcher.jsonl"), mode)
-
-        self._agent_output_loggers: Dict[str, AgentOutputLogger] = {}
-        self._agent_logger_lock = Lock()
-        self._agent_append = append
-
-    def _get_agent_output_logger(self, agent_id: str) -> AgentOutputLogger:
-        with self._agent_logger_lock:
-            logger = self._agent_output_loggers.get(agent_id)
-            if logger is None:
-                logger = AgentOutputLogger(
-                    agent_id=agent_id,
-                    output_dir=os.path.join(self.output_dir, "agents", agent_id),
-                    append=self._agent_append,
-                )
-                self._agent_output_loggers[agent_id] = logger
-            return logger
 
     def log_prediction(
         self,
@@ -201,31 +183,11 @@ class SimLogger:
             self.matcher_file.write(json.dumps(record) + "\n")
             self.matcher_file.flush()
 
-    def log_model_output(
-        self,
-        sim_date: date,
-        agent_id: str,
-        prompt: Any,
-        response: str,
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> None:
-        self._get_agent_output_logger(agent_id).log_model_output(
-            sim_date,
-            prompt,
-            response,
-            metadata,
-        )
-
-    def flush_warmup_raw(self, agent_id: str) -> None:
-        self._get_agent_output_logger(agent_id).flush_warmup_raw()
-
     def close(self) -> None:
         self.actions_file.close()
         self.metrics_file.close()
         self.test_metrics_file.close()
         self.matcher_file.close()
-        for logger in self._agent_output_loggers.values():
-            logger.close()
 
 
 class MarketWriter:
@@ -291,8 +253,8 @@ class MarketWriter:
                 }
             )
 
-        # Agents (e.g. minimalHarness) may chmod this file read-only while active.
-        # On resume, the owner may no longer have write perms — ensure we can overwrite.
+        # Agent processes may make market.csv read-only while active. Restore
+        # owner write permissions before the environment refreshes the snapshot.
         if os.path.exists(self.csv_path):
             os.chmod(self.csv_path, 0o644)
         pd.DataFrame(rows).to_csv(self.csv_path, index=False)

@@ -44,7 +44,7 @@ Notes:
 | `scripts/` | CLI scripts for running simulations |
 | `configs/` | YAML configuration files |
 | `data/` | Data fetchers and news pipeline |
-| `third_party/` | External code dependencies (e.g., SkyRL submodule) |
+| `third_party/` | External code dependencies |
 | `mpi_scripts/` | HTCondor cluster job submission |
 | `notes/` | Scratch notes and experiment logs; not the source of truth |
 
@@ -109,10 +109,6 @@ python scripts/test_basic_agent.py \
 ### Submit Cluster Jobs
 ```bash
 python mpi_scripts/run_sim/submit_sim.py --config configs/shared/metaculus_sim.yaml --runs 3
-
-# SkyRL warmup-style search GRPO training
-python mpi_scripts/skyrl_search/submit_skyrl_search_train.py \
-  --config configs/skyrl/skyrl_openforesight_search_warmup_qwen3.5_4b.yaml --runs 1
 ```
 
 ## Documentation
@@ -120,7 +116,6 @@ python mpi_scripts/skyrl_search/submit_skyrl_search_train.py \
 - **[.agents/skills/run-simulation/](.agents/skills/run-simulation/)** — Local runs, HTCondor submission, resume, restart
 - **[.agents/skills/forecast-architecture/](.agents/skills/forecast-architecture/)** — Agent/environment interaction, scoring, memory, warmup
 - **[.agents/skills/news-pipeline-search/](.agents/skills/news-pipeline-search/)** — News ingestion, embeddings, LanceDB, search-enabled runs
-- **[.agents/skills/skyrl-training/](.agents/skills/skyrl-training/)** — SkyRL setup, data prep, launch, submodule maintenance
 - **[.agents/skills/agent-scaffolds/](.agents/skills/agent-scaffolds/)** — Explicit scaffold routing and model-specific variants
 
 ## Output

@@ -2,10 +2,6 @@
 	path = data/news/news-please
 	url = https://github.com/fhamborg/news-please.git
 	ignore = dirty
-[submodule "third_party/SkyRL"]
-	path = third_party/SkyRL
-	url = https://github.com/shash42/SkyRL.git
-	branch = main
 [submodule "forecast-sim-overleaf"]
 	path = forecast-sim-overleaf
 	url = https://github.com/nikhilchandak/forecast-sim-overleaf.git

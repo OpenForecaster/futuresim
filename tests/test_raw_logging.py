@@ -1,44 +1,40 @@
 import json
 from datetime import date
 
-from environment.env import SimLogger
+from agents.utils.output_logger import AgentOutputLogger
 
 
-def test_sim_logger_splits_daily_and_warmup_raw_logs_and_sorts_warmup(tmp_path):
-    logger = SimLogger(str(tmp_path))
+def test_agent_output_logger_splits_daily_and_warmup_raw_logs_and_sorts_warmup(tmp_path):
+    agent_dir = tmp_path / "agents" / "agent_a"
+    logger = AgentOutputLogger("agent_a", str(agent_dir))
 
     logger.log_model_output(
         date(2025, 1, 1),
-        "agent_a",
         [{"role": "user", "content": "daily prompt"}],
         "daily response",
         {"phase": "llm", "raw_stream": "daily"},
     )
     logger.log_model_output(
         date(2025, 1, 1),
-        "agent_a",
         [{"role": "user", "content": "warmup q2"}],
         "resp q2",
         {"phase": "llm", "raw_stream": "warmup", "qid": "q2"},
     )
     logger.log_model_output(
         date(2025, 1, 1),
-        "agent_a",
         [{"role": "user", "content": "warmup q1 first"}],
         "resp q1 first",
         {"phase": "llm", "raw_stream": "warmup", "qid": "q1"},
     )
     logger.log_model_output(
         date(2025, 1, 1),
-        "agent_a",
         [{"role": "tool", "output": "warmup q1 second"}],
         "resp q1 second",
         {"phase": "submit", "raw_stream": "warmup", "qid": "q1"},
     )
-    logger.flush_warmup_raw("agent_a")
+    logger.flush_warmup_raw()
     logger.close()
 
-    agent_dir = tmp_path / "agents" / "agent_a"
     daily_rows = [json.loads(line) for line in (agent_dir / "model_raw_daily.jsonl").read_text(encoding="utf-8").splitlines() if line]
     warmup_rows = [json.loads(line) for line in (agent_dir / "model_raw_warmup.jsonl").read_text(encoding="utf-8").splitlines() if line]
 

@@ -54,7 +54,8 @@ class SimulationEnvironment:
                  resolved_only: bool = False,
                  matcher_cache_path: Optional[str] = None,
                  matcher_max_concurrency: int = 300,
-                 max_outcomes_per_question: int = 5):
+                 max_outcomes_per_question: int = 5,
+                 agent_output_dirs: Optional[Dict[str, str]] = None):
         
         # Handle positional args shift if someone called with positional args (unlikely in this codebase but safe)
         # We'll rely on kwargs mostly.
@@ -77,6 +78,11 @@ class SimulationEnvironment:
         self.timegap_days = max(1, int(timegap_days or 1))
         self.max_outcomes_per_question = max(1, int(max_outcomes_per_question or 1))
         self.matcher_max_concurrency = max(1, int(matcher_max_concurrency or 300))
+        self.agent_output_dirs: Dict[str, str] = {
+            str(agent_id): str(agent_dir)
+            for agent_id, agent_dir in (agent_output_dirs or {}).items()
+            if agent_dir
+        }
         
         # Logging and market state
         self.resume_dir = resume_dir
@@ -152,8 +158,12 @@ class SimulationEnvironment:
         if self.resume_dir:
             self._restore_state(self.resume_dir)
         
-    def add_agent(self, agent):
+    def add_agent(self, agent, output_dir: Optional[str] = None):
         self.agents.append(agent)
+        if output_dir:
+            if not hasattr(self, "agent_output_dirs"):
+                self.agent_output_dirs = {}
+            self.agent_output_dirs[str(agent.agent_id)] = str(output_dir)
         # Preserve restored resume stats if they were reconstructed before agents were added.
         self.agent_scores.setdefault(agent.agent_id, 0.0)
         self.agent_correct.setdefault(agent.agent_id, 0)
