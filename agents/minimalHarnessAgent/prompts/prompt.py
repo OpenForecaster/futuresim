@@ -1,15 +1,9 @@
-"""System prompt builder for the 'no_memory' prompt mode.
+"""Default system prompt builder for MinimalHarnessAgent backends.
 
-Identical to prompt.py except all instructions about maintaining memory or
-taking notes are stripped:
-- The HANDHOLDING_SECTION (SKILLS.md / MEMORY.md / "organize notes per-question"
-  guidance) is removed entirely.
-- The cadence section no longer mentions persistent workspace files.
-- The Workspace listing no longer mentions memory/.
-
-The Claude Code backend disallows Write/Edit tools in this mode. Bash/Read
-remain available for read-only inspection, and the prompt does not suggest
-note-taking or memory.
+Mirrors BasicAgent._build_instructions as closely as possible.
+Sections that differ for external CLI harnesses (MCP tools instead of chat-tool
+function calling, workspace files instead of structured memory, no budget
+system, no DataFrame sandbox) are marked with "HARNESS-SPECIFIC" comments.
 """
 
 from datetime import date, timedelta
@@ -20,12 +14,22 @@ def _iso(d) -> str:
     return d.isoformat() if hasattr(d, "isoformat") else str(d)
 
 
-# ── Workflow / handholding versions are kept identical to prompt.py ────
+# ── HARNESS-SPECIFIC: workflow and handholding ────────────────────────
+#
+# `handholding_version` selects how much explicit guidance the agent gets.
+# The three versions match historical states of this file (and mcp_server.py)
+# and are wired together so a config can A/B them:
+#   - "v1": minimal (state before commit dadfc2f)
+#   - "v2": adds "never done while active" nudge (state after dadfc2f)
+#   - "v3": v2 + "questions resolving tomorrow" reminders (state after 16b1b7a)
+#
+# Default is "v1" everywhere.
 
 HANDHOLDING_VERSIONS = ("v1", "v2", "v3")
 
 
 def _get_workflow_basic(handholding_version: str = "v1") -> str:
+    """Return the WORKFLOW_BASIC block for the requested handholding version."""
     if handholding_version == "v1":
         return """\
 1. Read market.csv to understand active questions (is_resolved == False).
@@ -53,13 +57,27 @@ def _get_workflow_basic(handholding_version: str = "v1") -> str:
     )
 
 
+# Kept for backwards compatibility with code/tests that imported the constant
+# directly. New code should call _get_workflow_basic(handholding_version).
 WORKFLOW_BASIC = _get_workflow_basic("v1")
 
 
-# NOTE: HANDHOLDING_SECTION is intentionally absent in this no-memory variant.
+HANDHOLDING_SECTION = """\
+You have full control over your workspace. You are free to create any files or directories that help you perform better. For example, these could be:
+- SKILLS.md documenting forecasting strategies you discover work well.
+- MEMORY.md tracking key lessons, resolution patterns, and calibration insights.
+- Python scripts, analysis tools, data pipelines, or any utilities you need.
+- Organize notes per-question, per-topic, or however suits your workflow.
 
+Your workspace is totally yours — use it however you want to maximize your performance."""
+
+
+# ── Matches BasicAgent._get_source_rules ──
 
 def _get_source_rules(source_name: str) -> str:
+    """Source-specific submission rules."""
+    # Matches BasicAgent._get_source_rules verbatim, except:
+    # - JSON tool-args example → MCP function-call example
     if source_name == "metaculus_binary":
         return """
 ## BINARY QUESTION RULES
@@ -83,10 +101,13 @@ mcp__forecast__submit_forecasts(question_id="12345", outcomes={"Candidate A": 0.
     return ""
 
 
+# ── Matches BasicAgent._build_binary_brier_scoring_section (single agent) ──
+
 _BINARY_TW_NUDGE = ' — **but the TW score equally rewards updating when new evidence arrives, since each new submission overwrites the prior one and accrues weight from that day forward. Never treat a forecast as "done" while its question is still active.**'
 
 
 def _build_binary_brier_scoring_section(handholding_version: str = "v1") -> str:
+    # v1 omits the "never done while active" nudge; v2 and v3 include it.
     nudge = _BINARY_TW_NUDGE if handholding_version != "v1" else ""
     return f"""\
 ## SCORING (Brier Score, Binary)
@@ -104,6 +125,8 @@ Key Mechanics:
 """
 
 
+# ── Matches BasicAgent._build_brier_skill_scoring_section (single agent) ──
+
 _MCQ_TW_NUDGE = ' — **but the TW score equally rewards updating when new evidence arrives, since each new submission overwrites the prior one and accrues weight from that day forward. Never treat a forecast as "done" while its question is still active.**'
 
 
@@ -111,6 +134,7 @@ def _build_brier_skill_scoring_section(
     max_outcomes_per_question: int,
     handholding_version: str = "v1",
 ) -> str:
+    # v1 omits the "never done while active" nudge; v2 and v3 include it.
     nudge = _MCQ_TW_NUDGE if handholding_version != "v1" else ""
     return f"""\
 ## SCORING (Brier Skill Score)
@@ -135,12 +159,16 @@ def _get_scoring_section(
     max_outcomes_per_question: int,
     handholding_version: str = "v1",
 ) -> str:
+    """Matches BasicAgent._get_scoring_section for single agent."""
     if source_name == "metaculus_binary":
         return _build_binary_brier_scoring_section(handholding_version)
     return _build_brier_skill_scoring_section(max_outcomes_per_question, handholding_version)
 
 
+# ── Matches BasicAgent._build_cadence_section ──
+
 def _build_new_articles_text(new_articles_count: Optional[int] = None) -> str:
+    """Match BasicAgent's article-update wording when a count is available."""
     if new_articles_count is not None:
         return (
             f"{new_articles_count:,} new articles have been published since your "
@@ -163,8 +191,12 @@ def _build_cadence_section(
     imminent_qids: Optional[list] = None,
     handholding_version: str = "v1",
 ) -> str:
-    """Same as prompt.py._build_cadence_section but the persistent-workspace
-    sentence is removed (no_memory mode does not advertise memory/notes)."""
+    """Matches BasicAgent._build_cadence_section template.
+    HARNESS-SPECIFIC: The system prompt is written once for persistent modes,
+    so article counts may be static across future wakeups. The "context is
+    cleared" sentence is replaced because workspace files persist across days.
+
+    The "questions resolve tomorrow" reminder is v3-only (added in 16b1b7a)."""
     if next_active_date is None and hasattr(current_date, "__add__"):
         next_active_date = current_date + timedelta(days=timegap_days)
     last_text = (
@@ -198,13 +230,17 @@ def _build_cadence_section(
     return (
         "## UPDATE CADENCE\n"
         f"You have the chance to update your predictions every {timegap_days} day(s). "
-        "Your past submissions are recorded at `predictions/YYYY-MM-DD.json` (one file per past day) — "
-        "**re-read market.csv each day, search the new articles for updates, and revise any forecast on a still-active question where new evidence has shifted your view**. A forecast is never \"done\" while its question is still active. "
+        # HARNESS-SPECIFIC: replaces BasicAgent's "Your context is cleared after
+        # every session and your memory (along with past predictions) is the
+        # only information retained between sessions."
+        "Your workspace files (memory/, scripts, notes) persist across days — use them to track reasoning and lessons learned. "
         "Articles are available via the search tool and in the articles/ directory. "
-        f"Current date: {_iso(current_date)}. {last_text}{next_text}\n"
+        f"Current date: {_iso(current_date)}. {next_text}\n"
         f"{trailing}\n"
     )
 
+
+# ── Matches BasicAgent._search_results_description ──
 
 def _search_results_description(max_search_results: int = 5, chunk_tokens: int = 512) -> str:
     extra_info = "The search tool uses a hybrid approach to retrieve articles, combining both semantic similarity (through an embedding model) and keyword matching."
@@ -214,9 +250,13 @@ def _search_results_description(max_search_results: int = 5, chunk_tokens: int =
     )
 
 
-def _get_data_notes() -> str:
-    return "Note: `ground_truth` column contains the ground truth answer which is generally a string (or None if not yet resolved)."""
+# ── Matches BasicAgent._get_data_notes (single agent mode) ──
 
+def _get_data_notes() -> str:
+    # return "Note: `my_prediction` column contains your current forecast as a dict (or None if not yet predicted)."
+    return "Note: `my_prediction` column contains your current forecast as a dict (or None if not yet predicted). Similarly, `ground_truth` column contains the ground truth answer which is generally a string (or None if not yet resolved)."""
+
+# ── Main prompt builder ───────────────────────────────────────────────
 
 def build_system_prompt(
     workspace: str,
@@ -241,6 +281,28 @@ def build_system_prompt(
             f"Unknown handholding_version={handholding_version!r}; "
             f"expected one of {HANDHOLDING_VERSIONS}"
         )
+    # ── Section ordering matches BasicAgent._build_instructions ──
+    #
+    # BasicAgent order:
+    #   1. Opening line
+    #   2. Feedback (resolutions + cumulative perf)    <- HARNESS-SPECIFIC: omitted,
+    #                                                     delivered via MCP next_day
+    #   3. Source context
+    #   4. Source rules
+    #   5. Multi-agent context                         <- harness is single agent
+    #   6. Cadence section
+    #   7. Memory section                              <- HARNESS-SPECIFIC: HANDHOLDING_SECTION
+    #   8. Scoring section
+    #   9. AVAILABLE DATA (search + DataFrame + notes) <- HARNESS-SPECIFIC: market.csv
+    #                                                     instead of DataFrame
+    #  10. CODE EXECUTION ENVIRONMENT                  <- HARNESS-SPECIFIC: omitted,
+    #                                                     CLI has native tools
+    #  11. RESPONSE FORMAT                             <- HARNESS-SPECIFIC: omitted,
+    #                                                     CLI uses MCP tools natively
+    #  12. TOOLS AVAILABLE FOR YOUR USE                <- HARNESS-SPECIFIC: MCP tool format
+    #  13. INTERACTION FLOW (budget)                   <- HARNESS-SPECIFIC: no budget system
+    #  14. SUBMISSION RULES
+    #  15. Begin
 
     source_rules = _get_source_rules(source_name)
     scoring_section = _get_scoring_section(
@@ -258,17 +320,23 @@ def build_system_prompt(
     )
     data_notes = _get_data_notes()
 
+    # Matches BasicAgent search_advice text verbatim.
     search_results_desc = _search_results_description()
+    # search_advice = f"You have access to a news article database which is updated **daily**. {search_results_desc} You can also access the articles directly in the articles/ directory."
     search_advice = f"You have access to a news article database which is updated **daily** through a search tool, that you can use to find evidence for your forecasts."
+    # Matches BasicAgent search_tool_line cutoff description.
     cutoff_desc = "today's date"
     if search_cutoff_days > 0:
         cutoff_date = current_date - timedelta(days=search_cutoff_days) if hasattr(current_date, '__sub__') else current_date
         cutoff_desc = f"{_iso(cutoff_date)} (today - {search_cutoff_days} days)"
 
+    # Matches BasicAgent search_tool_line text verbatim.
     search_tool_line = (
         f"- `mcp__forecast__search_news(query, from_date?, to_date?)`: search the news corpus for evidence. "
         f"`to_date` is capped at {cutoff_desc}. {search_results_desc}\n"
     )
+
+    # ── Assemble prompt (matches BasicAgent._build_instructions order) ──
 
     intro_sections = [
         f"You are a forecasting agent. Today is {current_date}. Your goal is to make accurate and calibrated predictions.",
@@ -285,7 +353,7 @@ def build_system_prompt(
 {scoring_section}
 
 ## AVAILABLE DATA
-{search_advice}
+{search_advice} 
 You can access the market.csv file (READ-ONLY) in your workspace containing {num_questions} questions ({num_active} active/unresolved, {num_resolved} resolved).
 
 Column descriptions of the DataFrame (market.csv):
@@ -299,6 +367,8 @@ Column descriptions of the DataFrame (market.csv):
 - ground_truth (object)
 - num_predictions (int64)
 - options (object)
+- my_prediction (object)
+- my_prediction_date (object)
 
 {data_notes}
 
@@ -314,6 +384,9 @@ Column descriptions of the DataFrame (market.csv):
 - articles/ — Browsable news articles organized by date as articles/YYYY/MM/DD/articles.jsonl (one JSON article per line). New date directories appear after calling `mcp__forecast__next_day`.
   - Each line has fields: `title` (headline), `source` (publisher domain, e.g. "www.reuters.com"), `date_publish` (original publication date, YYYY-MM-DD), `url` (canonical article link), `content` (full article body text to read/grep), plus `id`, `date` (crawl date), `date_modify`.
 - predictions/ — Read-only record of your past submissions, one file per day as `predictions/YYYY-MM-DD.json`. Each file is a JSON list of `{{"question_id": ..., "outcomes": {{<outcome>: <prob>, ...}}}}` entries — the predictions you submitted that day. A new file appears after each `mcp__forecast__next_day`.
+- memory/ — Your persistent notes directory. Read and write freely. Files here persist across days. Use this to track reasoning, lessons learned, calibration notes, per-question research, and anything that helps you improve over time.
+
+{HANDHOLDING_SECTION}
 
 
 ## SUBMISSION RULES
@@ -329,10 +402,94 @@ Column descriptions of the DataFrame (market.csv):
 ## Rules
 - No web access is available. Use `mcp__forecast__search_news` and articles/ for information.
 - market.csv is read-only. DO NOT modify it.
-- You may use Bash/Read for read-only inspection of market.csv, predictions/, and articles/.
-- You have no Write/Edit tools.
+- You can use Bash, Read, Write, Grep, Glob, and other tools freely in your workspace.
 - Your job is to maximize your time-weighted score (TW-score).
 
 ---
 
 Begin."""
+
+
+def build_warmup_prompt(
+    current_date,
+    q,
+    source_context: str = "",
+    source_name: str = "openforesight",
+    max_outcomes_per_question: int = 5,
+    search_cutoff_days: int = 0,
+    static_search_text: Optional[str] = None,
+) -> str:
+    """Focused one-question prompt for minimalHarness Codex warmup mode."""
+    source_rules = _get_source_rules(source_name)
+    scoring_section = _get_scoring_section(source_name, max_outcomes_per_question)
+    submit_only = static_search_text is not None
+
+    search_results_desc = _search_results_description()
+    cutoff_desc = "today's date"
+    if search_cutoff_days > 0:
+        cutoff_date = current_date - timedelta(days=search_cutoff_days) if hasattr(current_date, "__sub__") else current_date
+        cutoff_desc = f"{_iso(cutoff_date)} (today - {search_cutoff_days} days)"
+    search_tool_line = (
+        f"- `mcp__forecast__search_news(query, from_date?, to_date?)`: search the news corpus for evidence. "
+        f"`to_date` is capped at {cutoff_desc}. {search_results_desc}\n"
+    )
+    if submit_only:
+        evidence_section = f"""\
+## STATIC RETRIEVED ARTICLES
+The following evidence was retrieved before this session by running the target question title as one date-capped hybrid news search query. Use this evidence as the only research context for this question.
+
+{static_search_text.strip()}
+"""
+        tools_section = f"""\
+## TOOLS YOU SHOULD USE
+Only one MCP tool is available in this session:
+- `mcp__forecast__submit_forecasts(question_id, outcomes)`: submit exactly one forecast for qid `{q.qid}`.
+
+Do not use search, article browsing, shell/file tools, or any other tools. Make the forecast from the question text and static retrieved articles above.
+"""
+        after_submit_rule = "After a successful forecast submission, stop; the harness will end this isolated question session."
+    else:
+        evidence_section = ""
+        tools_section = f"""\
+## TOOLS YOU SHOULD USE
+Use the MCP forecasting tools. Native web access is disabled; use only the date-capped news corpus.
+{search_tool_line}- `mcp__forecast__submit_forecasts(question_id, outcomes)`: submit exactly one forecast for qid `{q.qid}`.
+"""
+        after_submit_rule = "After a successful forecast submission, stop; the harness will end this isolated question session."
+
+    prompt = f"""\
+You are a forecasting agent. Your goal is to make accurate and calibrated predictions. Today is {current_date}.
+
+This is an isolated per-question warmup session. Work only on the target question below; do not use notes or predictions from other questions.
+
+Target Question: {q.title} (ID: {q.qid})
+
+Background: {q.background}
+Resolution Criteria: {q.resolution_criteria}
+Answer Type: {q.answer_type}
+
+{source_context.strip()}
+
+{source_rules.strip()}
+
+{scoring_section}
+
+{evidence_section}
+{tools_section}
+
+
+## SUBMISSION RULES
+- qid must be {q.qid}
+- Each `mcp__forecast__submit_forecasts` call must contain exactly one forecast for this one question.
+- You may submit again in this session to revise qid {q.qid}; the latest submission is what counts.
+- You can submit up to {max_outcomes_per_question} outcomes.
+- Outcome names must be REAL predicted answers (e.g., person names, locations, numbers, dates).
+- NEVER use placeholders like "Unknown", "TBD", "Other", or "N/A".
+- Probabilities must sum to <= 1.0.
+- {after_submit_rule}
+
+---
+
+Begin.
+"""
+    return prompt

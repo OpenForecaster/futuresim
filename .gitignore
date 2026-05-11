@@ -1,7 +1,7 @@
-analysis/plots/
-analysis/output/
+analysis/
 analysis/openforesight_test_question_topic_distribution.csv
 analysis/openforesight_test_question_topics_manual.csv
+third_party/
 wandb/
 /.tmp*
 /=3
@@ -99,3 +99,4 @@ numactl-2.0.16/
 configs/glm_api_key.py
 configs/deepseek_api_key.py
 configs/qwen_api_key.py
+configs/brave_search_api.py

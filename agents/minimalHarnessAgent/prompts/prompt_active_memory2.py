@@ -23,11 +23,11 @@ tip line, "Begin") matches the AllQ flow.
 from datetime import date, timedelta
 from typing import Optional
 
-from agents.minimalHarnessAgent.prompt_active_memory import (
+from agents.minimalHarnessAgent.prompts.prompt_active_memory import (
     _allq_reminder,
     _normalize_prompt_heading_spacing,
 )
-from agents.minimalHarnessAgent.prompt import (
+from agents.minimalHarnessAgent.prompts.prompt import (
     _build_new_articles_text,
     _get_data_notes,
     _get_scoring_section,

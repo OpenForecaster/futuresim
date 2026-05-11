@@ -46,10 +46,22 @@ from environment.env import SimulationEnvironment, SimForecastInterface
 from environment.matcher_cache import resolve_sim_matcher_cache_path
 from agents.basicAgent import BasicAgent, AgentConfig
 from agents.allQAgent import AllQAgent, AllQDailyAgent
-from agents.ogAgent import OgAgent
-from agents.gptossAgent import GPTOSSBasicAgent, GPTOSSAllQAgent
-from agents.miroAgent import MiroBasicAgent, MiroAllQAgent
 from agents.qwenAgent import QwenBasicAgent, QwenAllQAgent
+
+
+def _load_gptoss_agents():
+    from agents.gptossAgent import GPTOSSBasicAgent, GPTOSSAllQAgent
+    return GPTOSSBasicAgent, GPTOSSAllQAgent
+
+
+def _load_miro_agents():
+    from agents.miroAgent import MiroBasicAgent, MiroAllQAgent
+    return MiroBasicAgent, MiroAllQAgent
+
+
+def _load_og_agent():
+    from agents.ogAgent import OgAgent
+    return OgAgent
 
 
 # Default paths
@@ -748,6 +760,7 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
                 start_date=args.sim_start_date
             )
         elif scaffold == 'mirobasic':
+            MiroBasicAgent, _ = _load_miro_agents()
             agent = MiroBasicAgent(
                 agent_id=agent_id,
                 inference_provider=inference_provider,
@@ -756,6 +769,7 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
                 search_tool=search_tool
             )
         elif scaffold == 'miroallq':
+            _, MiroAllQAgent = _load_miro_agents()
             agent = MiroAllQAgent(
                 agent_id=agent_id,
                 inference_provider=inference_provider,
@@ -765,6 +779,7 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
                 start_date=args.sim_start_date
             )
         elif scaffold == 'gptossbasic':
+            GPTOSSBasicAgent, _ = _load_gptoss_agents()
             agent = GPTOSSBasicAgent(
                 agent_id=agent_id,
                 inference_provider=inference_provider,
@@ -773,6 +788,7 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
                 search_tool=search_tool
             )
         elif scaffold == 'gptossallq':
+            _, GPTOSSAllQAgent = _load_gptoss_agents()
             agent = GPTOSSAllQAgent(
                 agent_id=agent_id,
                 inference_provider=inference_provider,
@@ -791,6 +807,7 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
                 start_date=args.sim_start_date
             )
         elif scaffold in ('og', 'ogagent', 'ogAgent'):
+            OgAgent = _load_og_agent()
             agent = OgAgent(
                 agent_id=agent_id,
                 inference_provider=inference_provider,
@@ -1512,6 +1529,7 @@ def main():
                 start_date=sim_start
             )
         elif args.scaffold == 'mirobasic':
+            MiroBasicAgent, _ = _load_miro_agents()
             agent = MiroBasicAgent(
                 agent_id=agent_id,
                 inference_provider=inference_provider,
@@ -1520,6 +1538,7 @@ def main():
                 search_tool=search_tool
             )
         elif args.scaffold == 'miroallq':
+            _, MiroAllQAgent = _load_miro_agents()
             agent = MiroAllQAgent(
                 agent_id=agent_id,
                 inference_provider=inference_provider,
@@ -1529,6 +1548,7 @@ def main():
                 start_date=sim_start
             )
         elif args.scaffold == 'gptossbasic':
+            GPTOSSBasicAgent, _ = _load_gptoss_agents()
             agent = GPTOSSBasicAgent(
                 agent_id=agent_id,
                 inference_provider=inference_provider,
@@ -1537,6 +1557,7 @@ def main():
                 search_tool=search_tool
             )
         elif args.scaffold == 'gptossallq':
+            _, GPTOSSAllQAgent = _load_gptoss_agents()
             agent = GPTOSSAllQAgent(
                 agent_id=agent_id,
                 inference_provider=inference_provider,
@@ -1555,6 +1576,7 @@ def main():
                 start_date=sim_start
             )
         elif args.scaffold == 'og':
+            OgAgent = _load_og_agent()
             agent = OgAgent(
                 agent_id=agent_id,
                 inference_provider=inference_provider,

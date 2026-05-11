@@ -1,12 +1,13 @@
 """
-MCP server for Claude Code forecasting agent.
+MCP server for MinimalHarnessAgent backends.
 
-Provides 3 tools: search_news, submit_forecasts, next_day.
-Communicates with the driver (MinimalHarnessAgent) via file-based signals.
+Provides core forecast tools (search_news, submit_forecasts, next_day) plus
+optional active_memory2 memory tools. Communicates with the driver via
+file-based signals.
 
 IMPORTANT: All heavy imports (lancedb, pandas, torch, etc.) are deferred to
-first use.  The MCP handshake must complete in <10s or Claude Code will give
-up and the tools won't be available.
+first use. The MCP handshake must complete quickly or the CLI backend may give
+up before tools are available.
 """
 
 import argparse
@@ -47,7 +48,7 @@ mcp = FastMCP("forecast-sim")
 
 # Global state — set in main(), lazily initialized on first tool call.
 _state: dict = {}
-_workspace: Path = Path(".")     # CC's workspace (market.csv, articles/, memory/)
+_workspace: Path = Path(".")     # CLI workspace (market.csv, articles/, memory/)
 _internal_dir: Path = Path(".")  # Driver coordination (state.json, signals/)
 _search_handler = None       # Set by _ensure_search()
 _search_tool = None           # Set by _ensure_search()
@@ -258,24 +259,6 @@ def _save_active_memory_for_today() -> None:
         os.chmod(date_dir, 0o555)
     except OSError:
         pass
-
-
-def _build_resolution_recap() -> str:
-    """Concise recap of resolved questions available to the memory phase."""
-    events = _state.get("resolution_events", []) or []
-    if not events:
-        return "No questions resolved since your last session."
-
-    lines = ["Questions resolved since your last session:"]
-    for ev in events:
-        qid = ev.get("qid", ev.get("question_id", "?"))
-        title = ev.get("title", "")
-        gt = ev.get("ground_truth", "?")
-        if title:
-            lines.append(f"- Q{qid}: {title} -> {gt}")
-        else:
-            lines.append(f"- Q{qid} -> {gt}")
-    return "\n".join(lines)
 
 
 def _build_feedback_recap(previous_label: str, active_count: int, *, mutate: bool) -> str:
@@ -501,7 +484,7 @@ def next_day() -> str:
     cur_date = _state["current_date"]
 
     if _memory_tools_enabled and not _memory_phase_active:
-        from agents.minimalHarnessAgent.prompt_active_memory2 import (
+        from agents.minimalHarnessAgent.prompts.prompt_active_memory2 import (
             build_memory_update_prompt,
         )
 
@@ -717,7 +700,7 @@ def main():
     global _memory_tools_enabled, _agent_id
 
     parser = argparse.ArgumentParser(description="Forecast-sim MCP server")
-    parser.add_argument("--workspace", required=True, help="Path to CC workspace (predictions/)")
+    parser.add_argument("--workspace", required=True, help="Path to CLI workspace (predictions/)")
     parser.add_argument("--internal-dir", default="", help="Path to internal dir (state.json, signals/)")
     parser.add_argument("--repo-root", default="", help="Repo root to add to sys.path")
     parser.add_argument("--search-db", default="", help="Path to LanceDB search index")

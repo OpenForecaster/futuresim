@@ -35,7 +35,7 @@ def _normalize_prompt_heading_spacing(prompt: str) -> str:
         return prompt
     return re.sub(r"\n{1,}(?=## )", "\n\n\n", prompt)
 
-from agents.minimalHarnessAgent.prompt import (
+from agents.minimalHarnessAgent.prompts.prompt import (
     _build_cadence_section,
     _get_data_notes,
     _get_scoring_section,

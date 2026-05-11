@@ -7,8 +7,10 @@ from types import SimpleNamespace
 import pytest
 
 from agents.minimalHarnessAgent import agent as minimal_agent
-from agents.minimalHarnessAgent.prompt import build_warmup_prompt
-from agents.minimalHarnessAgent.prompt_active_memory2 import build_daily_prompt
+from agents.minimalHarnessAgent.codex_agent import CodexAgent, aggregate_codex_warmup_logs
+from agents.minimalHarnessAgent.prompts.prompt import build_warmup_prompt
+from agents.minimalHarnessAgent.prompts.prompt_active_memory2 import build_daily_prompt
+from agents.minimalHarnessAgent.static_search import safe_qid
 from agents.search_tools.base import BaseSearchTool, SearchResult
 
 
@@ -200,7 +202,7 @@ def test_codex_warmup_launch_uses_user_prompt_without_agents_md(tmp_path, monkey
     )
     agent._build_mcp_invocation = lambda: ("python", ["mcp_server.py"])
     agent._maybe_sandbox = lambda cmd: cmd
-    agent._codex_initial_prompt_override = "single question prompt"
+    agent._initial_prompt_override = "single question prompt"
 
     captured = {}
 
@@ -355,7 +357,7 @@ def test_codex_warmup_question_uses_isolated_runtime_and_preserves_logs(tmp_path
         )
         (self._internal_dir / "codex_stderr.log").write_text("stderr\n")
 
-    monkeypatch.setattr(minimal_agent.MinimalHarnessAgent, "_start_codex", fake_start_codex)
+    monkeypatch.setattr(CodexAgent, "_start_codex", fake_start_codex)
 
     cfg = minimal_agent.MinimalHarnessConfig(
         harness_backend="codex",
@@ -373,14 +375,14 @@ def test_codex_warmup_question_uses_isolated_runtime_and_preserves_logs(tmp_path
         DummyForecastInterface(),
     )
 
-    safe_qid = agent._safe_qid(q.qid)
-    log_dir = internal_dir / "warmup_logs" / safe_qid
+    qid_slug = safe_qid(q.qid)
+    log_dir = internal_dir / "warmup_logs" / qid_slug
     state = json.loads((log_dir / "state.json").read_text())
 
     assert qid == "Q/1"
     assert effective_current_date == date(2026, 1, 9)
     assert predictions == [{"question_id": "Q/1", "outcomes": {"Yes": 0.7, "No": 0.3}}]
-    assert not (internal_dir / "warmup_runtime" / safe_qid).exists()
+    assert not (internal_dir / "warmup_runtime" / qid_slug).exists()
     assert state["current_date"] == "2026-03-28"
     assert state["search_current_date"] == "2026-01-09"
     assert [item["qid"] for item in state["questions"]] == ["Q/1"]
@@ -388,7 +390,7 @@ def test_codex_warmup_question_uses_isolated_runtime_and_preserves_logs(tmp_path
     assert (log_dir / "prompt.md").exists()
     assert (log_dir / "codex_stdout.jsonl").exists()
 
-    written = minimal_agent.aggregate_codex_warmup_logs("agent_001", internal_dir)
+    written = aggregate_codex_warmup_logs("agent_001", internal_dir)
     model_outputs = (internal_dir / "model_outputs.jsonl").read_text().splitlines()
     raw_warmup = (internal_dir / "model_raw_warmup.jsonl").read_text().splitlines()
     clean_record = json.loads(model_outputs[0])
@@ -439,7 +441,7 @@ def test_codex_warmup_parallel_submits_predictions_and_cleans_runtime(tmp_path, 
             {"question_id": str(q.qid), "outcomes": {"Yes": 0.6, "No": 0.4}}
         ]
 
-    monkeypatch.setattr(minimal_agent.MinimalHarnessAgent, "_run_single_warmup_question", fake_run_single)
+    monkeypatch.setattr(CodexAgent, "_run_single_warmup_question", fake_run_single)
 
     cfg = minimal_agent.MinimalHarnessConfig(
         harness_backend="codex",
@@ -509,7 +511,7 @@ def test_codex_warmup_qids_filters_targeted_reruns(tmp_path, monkeypatch):
             {"question_id": str(q.qid), "outcomes": {"Yes": 0.6, "No": 0.4}}
         ]
 
-    monkeypatch.setattr(minimal_agent.MinimalHarnessAgent, "_run_single_warmup_question", fake_run_single)
+    monkeypatch.setattr(CodexAgent, "_run_single_warmup_question", fake_run_single)
 
     cfg = minimal_agent.MinimalHarnessConfig(
         harness_backend="codex",
@@ -593,7 +595,7 @@ def test_static_search_aggregate_writes_raw_to_warmup_log(tmp_path):
     )
     (log_dir / "codex_stderr.log").write_text("")
 
-    written = minimal_agent.aggregate_codex_warmup_logs("agent_001", agent_dir)
+    written = aggregate_codex_warmup_logs("agent_001", agent_dir)
 
     assert written == 1
     clean = json.loads((agent_dir / "model_outputs.jsonl").read_text().strip())
@@ -625,7 +627,7 @@ def test_codex_static_search_launch_filters_tools_and_disables_codex_tool_featur
         agent_dir=str(internal_dir),
     )
     agent._maybe_sandbox = lambda cmd: cmd
-    agent._codex_initial_prompt_override = "static prompt"
+    agent._initial_prompt_override = "static prompt"
 
     captured = {}
 

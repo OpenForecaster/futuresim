@@ -3,22 +3,23 @@
 End-to-end test harness for MinimalHarnessAgent.
 
 Three test levels:
-  1. unit   -- MCP server tools work in isolation (no Claude Code, no GPU)
+  1. unit   -- MCP server tools work in isolation (no CLI backend, no GPU)
   2. smoke  -- Full pipeline with validation20 split through test_basic_agent.py.
                Uses real SimulationEnvironment, real search (LanceDB), real scoring,
                real articles, real answer matching. Proves a full run will work.
-               Requires: Claude Code auth, LanceDB + embedding model, OpenRouter key.
+               Requires backend auth for the selected config, LanceDB +
+               embedding model, and OpenRouter key.
   3. real   -- Arbitrary config for production evaluation runs.
 
 Usage:
   # Unit test (fast, no API calls):
-  python -m agents.minimalHarnessAgent.test_harness --level unit
+  python -m tests.manual.minimal_harness_harness --level unit
 
   # Smoke test (full features, validation20 split):
-  python -m agents.minimalHarnessAgent.test_harness --level smoke
+  python -m tests.manual.minimal_harness_harness --level smoke
 
   # Real eval run:
-  python -m agents.minimalHarnessAgent.test_harness --level real --config configs/minimal_harness_validation20.yaml
+  python -m tests.manual.minimal_harness_harness --level real --config configs/minimal_harness_validation20.yaml
 """
 
 import argparse
@@ -40,7 +41,7 @@ if _REPO_ROOT not in sys.path:
 # ── Unit tests ─────────────────────────────────────────────────────────
 
 def test_unit():
-    """Test MCP server tools in isolation — no Claude Code, no GPU."""
+    """Test MCP server tools in isolation — no CLI backend, no GPU."""
     from agents.minimalHarnessAgent.mcp_server import (
         _reload_state,
         _write_json,
@@ -146,8 +147,8 @@ def test_smoke():
 
     After the run completes, validates all expected output artifacts.
 
-    Requires: Claude Code auth, FSIM_SEARCH_DB + FSIM_EMBEDDING_MODEL (GPU),
-              OPENROUTER_API_KEY (answer matching).
+    Requires backend auth for the selected config, FSIM_SEARCH_DB +
+              FSIM_EMBEDDING_MODEL (GPU), and OPENROUTER_API_KEY.
     """
     import glob
 
