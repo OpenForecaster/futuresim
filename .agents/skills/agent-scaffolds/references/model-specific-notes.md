@@ -5,7 +5,7 @@
 ### Qwen3 vs Qwen3.5 (which scaffold)
 
 - **Qwen3:** Base scaffolds are now tool-only too. For Qwen3 on vLLM, use **`basic` / `allQ` / `allqd`** with **`vllm_enable_tools: true`** and set **`vllm_tool_call_parser: hermes`** explicitly. `qwenbasic` / `qwenallq` are still the Qwen-native compatibility wrappers, but the repo no longer keeps a separate XML/text protocol for base scaffolds.
-- **Qwen3.5:** Use **`basic` / `allQ` / `allqd`** or the thin **`qwenbasic` / `qwenallq`** wrappers with **`vllm_enable_tools: true`** and **`vllm_tool_call_parser: qwen3_coder`**. See `configs/qwen3.5/`.
+- **Qwen3.5:** Use **`basic` / `allQ` / `allqd`** or the thin **`qwenbasic` / `qwenallq`** wrappers with **`vllm_enable_tools: true`** and **`vllm_tool_call_parser: qwen3_coder`**. See `configs/allq_warmup_only_qwen3.5_27b_aisa.yaml` and `configs/allq_sim_qwen3.5_4b_aljazeeraSept25.yaml`.
 
 ### Qwen3.5 tuning and loop notes
 

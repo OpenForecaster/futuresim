@@ -1,0 +1,65 @@
+# Claude Code -> DeepSeek (deepseek-v4-pro) no-memory run bootstrapped from the
+# active_memory2 run's Day 0 predictions.
+#
+# Purpose: compare active_memory2 vs no_memory with the same starting point.
+# This mirrors the fixedWarmup bootstrap pattern:
+#   - bootstrap_dir/market.csv is copied as the first workspace market.csv
+#   - bootstrap_dir/prediction.json becomes workspace/predictions/2025-12-24.json
+#     and is injected into env histories as 2025-12-24 predictions
+#   - lookback_days=6 makes the first no_memory run day 2025-12-25
+#   - no_memory allows read-only Bash/Read inspection but disallows native Write/Edit tools
+#
+# Usage:
+#   python mpi_scripts/run_sim/submit_sim.py \
+#     --config configs/minimalHarness/no_memory/aljazeeraQ12026v37_deepseek_v4pro_nomemory_from_activemem2_day1.yaml \
+#     --runs 1
+
+sim_name: "claude_code_aljazeeraQ12026v37_deepseek_v4_pro_nomemory_activemem2_day0_bootstrap"
+
+start_date: "2025-12-31"
+end_date: "2026-03-28"
+resolution_start: "2025-12-31"
+resolution_end: "2026-03-28"
+lookback_days: 6
+search_cutoff_days: 0
+timegap_days: 1
+
+dataset: "openforesight"
+dataset_path: "${FSIM_DATASET_PATH}"
+split: "aljazeeraQ12026v37"
+resolved_only: false
+min_forecasters: 0
+output_base: "${FSIM_OUTPUT_BASE}/final_runs_v37"
+
+search_db: "${FSIM_SEARCH_DB}"
+embedding_model: "${FSIM_EMBEDDING_MODEL}"
+articles_base: "${FSIM_NEWS_BASE}/deduped_articles/data"
+
+matching: "openrouter"
+matcher: "deepseek/deepseek-v3.2"
+
+defaults:
+  provider: "none"
+  scaffold: "minimalHarness"
+  harness_backend: "claude_code"
+  # no_memory => fresh Claude session per day and no memory/notes prompt state.
+  prompt_mode: "no_memory"
+  claude_code_resume: false
+  sandbox: true
+  sandbox_proc_mode: "host_ro"
+  network_isolation: true
+  anthropic_base_url: "https://api.deepseek.com/anthropic"
+  handholding_version: "v1"
+  bootstrap_dir: "${FSIM_OUTPUT_BASE}/final_runs_v37/fixedWarmup_deepseek_v4pro_activemem2_day0"
+
+resources:
+  gpus: 1
+  cpus: 16
+  memory_gb: 80
+  disk_gb: 50
+  bid: 35
+
+agents:
+  - model: "deepseek-v4-pro"
+    timeout_seconds: 86400
+    claude_code_path: "${HOME}/.local/bin/claude"

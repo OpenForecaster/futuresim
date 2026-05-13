@@ -81,7 +81,7 @@ Example:
 
 ```bash
 python mpi_scripts/run_sim/submit_sim.py \
-  --config configs/qwen3.5/warmup_only_qwen3.5_27b.yaml \
+  --config configs/allq_warmup_only_qwen3.5_27b_aisa.yaml \
   --runs 1 \
   --set sim_name=qwenallq_warmup_only_qwen3.5-27b \
   --set defaults.scaffold=qwenallq

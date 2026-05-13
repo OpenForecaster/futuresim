@@ -50,7 +50,7 @@ python scripts/test_basic_agent.py \
  --start_date 2025-04-01 --end_date 2025-04-05 --sim_name test_run
 
 # Run from YAML config
-python scripts/test_basic_agent.py --config configs/qwen3.5/allq_nomem_restart_qwen3.5_27b.yaml
+python scripts/test_basic_agent.py --config configs/shared/default_sim.yaml
 
 # Resume from last checkpoint
 python scripts/test_basic_agent.py --resume /path/to/output_dir

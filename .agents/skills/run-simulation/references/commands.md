@@ -21,7 +21,7 @@ uv sync
 source .venv/bin/activate
 
 python scripts/test_basic_agent.py \
-  --config configs/metaculus_sim.yaml \
+  --config configs/shared/metaculus_sim.yaml \
   --start_date 2025-04-01 \
   --end_date 2025-04-05
 ```
@@ -30,7 +30,7 @@ Search-enabled run:
 
 ```bash
 python scripts/test_basic_agent.py \
-  --config configs/search_sim.yaml \
+  --config configs/shared/default_sim.yaml \
   --search_db "${FSIM_SEARCH_DB}"
 ```
 
@@ -40,7 +40,7 @@ Dry-run first:
 
 ```bash
 python mpi_scripts/run_sim/submit_sim.py \
-  --config configs/default_sim.yaml \
+  --config configs/shared/default_sim.yaml \
   --dry-run
 ```
 
@@ -48,7 +48,7 @@ Submit one or more runs:
 
 ```bash
 python mpi_scripts/run_sim/submit_sim.py \
-  --config configs/default_sim.yaml \
+  --config configs/shared/default_sim.yaml \
   --runs 3 \
   --set sim_name=my_test_run \
   --set resources.cpus=32 \
@@ -59,7 +59,7 @@ Explicit scaffold example:
 
 ```bash
 python mpi_scripts/run_sim/submit_sim.py \
-  --config configs/warmup_only_qwen3.5_27b.yaml \
+  --config configs/allq_warmup_only_qwen3.5_27b_aisa.yaml \
   --runs 1 \
   --set sim_name=qwenallq_warmup_only_qwen3.5-27b \
   --set defaults.scaffold=qwenallq
