@@ -1,26 +1,5 @@
 # Model-Specific Notes
 
-## GPT-OSS
-
-- Use scaffold `gptossbasic` or `gptossallq` explicitly.
-- GPT-OSS scaffolds use Harmony-format interactions.
-- Common launch knobs:
-  - `defaults.gptoss_reasoning_effort=medium|high`
-  - `agent_max_model_len=131072`
-
-Example:
-
-```bash
-python mpi_scripts/run_sim/submit_sim.py \
-  --config configs/allq_sim_oss20b.yaml \
-  --runs 1 \
-  --set sim_name=allq_sim_oss20b_128k_a10_50_med \
-  --set defaults.warmup_max_actions=10 \
-  --set defaults.max_actions=50 \
-  --set defaults.gptoss_reasoning_effort=medium \
-  --set agent_max_model_len=131072
-```
-
 ## Qwen
 
 ### Qwen3 vs Qwen3.5 (which scaffold)
@@ -50,17 +29,3 @@ python mpi_scripts/run_sim/submit_sim.py \
   - `submit_reserve_tokens` is the hard floor for the forecast loop. Once remaining context drops below it, the loop stops before another forecast-turn LLM call.
 - The gap between them is intentional runway for the final submit attempt, because the forced-submit prompt, assistant response, and tool transcript can still grow the prompt.
 - Reserve exhaustion does not currently suppress post-loop memory calls by itself; it only ends the action loop.
-
-## MiroThinker
-
-- Use scaffold `mirobasic` or `miroallq` explicitly.
-- MiroThinker scaffolds keep the base simulation semantics but rely on the checkpoint's native chat template, including `<tool_call>...</tool_call>` / `<tool_response>...</tool_response>` formatting and visible `<think>` replay.
-- Current native tuning from the Hugging Face card for MiroThinker-1.7-mini:
-  - `max_model_len=262144`
-  - `agent_max_model_len=262144`
-  - `defaults.temperature=1.0`
-  - `defaults.top_p=0.95`
-  - `defaults.repetition_penalty=1.05`
-  - `defaults.max_tokens=16384`
-- The recommended upstream context-retention profile is `keep5`, which maps here to `tool_result_keep_last=5`.
-- We still keep forecast-sim's one-tool-per-turn loop semantics and submit-budget guardrails for comparability with the native Qwen/GPT-OSS scaffolds.

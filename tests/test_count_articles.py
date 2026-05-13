@@ -304,7 +304,8 @@ class TestBuildCadenceSection:
         )
         result = agent._build_cadence_section(date(2025, 4, 10))
 
-        assert "New articles have been published" in result
+        assert "This is your first update." in result
+        assert "New articles have been published" not in result
         assert "999" not in result
         assert len(tool.count_calls) == 0  # count never called
 
@@ -382,7 +383,7 @@ class TestBuildCadenceSection:
         result = agent._build_cadence_section(date(2025, 4, 10))
 
         assert "## UPDATE CADENCE" in result
-        assert "every 3 day(s)" in result
+        assert "every 3 days" in result
         assert "Last update: 2025-04-07" in result
         assert "Current date: 2025-04-10" in result
         assert "Next scheduled update: 2025-04-13" in result

@@ -42,7 +42,7 @@ class RetryTestAgent(QwenBasicAgent):
         super().__init__(
             agent_id="retry_test",
             inference_provider=_DummyChatProvider(),
-            config=AgentConfig(gptoss_responses_max_retries=3),
+            config=AgentConfig(),
         )
         self.calls = 0
 

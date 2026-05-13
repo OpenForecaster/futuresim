@@ -631,12 +631,6 @@ Requirements:
         """
         Per-question warmup loop using the same chat-tools protocol as the daily agent.
         """
-        if self.config.singleans:
-            raise RuntimeError(
-                "AllQAgent warmup now requires chat tools. singleans is no longer supported here; "
-                "use the dedicated og scaffold if you need the answer/probability format."
-            )
-
         forecasts, context_limit_hit = self._run_chat_tools_action_loop(
             messages=messages,
             forecast_interface=forecast_interface,

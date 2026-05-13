@@ -49,21 +49,6 @@ from agents.allQAgent import AllQAgent, AllQDailyAgent
 from agents.qwenAgent import QwenBasicAgent, QwenAllQAgent
 
 
-def _load_gptoss_agents():
-    from agents.gptossAgent import GPTOSSBasicAgent, GPTOSSAllQAgent
-    return GPTOSSBasicAgent, GPTOSSAllQAgent
-
-
-def _load_miro_agents():
-    from agents.miroAgent import MiroBasicAgent, MiroAllQAgent
-    return MiroBasicAgent, MiroAllQAgent
-
-
-def _load_og_agent():
-    from agents.ogAgent import OgAgent
-    return OgAgent
-
-
 # Default paths
 DATASET_PATH = os.getenv("FSIM_DATASET_PATH", "/is/cluster/fast/sgoel/forecasting/qs/OpenForesight/data/")
 DATASET_CACHE = os.getenv("FSIM_DATASET_CACHE", "/is/cluster/fast/sgoel/forecasting/qs/cache")
@@ -342,16 +327,12 @@ def get_model_short_name(model: str) -> str:
 
 def _is_qwen_model(model: str) -> bool:
     model_l = str(model or "").lower()
-    return ("qwen" in model_l) and ("gpt-oss" not in model_l)
+    return "qwen" in model_l
 
 
 def _is_qwen35_model(model: str) -> bool:
     model_l = str(model or "").lower()
     return ("qwen3.5" in model_l) or ("qwen3_5" in model_l)
-
-
-def _is_miro_model(model: str) -> bool:
-    return "mirothinker" in str(model or "").lower()
 
 
 def _resolve_vllm_tool_call_parser(model: str, args) -> str | None:
@@ -369,9 +350,6 @@ def _resolve_vllm_tool_call_parser(model: str, args) -> str | None:
 
     if _is_qwen_model(model):
         return "hermes"
-
-    if _is_miro_model(model):
-        return None
 
     return "openai"
 
@@ -638,37 +616,12 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
             'warmup_memory_tool_choice',
             defaults.get('warmup_memory_tool_choice', 'required')
         ))
-        singleans = agent_def.get('singleans', defaults.get('singleans', False))
         tool_result_keep_last = _optional_int(
             agent_def.get(
                 'tool_result_keep_last',
                 defaults.get('tool_result_keep_last', getattr(args, 'tool_result_keep_last', -1))
             )
         )
-        gptoss_prompt_mode = agent_def.get(
-            'gptoss_prompt_mode',
-            defaults.get('gptoss_prompt_mode', getattr(args, 'gptoss_prompt_mode', 'instructions'))
-        )
-        gptoss_reasoning_effort = str(agent_def.get(
-            'gptoss_reasoning_effort',
-            defaults.get('gptoss_reasoning_effort', getattr(args, 'gptoss_reasoning_effort', 'medium'))
-        )).lower()
-        gptoss_include_reasoning = _as_bool(agent_def.get(
-            'gptoss_include_reasoning',
-            defaults.get('gptoss_include_reasoning', getattr(args, 'gptoss_include_reasoning', True))
-        ))
-        gptoss_responses_max_retries = int(agent_def.get(
-            'gptoss_responses_max_retries',
-            defaults.get('gptoss_responses_max_retries', getattr(args, 'gptoss_responses_max_retries', 3))
-        ))
-        gptoss_retry_backoff_base_s = float(agent_def.get(
-            'gptoss_retry_backoff_base_s',
-            defaults.get('gptoss_retry_backoff_base_s', getattr(args, 'gptoss_retry_backoff_base_s', 1.0))
-        ))
-        gptoss_retry_backoff_max_s = float(agent_def.get(
-            'gptoss_retry_backoff_max_s',
-            defaults.get('gptoss_retry_backoff_max_s', getattr(args, 'gptoss_retry_backoff_max_s', 16.0))
-        ))
         
         # Generate unique agent ID: scaffold_modelname_NNN
         model_short = get_model_short_name(model)
@@ -700,7 +653,6 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
             memory_update_max_total_tokens=memory_update_max_total_tokens,
             warmup_memory_tool_choice=warmup_memory_tool_choice,
             append_model_output_logs=bool(getattr(args, "resume", None)),
-            singleans=singleans,
             tool_result_keep_last=tool_result_keep_last,
             sampling_params={
                 'temperature': temperature,
@@ -714,15 +666,8 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
             resolution_guard=resolution_guard,
             timegap_days=getattr(args, 'timegap_days', 1),
             single_agent_mode=(len(agents_list) == 1),  # Adjust prompt for single-agent runs
-            gptoss_prompt_mode=gptoss_prompt_mode,
-            gptoss_reasoning_effort=gptoss_reasoning_effort,
-            gptoss_include_reasoning=gptoss_include_reasoning,
-            gptoss_responses_max_retries=gptoss_responses_max_retries,
-            gptoss_retry_backoff_base_s=gptoss_retry_backoff_base_s,
-            gptoss_retry_backoff_max_s=gptoss_retry_backoff_max_s,
         )
 
-        # GPT-OSS Harmony tool calling: only when using vLLM + enable_tools + gpt-oss weights.
         if scaffold == 'basic':
             agent_cls = BasicAgent
             agent = agent_cls(
@@ -759,44 +704,6 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
                 search_tool=search_tool,
                 start_date=args.sim_start_date
             )
-        elif scaffold == 'mirobasic':
-            MiroBasicAgent, _ = _load_miro_agents()
-            agent = MiroBasicAgent(
-                agent_id=agent_id,
-                inference_provider=inference_provider,
-                config=agent_config,
-                model_name=model,
-                search_tool=search_tool
-            )
-        elif scaffold == 'miroallq':
-            _, MiroAllQAgent = _load_miro_agents()
-            agent = MiroAllQAgent(
-                agent_id=agent_id,
-                inference_provider=inference_provider,
-                config=agent_config,
-                model_name=model,
-                search_tool=search_tool,
-                start_date=args.sim_start_date
-            )
-        elif scaffold == 'gptossbasic':
-            GPTOSSBasicAgent, _ = _load_gptoss_agents()
-            agent = GPTOSSBasicAgent(
-                agent_id=agent_id,
-                inference_provider=inference_provider,
-                config=agent_config,
-                model_name=model,
-                search_tool=search_tool
-            )
-        elif scaffold == 'gptossallq':
-            _, GPTOSSAllQAgent = _load_gptoss_agents()
-            agent = GPTOSSAllQAgent(
-                agent_id=agent_id,
-                inference_provider=inference_provider,
-                config=agent_config,
-                model_name=model,
-                search_tool=search_tool,
-                start_date=args.sim_start_date
-            )
         elif scaffold == 'allqd':
             agent = AllQDailyAgent(
                 agent_id=agent_id,
@@ -806,21 +713,10 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
                 search_tool=search_tool,
                 start_date=args.sim_start_date
             )
-        elif scaffold in ('og', 'ogagent', 'ogAgent'):
-            OgAgent = _load_og_agent()
-            agent = OgAgent(
-                agent_id=agent_id,
-                inference_provider=inference_provider,
-                config=agent_config,
-                model_name=model,
-                search_tool=search_tool,
-                start_date=args.sim_start_date
-            )
         else:
             raise ValueError(
-                f"Unknown scaffold: {scaffold}. Only 'basic', 'allQ', 'allqd', 'og', "
-                "'qwenbasic', 'qwenallq', 'mirobasic', 'miroallq', 'gptossbasic', "
-                "'gptossallq', and 'minimalHarness' are supported."
+                f"Unknown scaffold: {scaffold}. Only 'basic', 'allQ', 'allqd', "
+                "'qwenbasic', 'qwenallq', and 'minimalHarness' are supported."
             )
         
         agent.agent_output_dir = agent_dir
@@ -885,8 +781,8 @@ def main():
     parser.add_argument("--no_parallel", action="store_true",
                        help="Disable parallel agent execution")
     # Single-agent settings (used when no config file)
-    parser.add_argument("--scaffold", choices=["basic", "allQ", "allq", "allqd", "og", "qwenbasic", "qwenallq", "mirobasic", "miroallq", "gptossbasic", "gptossallq"], default="basic",
-                       help="Agent scaffold to use (default: basic). Native Qwen/Miro/GPT-OSS variants must be selected explicitly.")
+    parser.add_argument("--scaffold", choices=["basic", "allQ", "allq", "allqd", "qwenbasic", "qwenallq", "minimalHarness"], default="basic",
+                       help="Agent scaffold to use (default: basic). Qwen wrappers are available as qwenbasic/qwenallq.")
     parser.add_argument("--provider", choices=["vllm", "openrouter"], default="openrouter",
                        help="Inference provider: 'vllm' (local) or 'openrouter' (API)")
     parser.add_argument("--model_path", default=MODEL_PATH,
@@ -930,21 +826,6 @@ def main():
                        help="Sampling temperature")
     parser.add_argument("--max_tokens", type=int, default=2048,
                        help="Max output tokens to generate per LLM call")
-    parser.add_argument("--gptoss_prompt_mode", choices=["instructions", "first_user"], default="instructions",
-                       help="GPT-OSS Responses prompt placement mode")
-    parser.add_argument("--gptoss_reasoning_effort", choices=["low", "medium", "high"], default="medium",
-                       help="GPT-OSS reasoning effort for Responses API")
-    parser.add_argument("--gptoss_include_reasoning", action="store_true", default=True,
-                       help="Request reasoning content in GPT-OSS Responses output")
-    parser.add_argument("--no_gptoss_include_reasoning", action="store_true",
-                       help="Disable reasoning content in GPT-OSS Responses output")
-    parser.add_argument("--gptoss_responses_max_retries", type=int, default=3,
-                       help="Max retries for GPT-OSS /v1/responses calls (default 3)")
-    parser.add_argument("--gptoss_retry_backoff_base_s", type=float, default=1.0,
-                       help="Base backoff seconds for GPT-OSS responses retries (default 1.0)")
-    parser.add_argument("--gptoss_retry_backoff_max_s", type=float, default=16.0,
-                       help="Max backoff seconds for GPT-OSS responses retries (default 16.0)")
-
     # vLLM runtime settings (when provider == vllm in config)
     parser.add_argument("--vllm_gpu_mem", type=float, default=0.3,
                        help="GPU memory fraction for vLLM agent models (0.0-1.0, default 0.3)")
@@ -965,7 +846,7 @@ def main():
     parser.add_argument("--vllm_request_timeout", type=float, default=120.0,
                        help="vLLM request timeout in seconds for chat/embeddings calls (default 120)")
     parser.add_argument("--vllm_enable_tools", action="store_true", default=False,
-                       help="Start vLLM servers with tool-calling enabled (required for native Qwen/Miro tool calls)")
+                       help="Start vLLM servers with tool-calling enabled")
     parser.add_argument("--vllm_enable_prefix_caching", action=argparse.BooleanOptionalAction, default=True,
                        help="Enable vLLM automatic prefix caching for chat/matcher servers (default: on)")
     parser.add_argument("--vllm_tool_call_parser", default=None,
@@ -1162,9 +1043,6 @@ def main():
     # Handle parallel flag
     if args.no_parallel:
         args.parallel = False
-    if args.no_gptoss_include_reasoning:
-        args.gptoss_include_reasoning = False
-    
     # Parse dates
     # start_date/end_date define the SIMULATION window (via sim_start + sim_end).
     # resolution_start/resolution_end define which questions are loaded (by resolution date).
@@ -1485,12 +1363,6 @@ def main():
             resolution_guard=args.resolution_guard,
             timegap_days=args.timegap_days,
             single_agent_mode=True,  # Legacy CLI mode is always single-agent
-            gptoss_prompt_mode=args.gptoss_prompt_mode,
-            gptoss_reasoning_effort=args.gptoss_reasoning_effort,
-            gptoss_include_reasoning=args.gptoss_include_reasoning,
-            gptoss_responses_max_retries=args.gptoss_responses_max_retries,
-            gptoss_retry_backoff_base_s=args.gptoss_retry_backoff_base_s,
-            gptoss_retry_backoff_max_s=args.gptoss_retry_backoff_max_s,
         )
         if args.scaffold == 'basic':
             agent_cls = BasicAgent
@@ -1528,56 +1400,8 @@ def main():
                 search_tool=search_tool,
                 start_date=sim_start
             )
-        elif args.scaffold == 'mirobasic':
-            MiroBasicAgent, _ = _load_miro_agents()
-            agent = MiroBasicAgent(
-                agent_id=agent_id,
-                inference_provider=inference_provider,
-                config=agent_config,
-                model_name=model_name,
-                search_tool=search_tool
-            )
-        elif args.scaffold == 'miroallq':
-            _, MiroAllQAgent = _load_miro_agents()
-            agent = MiroAllQAgent(
-                agent_id=agent_id,
-                inference_provider=inference_provider,
-                config=agent_config,
-                model_name=model_name,
-                search_tool=search_tool,
-                start_date=sim_start
-            )
-        elif args.scaffold == 'gptossbasic':
-            GPTOSSBasicAgent, _ = _load_gptoss_agents()
-            agent = GPTOSSBasicAgent(
-                agent_id=agent_id,
-                inference_provider=inference_provider,
-                config=agent_config,
-                model_name=model_name,
-                search_tool=search_tool
-            )
-        elif args.scaffold == 'gptossallq':
-            _, GPTOSSAllQAgent = _load_gptoss_agents()
-            agent = GPTOSSAllQAgent(
-                agent_id=agent_id,
-                inference_provider=inference_provider,
-                config=agent_config,
-                model_name=model_name,
-                search_tool=search_tool,
-                start_date=sim_start
-            )
         elif args.scaffold == 'allqd':
             agent = AllQDailyAgent(
-                agent_id=agent_id,
-                inference_provider=inference_provider,
-                config=agent_config,
-                model_name=model_name,
-                search_tool=search_tool,
-                start_date=sim_start
-            )
-        elif args.scaffold == 'og':
-            OgAgent = _load_og_agent()
-            agent = OgAgent(
                 agent_id=agent_id,
                 inference_provider=inference_provider,
                 config=agent_config,
@@ -1606,9 +1430,8 @@ def main():
             agent.agent_output_dir = os.path.join(output_dir, 'agents', agent_id)
         else:
             raise ValueError(
-                f"Unknown scaffold: {args.scaffold}. Only 'basic', 'allQ', 'allqd', 'og', "
-                "'qwenbasic', 'qwenallq', 'mirobasic', 'miroallq', 'gptossbasic', "
-                "'gptossallq', and 'minimalHarness' are supported."
+                f"Unknown scaffold: {args.scaffold}. Only 'basic', 'allQ', 'allqd', "
+                "'qwenbasic', 'qwenallq', and 'minimalHarness' are supported."
             )
         agent.agent_output_dir = getattr(agent, "agent_output_dir", agent_dir)
         agents.append(agent)

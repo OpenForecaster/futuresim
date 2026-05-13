@@ -71,11 +71,11 @@ Shared answer-matching cache:
 
 Scaffold selection is explicit.
 
-- `basic`, `allQ`, `allqd`, and `og` mean the plain base scaffolds.
-- `qwenbasic` and `qwenallq` select **Qwen3.5** vLLM native tool-calling (`agents/qwenAgent`). **Do not use them for Qwen3** — use `basic` / `allQ` / `allqd` with `vllm_enable_tools: false` (see `configs/qwen3/`). Details: `.agents/skills/agent-scaffolds/references/model-specific-notes.md`.
-- `gptossbasic` and `gptossallq` select the GPT-OSS-specific agents.
+- `basic`, `allQ`, and `allqd` are the base chat-tools scaffolds.
+- `qwenbasic` and `qwenallq` are thin Qwen-named compatibility wrappers over the shared chat-tools loop. Details: `.agents/skills/agent-scaffolds/references/model-specific-notes.md`.
+- `minimalHarness` runs external CLI backends such as Codex, Claude Code, and OpenCode.
 - Qwen scaffolds intentionally do not replay historical hidden thinking across turns; only final assistant content and tool calls are fed back into history.
-- A Qwen or GPT-OSS model will not automatically switch scaffolds anymore just because the model name matches.
+- Model names do not automatically switch scaffolds.
 
 Example:
 

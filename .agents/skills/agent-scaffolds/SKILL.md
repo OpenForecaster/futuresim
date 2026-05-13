@@ -1,6 +1,6 @@
 ---
 name: agent-scaffolds
-description: Use when choosing, wiring, or modifying forecast-sim agent scaffolds, including Basic, AllQ, AllQD, Qwen-native, and GPT-OSS Harmony variants.
+description: Use when choosing, wiring, or modifying forecast-sim agent scaffolds, including Basic, AllQ, AllQD, Qwen wrappers, and MinimalHarness.
 ---
 
 # Agent Scaffolds
@@ -19,7 +19,7 @@ Use this skill for scaffold selection, scaffold routing in `scripts/test_basic_a
 
 - Shared config fields should stay reusable across scaffolds when possible.
 - **Base scaffolds (`basic` / `allQ` / `allqd`) now require chat tools.** For Qwen3 on vLLM, enable tools and use `hermes`; for Qwen3.5, enable tools and use `qwen3_coder`. `qwenbasic` / `qwenallq` remain thin Qwen-named wrappers. Details: [references/model-specific-notes.md](references/model-specific-notes.md).
-- Native Qwen and GPT-OSS scaffolds may change tool-call formatting, but should preserve comparable simulation semantics.
+- Qwen-named scaffolds are thin compatibility wrappers over the shared chat-tools loop and should preserve comparable simulation semantics.
 - Warmup and memory knobs are scaffold-level controls, not model-name heuristics.
 - MinimalHarness `prompt_mode: "no_memory"` configs should keep `handholding_version: "v1"` unless the user explicitly asks otherwise. For Claude Code no-memory runs, allow Bash/Read for read-only inspection, but keep native Write/Edit-style tools disallowed so durable state changes go through forecast MCP submissions.
 

@@ -68,7 +68,7 @@ def build_budget_overview(settings: BudgetSettings, *, per_question: bool = Fals
         scope = "this question" if per_question else "this session"
         lines.append(
             f"You have a context budget of {settings.max_total_tokens} tokens for {scope}. "
-            "This tracks both the input (prompt) and cumulative output tokens (excluding past thinking tokens if any) you have spent so far."
+            "This tracks the current prompt length, including prior visible assistant/tool turns that remain in context."
         )
         if settings.submit_reserve_tokens > 0 or settings.force_submit_threshold_tokens > 0:
             lines.append(
