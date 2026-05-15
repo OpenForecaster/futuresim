@@ -1,7 +1,7 @@
 # MinimalHarnessAgent
 
-`minimalHarnessAgent` lets forecast-sim run an external coding-agent CLI as a
-forecasting agent while forecast-sim keeps ownership of dates, questions,
+`minimalHarnessAgent` lets Futuresim run an external coding-agent CLI as a
+forecasting agent while Futuresim keeps ownership of dates, questions,
 market snapshots, scoring, article visibility, search date caps, and prediction
 submission.
 
@@ -19,7 +19,7 @@ On each `act()` call, the shared driver:
 4. Starts the host MCP relay and optional sandbox/egress proxy when configured.
 5. Starts or resumes the selected CLI backend.
 6. Waits for `submit_forecasts` / `next_day` signals written by the MCP server.
-7. Returns forecast-sim `PredictionSubmission` objects to the environment.
+7. Returns Futuresim `PredictionSubmission` objects to the environment.
 
 The CLI sees the workspace. Driver/MCP coordination files live in the internal
 run directory and are not meant to be edited by the model.
@@ -82,7 +82,7 @@ Backend subclasses own CLI-specific behavior:
 - install-tree and home-state sandbox binds
 - whether the backend respawns each day
 
-Shared forecast-sim semantics should stay in `agent.py` or the helper modules,
+Shared Futuresim semantics should stay in `agent.py` or the helper modules,
 not in one backend file, unless the behavior is truly backend-specific.
 
 ## Prompt Modes
@@ -106,7 +106,7 @@ not in one backend file, unless the behavior is truly backend-specific.
 
 With `sandbox=True`, the CLI runs under `bwrap`. The model sees only the
 workspace, internal coordination dir, harness runtime state, required OS files,
-and the MCP/egress socket dirs. The forecast-sim repo, datasets, raw search
+and the MCP/egress socket dirs. The Futuresim repo, datasets, raw search
 indices, sibling simulation outputs, and most of `/home` remain hidden.
 
 Search runs through MCP. In sandboxed mode the MCP server stays host-side, so

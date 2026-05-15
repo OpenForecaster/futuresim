@@ -155,9 +155,6 @@ DEFAULT_EGRESS_ALLOWLIST = [
     "*.openai.com:443",
     "chatgpt.com:443",
     "*.chatgpt.com:443",
-    # Azure OpenAI (regional resource and Cognitive Services hosts).
-    "*.openai.azure.com:443",
-    "*.cognitiveservices.azure.com:443",
     # OpenRouter (multi-provider gateway).
     "openrouter.ai:443",
     "*.openrouter.ai:443",

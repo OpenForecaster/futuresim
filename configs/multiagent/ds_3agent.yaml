@@ -1,8 +1,9 @@
 # 3-agent DeepSeek v3.2 self-play, restarting from shared warmup
-# Usage: python aisa_scripts/run_sim/submit_sim_aisa.py --config configs/multiagent/ds_3agent.yaml --runs 1 --gpus 1 --gpu_type A40 --memory 80 --time 2-00:00:00
+# Usage: python scripts/run_forecast_sim.py --config configs/multiagent/ds_3agent.yaml
 
-restart_from: "/mnt/nfs/home/ac146091/forecast-sim/logs/current_sim/deepseek_shared_warmup_3agent/26-03-22-11-32-28"
-restart_from_day: "2025-04-25"
+# Optional restart fields:
+# restart_from: "${FSIM_OUTPUT_BASE}/deepseek_shared_warmup_3agent/<timestamp>"
+# restart_from_day: "2025-04-25"
 
 # --- Simulation Meta ---
 sim_name: "ds_3agent"
@@ -14,16 +15,16 @@ split: "test"
 
 # --- Data Paths ---
 dataset: "openforesight"
-dataset_path: "nikhilchandak/OpenForesight"
-dataset_cache: "/mnt/nfs/datasets_ac/cache/huggingface/datasets"
+dataset_path: "${FSIM_DATASET_PATH}"
+dataset_cache: "${FSIM_DATASET_CACHE}"
 min_forecasters: 10
 resolved_only: true
-output_base: "logs/current_sim"
+output_base: "${FSIM_OUTPUT_BASE}"
 warmup_parallelism: 64
 
 # --- Search Settings ---
-search_db: "/mnt/nfs/datasets_ac/news/deduped_articles/lance/Qwen3-Embedding-8B"
-embedding_model: "/mnt/nfs/home/ac146091/forecast-sim/models/Qwen3-Embedding-8B"
+search_db: "${FSIM_SEARCH_DB}"
+embedding_model: "${FSIM_EMBEDDING_MODEL}"
 embedding_gpu_mem: 0.7
 
 # --- Answer Matching ---

@@ -1,12 +1,12 @@
-# Forecast-Sim
+# Futuresim
 
 Multi-agent forecasting simulator where LLM agents predict on free-form questions and are scored against each other.
 
 ## Quick Start
 
 ```bash
-git clone <repo-url>
-cd forecast-sim
+git clone https://github.com/OpenForecaster/futuresim.git
+cd futuresim
 
 uv sync
 source .venv/bin/activate
@@ -24,7 +24,9 @@ python scripts/run_forecast_sim.py --config configs/shared/default_sim.yaml
 
 `scripts/run_forecast_sim.py` loads `.env` from the repo root automatically.
 Shell exports override `.env` values. Inside `.env`, `${FSIM_REPO_DIR}` expands
-to this checkout.
+to this checkout. The `FSIM_*` prefix is kept for compatibility with existing
+configs. `pathing.py` is the small helper that loads `.env`, expands config
+placeholders, and errors if a required placeholder is still unresolved.
 
 Common variables:
 
@@ -44,7 +46,7 @@ Common variables:
 For local overrides, edit `.env`; for one-off runs, prefix the command:
 
 ```bash
-FSIM_OUTPUT_BASE=/scratch/$USER/forecast-sim-runs \
+FSIM_OUTPUT_BASE=/scratch/$USER/futuresim-runs \
 python scripts/run_forecast_sim.py --config configs/shared/default_sim.yaml
 ```
 

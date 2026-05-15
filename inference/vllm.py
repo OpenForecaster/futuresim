@@ -68,19 +68,6 @@ def _normalize_cuda_visible_devices(cuda_visible_devices: Optional[str]) -> Opti
     return ",".join(normalized)
 
 
-def _is_gpt_oss_model(model_path: str, model_name: str) -> bool:
-    """
-    Heuristic to detect OpenAI GPT-OSS weights.
-
-    gpt-oss models use the "Harmony" prompt/tooling format. vLLM supports them
-    (including MXFP4 weights) in recent versions, but tool calling is expected
-    via the OpenAI Responses API rather than Chat Completions.
-    """
-    p = (model_path or "").lower()
-    n = (model_name or "").lower()
-    return ("gpt-oss" in p) or ("gpt-oss" in n)
-
-
 def _safe_filename(s: str) -> str:
     s = (s or "").strip()
     if not s:
@@ -115,7 +102,7 @@ class VLLMChatTimeoutError(VLLMTransportError):
 # Cross-process port reservations live here. flock state is held in the
 # kernel (not the file), so stale .lock files left behind by crashed runs
 # are harmless — fcntl.flock() auto-releases on fd close / process exit.
-_PORT_LOCK_DIR = Path("/tmp/fsim_vllm_ports")
+_PORT_LOCK_DIR = Path("/tmp/futuresim_vllm_ports")
 
 
 def _acquire_port_lock(port: int):
@@ -137,7 +124,7 @@ def _find_free_port(start_port: int = 8001):
     target server (vLLM) has bound the port itself.
 
     Returns (port, lock_file). The caller MUST close `lock_file` once the
-    server is up — the lock file's flock prevents another fsim driver
+    server is up — the lock file's flock prevents another Futuresim driver
     from picking the same port during the multi-second window between
     our bind-test releasing the socket and vLLM actually binding it.
     """
@@ -250,10 +237,6 @@ class VLLMInference:
         self.language_model_only = language_model_only
         self.enforce_eager = bool(enforce_eager)
 
-        # GPT-OSS uses the Harmony format. vLLM supports it, but tool calling is
-        # expected via /v1/responses rather than /v1/chat/completions.
-        self._is_gpt_oss = _is_gpt_oss_model(self.model_path, self.model_name)
-        
         self._port: Optional[int] = None
         self._session: Optional[requests.Session] = None
         self._server_started = False
@@ -337,10 +320,8 @@ class VLLMInference:
 
             print(f"Starting VLLM server for {self.model_name} on port {self._port}...", flush=True)
         
-            # Start server process through a local wrapper so repo-level
-            # compatibility patches can be applied reproducibly.
             cmd = [
-                sys.executable, "-m", "inference.vllm_api_server_wrapper",
+                sys.executable, "-m", "vllm.entrypoints.openai.api_server",
                 "--model", self.model_path,
                 "--port", str(self._port),
                 "--gpu-memory-utilization", str(self.gpu_mem),
@@ -542,19 +523,6 @@ class VLLMInference:
         env = os.environ.copy()
         if self.cuda_visible_devices is not None:
             env["CUDA_VISIBLE_DEVICES"] = _normalize_cuda_visible_devices(self.cuda_visible_devices)
-        # Ensure subprocess can import local modules (inference.* wrapper).
-        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        existing_pythonpath = env.get("PYTHONPATH", "")
-        path_items = [p for p in existing_pythonpath.split(os.pathsep) if p] if existing_pythonpath else []
-        if repo_root not in path_items:
-            env["PYTHONPATH"] = (
-                repo_root if not existing_pythonpath else f"{repo_root}{os.pathsep}{existing_pythonpath}"
-            )
-        # Enable permissive Harmony parser mode by default for GPT-OSS.
-        # This mitigates malformed-header parse failures without editing
-        # site-packages directly.
-        if self._is_gpt_oss and "FSIM_VLLM_HARMONY_NON_STRICT" not in env:
-            env["FSIM_VLLM_HARMONY_NON_STRICT"] = "1"
         return env
 
     def embed(self, texts: List[str], use_tqdm: bool = False) -> List[_EmbedItem]:
@@ -629,88 +597,6 @@ class VLLMInference:
         return str(content), usage
 
     @staticmethod
-    def _split_instructions_and_input(messages: List[Dict[str, str]]) -> Tuple[str, List[Dict[str, Any]]]:
-        """
-        Convert Chat Completions messages -> Responses API (instructions + input messages).
-
-        vLLM's /v1/responses expects OpenAI Responses-style content blocks:
-            {"role": "...", "content": [{"type": "input_text", "text": "..."}]}
-        """
-        instructions_parts: List[str] = []
-        input_messages: List[Dict[str, Any]] = []
-        for m in messages or []:
-            role = m.get("role") or "user"
-            content = m.get("content", "")
-            if role == "system":
-                if content:
-                    instructions_parts.append(str(content))
-                continue
-
-            blocks: List[Dict[str, str]] = []
-            if content is not None and str(content) != "":
-                blocks.append({"type": "input_text", "text": str(content)})
-            input_messages.append({"role": role, "content": blocks})
-        return "\n\n".join(instructions_parts), input_messages
-
-    @staticmethod
-    def _extract_responses_text_and_usage(data: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
-        # Prefer vLLM/OpenAI-style convenience field when present.
-        if isinstance(data, dict) and isinstance(data.get("output_text"), str):
-            return data["output_text"], (data.get("usage") or {})
-
-        # Otherwise, try to walk a Responses payload.
-        # Typical OpenAI Responses: {"output":[{"type":"message","content":[{"type":"output_text","text":"..."}]}], "usage":{...}}
-        chunks: List[str] = []
-        try:
-            for item in data.get("output", []) or []:
-                if not isinstance(item, dict):
-                    continue
-                if item.get("type") != "message":
-                    continue
-                for c in item.get("content", []) or []:
-                    if isinstance(c, dict) and c.get("type") in ("output_text", "text"):
-                        t = c.get("text")
-                        if isinstance(t, str):
-                            chunks.append(t)
-        except Exception:
-            pass
-        usage = data.get("usage", {}) or {}
-        return "".join(chunks), usage
-
-    @staticmethod
-    def _normalize_responses_overrides(overrides: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-        """
-        Normalize caller-side /v1/responses overrides to the schema expected by
-        current vLLM Responses endpoints.
-
-        Notes:
-        - vLLM expects reasoning effort under `reasoning: {"effort": ...}` for
-          GPT-OSS Harmony system message construction.
-        - Some callers still pass legacy top-level keys like `reasoning_effort`
-          and `include_reasoning`; map/drop those to avoid ignored-field warnings.
-        """
-        if not overrides:
-            return {}
-
-        normalized = dict(overrides)
-
-        effort_raw = normalized.pop("reasoning_effort", None)
-        if isinstance(effort_raw, str):
-            effort = effort_raw.strip().lower()
-            if effort in ("none", "minimal", "low", "medium", "high", "xhigh"):
-                reasoning_cfg = normalized.get("reasoning")
-                if not isinstance(reasoning_cfg, dict):
-                    reasoning_cfg = {}
-                reasoning_cfg = dict(reasoning_cfg)
-                reasoning_cfg.setdefault("effort", effort)
-                normalized["reasoning"] = reasoning_cfg
-
-        # /v1/responses does not accept this top-level field on vLLM 0.13.
-        normalized.pop("include_reasoning", None)
-
-        return normalized
-
-    @staticmethod
     def _copy_sampling_params(
         payload: Dict[str, Any],
         sampling_params: Dict[str, Any],
@@ -738,32 +624,6 @@ class VLLMInference:
         )
         return payload
 
-    def _responses_payload(
-        self,
-        instructions: str,
-        input_messages: List[Dict[str, Any]],
-        sampling_params: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        payload: Dict[str, Any] = {
-            "model": self.model_path,
-            "instructions": instructions or "",
-            "input": input_messages,
-            "temperature": sampling_params.get("temperature", 0.7),
-            "max_output_tokens": sampling_params.get("max_tokens", 1024),
-        }
-        self._copy_sampling_params(
-            payload,
-            sampling_params,
-            ("top_p", "top_k", "repetition_penalty", "stop", "tools", "tool_choice"),
-        )
-        overrides = {
-            k: sampling_params[k]
-            for k in ("reasoning", "reasoning_effort", "include_reasoning")
-            if k in sampling_params
-        }
-        payload.update(self._normalize_responses_overrides(overrides))
-        return payload
-    
     def chat(self, messages: List[Dict[str, str]], sampling_params: Dict[str, Any]) -> Tuple[str, Dict]:
         """
         Chat completion using messages format.
@@ -778,18 +638,6 @@ class VLLMInference:
         """
         self._ensure_server()
 
-        # GPT-OSS:
-        # - Plain text generation works via /v1/chat/completions (vLLM will internally
-        #   convert ChatML -> Harmony as needed).
-        # - If you want OpenAI-style tool calling, route through /v1/responses.
-        if self._is_gpt_oss and (sampling_params.get("tools") is not None or sampling_params.get("tool_choice") is not None):
-            instructions, input_messages = self._split_instructions_and_input(messages)
-            return self.responses(
-                instructions=instructions,
-                input_messages=input_messages,
-                sampling_params=sampling_params,
-            )
-        
         payload = self._chat_payload(messages, sampling_params)
         session = self._get_session()
         
@@ -876,64 +724,3 @@ class VLLMInference:
                 raise RuntimeError("vLLM chat/completions connection error")
 
         return {}
-
-    def responses(
-        self,
-        *,
-        instructions: str,
-        input_messages: List[Dict[str, Any]],
-        sampling_params: Dict[str, Any],
-    ) -> Tuple[str, Dict]:
-        """
-        OpenAI Responses API-style call against vLLM's /v1/responses.
-
-        This is the recommended path for GPT-OSS tool calling on vLLM.
-
-        Args:
-            instructions: System/developer instructions string.
-            input_messages: Conversation as OpenAI-style message dicts (non-system).
-            sampling_params: Supports temperature, max_tokens (mapped to max_output_tokens),
-                tools, tool_choice, top_p, top_k, stop.
-
-        Returns:
-            Tuple of (response_text, usage_dict)
-        """
-        self._ensure_server()
-
-        payload = self._responses_payload(instructions, input_messages, sampling_params)
-
-        session = self._get_session()
-        for attempt in range(3):
-            try:
-                response = session.post(
-                    f"http://127.0.0.1:{self._port}/v1/responses",
-                    json=payload,
-                    timeout=self.timeout,
-                )
-                if response.status_code == 200:
-                    data = response.json()
-                    return self._extract_responses_text_and_usage(data)
-
-                # Helpful diagnostics: vLLM returns JSON validation errors on 400.
-                if response.status_code == 400:
-                    body = response.text
-                    body = body[-1500:] if isinstance(body, str) else ""
-                    raise RuntimeError(f"vLLM /v1/responses 400 Bad Request: {body}")
-
-                if response.status_code in (500, 502, 503, 504, 529):
-                    if attempt < 2:
-                        time.sleep(2 ** attempt)
-                        continue
-                response.raise_for_status()
-            except requests.exceptions.Timeout:
-                if attempt < 2:
-                    continue
-                print(f"  [VLLM] Timeout after {self.timeout}s")
-                return "", {}
-            except requests.exceptions.ConnectionError:
-                if attempt < 2:
-                    time.sleep(2)
-                    continue
-                print("  [VLLM] Connection error")
-                return "", {}
-        return "", {}

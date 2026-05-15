@@ -177,7 +177,7 @@ class OpenRouterInference:
         self.headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
-            "HTTP-Referer": "https://github.com/forecast-sim",  # Optional: for rankings
+            "HTTP-Referer": "https://github.com/OpenForecaster/futuresim",
         }
         
         # Ensure rate limiter is initialized

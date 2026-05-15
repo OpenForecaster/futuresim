@@ -50,6 +50,7 @@ env/
 # IDE
 .idea/
 .vscode/
+*.code-workspace
 *.swp
 *.swo
 

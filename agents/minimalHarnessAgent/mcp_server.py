@@ -44,7 +44,7 @@ def _parse_date(s: Optional[str]) -> Optional[date]:
 
 # ── server ─────────────────────────────────────────────────────────────
 
-mcp = FastMCP("forecast-sim")
+mcp = FastMCP("futuresim")
 
 # Global state — set in main(), lazily initialized on first tool call.
 _state: dict = {}

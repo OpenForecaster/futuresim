@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-Run forecast-sim from a config file or CLI arguments.
+Run Futuresim from a config file or CLI arguments.
 
 Usage (Search agent with OpenRouter + vLLM matcher):
     python scripts/run_forecast_sim.py \\
@@ -306,9 +306,6 @@ def create_inference_provider(provider: str, model: str, args, openrouter_provid
         if provider_cfg:
             kwargs["provider"] = provider_cfg
         return OpenRouterInference(model, **kwargs)
-    elif provider == "azure":
-        from inference.azure_openai import AzureOpenAIInference
-        return AzureOpenAIInference(model=model)
     else:
         raise ValueError(f"Unknown provider: {provider}")
 

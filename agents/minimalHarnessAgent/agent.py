@@ -1,6 +1,6 @@
 """Shared MinimalHarness driver for external coding-agent CLIs.
 
-The base class owns forecast-sim state, workspace prep, MCP coordination,
+The base class owns Futuresim state, workspace prep, MCP coordination,
 sandbox/egress plumbing, warmup orchestration, and cleanup. Backend subclasses
 own CLI-specific launch and resume behavior.
 """
