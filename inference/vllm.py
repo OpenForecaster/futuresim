@@ -283,6 +283,28 @@ class VLLMInference:
                     self._port = int(port)
                     self._server_started = True
                     break
+
+    def _server_registry_entry(self, proc: subprocess.Popen) -> Dict[str, Any]:
+        return {
+            'process': proc,
+            'model_path': self.model_path,
+            'cuda_visible_devices': self.cuda_visible_devices,
+            'max_num_seqs': self.max_num_seqs,
+            'tensor_parallel_size': self.tensor_parallel_size,
+            'data_parallel_size': self.data_parallel_size,
+            'pipeline_parallel_size': self.pipeline_parallel_size,
+            'enable_expert_parallel': self.enable_expert_parallel,
+            'all2all_backend': self.all2all_backend,
+            'enable_tools': self.enable_tools,
+            'tool_call_parser': self.tool_call_parser,
+            'tool_parser_plugin': self.tool_parser_plugin,
+            'enable_prefix_caching': self.enable_prefix_caching,
+            'enforce_eager': self.enforce_eager,
+        }
+
+    def _register_server(self, proc: subprocess.Popen) -> None:
+        with _SERVERS_LOCK:
+            _VLLM_SERVERS[str(self._port)] = self._server_registry_entry(proc)
     
     def _ensure_server(self):
         """Start VLLM server if not already running."""
@@ -359,7 +381,6 @@ class VLLMInference:
                         cmd += ["--tool-parser-plugin", self.tool_parser_plugin]
         
             # Log to a proper location - try output_dir from environment, fallback to /tmp
-            import os
             log_dir = os.environ.get('SIM_OUTPUT_DIR', '/tmp')
             log_file = os.path.join(log_dir, f"vllm_server_{_safe_filename(self.model_name)}_{self._port}.log")
             self._log_file_path = log_file
@@ -374,24 +395,8 @@ class VLLMInference:
                 stderr=subprocess.STDOUT,  # Merge stderr into stdout
                 env=self._build_subprocess_env(),
             )
-        
-            with _SERVERS_LOCK:
-                _VLLM_SERVERS[str(self._port)] = {
-                    'process': proc,
-                    'model_path': self.model_path,
-                    'cuda_visible_devices': self.cuda_visible_devices,
-                    'max_num_seqs': self.max_num_seqs,
-                    'tensor_parallel_size': self.tensor_parallel_size,
-                    'data_parallel_size': self.data_parallel_size,
-                    'pipeline_parallel_size': self.pipeline_parallel_size,
-                    'enable_expert_parallel': self.enable_expert_parallel,
-                    'all2all_backend': self.all2all_backend,
-                    'enable_tools': self.enable_tools,
-                    'tool_call_parser': self.tool_call_parser,
-                    'tool_parser_plugin': self.tool_parser_plugin,
-                    'enable_prefix_caching': self.enable_prefix_caching,
-                    'enforce_eager': self.enforce_eager,
-                }
+
+            self._register_server(proc)
         
             # Immediately check if process died
             time.sleep(0.5)
@@ -426,23 +431,7 @@ class VLLMInference:
                         stderr=subprocess.STDOUT,
                         env=self._build_subprocess_env(),
                     )
-                    with _SERVERS_LOCK:
-                        _VLLM_SERVERS[str(self._port)] = {
-                            'process': proc,
-                            'model_path': self.model_path,
-                            'cuda_visible_devices': self.cuda_visible_devices,
-                            'max_num_seqs': self.max_num_seqs,
-                            'tensor_parallel_size': self.tensor_parallel_size,
-                            'data_parallel_size': self.data_parallel_size,
-                            'pipeline_parallel_size': self.pipeline_parallel_size,
-                            'enable_expert_parallel': self.enable_expert_parallel,
-                            'all2all_backend': self.all2all_backend,
-                            'enable_tools': self.enable_tools,
-                            'tool_call_parser': self.tool_call_parser,
-                            'tool_parser_plugin': self.tool_parser_plugin,
-                            'enable_prefix_caching': self.enable_prefix_caching,
-                            'enforce_eager': self.enforce_eager,
-                        }
+                    self._register_server(proc)
                     time.sleep(0.5)
                     if proc.poll() is not None:
                         self._log_file.flush()
@@ -525,25 +514,6 @@ class VLLMInference:
             with self._start_lock:
                 self._starting = False
                 self._start_cond.notify_all()
-    
-    def _wait_for_server(self, timeout: float = 120.0) -> bool:
-        """Wait for server to become ready."""
-        start = time.time()
-        session = self._get_session()
-        
-        while time.time() - start < timeout:
-            try:
-                response = session.get(
-                    f"http://127.0.0.1:{self._port}/v1/models",
-                    timeout=5
-                )
-                if response.status_code == 200:
-                    return True
-            except requests.exceptions.RequestException:
-                pass
-            time.sleep(2)
-        
-        return False
     
     def _get_session(self) -> requests.Session:
         """Get or create requests session with proxy disabled for localhost."""
@@ -739,6 +709,60 @@ class VLLMInference:
         normalized.pop("include_reasoning", None)
 
         return normalized
+
+    @staticmethod
+    def _copy_sampling_params(
+        payload: Dict[str, Any],
+        sampling_params: Dict[str, Any],
+        keys: Tuple[str, ...],
+    ) -> None:
+        for key in keys:
+            if key in sampling_params:
+                payload[key] = sampling_params[key]
+
+    def _chat_payload(
+        self,
+        messages: List[Dict[str, Any]],
+        sampling_params: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "model": self.model_path,
+            "messages": messages,
+            "temperature": sampling_params.get("temperature", 0.7),
+            "max_tokens": sampling_params.get("max_tokens", 1024),
+        }
+        self._copy_sampling_params(
+            payload,
+            sampling_params,
+            ("top_p", "top_k", "repetition_penalty", "stop", "tools", "tool_choice"),
+        )
+        return payload
+
+    def _responses_payload(
+        self,
+        instructions: str,
+        input_messages: List[Dict[str, Any]],
+        sampling_params: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "model": self.model_path,
+            "instructions": instructions or "",
+            "input": input_messages,
+            "temperature": sampling_params.get("temperature", 0.7),
+            "max_output_tokens": sampling_params.get("max_tokens", 1024),
+        }
+        self._copy_sampling_params(
+            payload,
+            sampling_params,
+            ("top_p", "top_k", "repetition_penalty", "stop", "tools", "tool_choice"),
+        )
+        overrides = {
+            k: sampling_params[k]
+            for k in ("reasoning", "reasoning_effort", "include_reasoning")
+            if k in sampling_params
+        }
+        payload.update(self._normalize_responses_overrides(overrides))
+        return payload
     
     def chat(self, messages: List[Dict[str, str]], sampling_params: Dict[str, Any]) -> Tuple[str, Dict]:
         """
@@ -766,28 +790,7 @@ class VLLMInference:
                 sampling_params=sampling_params,
             )
         
-        payload = {
-            "model": self.model_path,
-            "messages": messages,
-            "temperature": sampling_params.get("temperature", 0.7),
-            "max_tokens": sampling_params.get("max_tokens", 1024),
-        }
-        
-        # Add optional params
-        if "top_p" in sampling_params:
-            payload["top_p"] = sampling_params["top_p"]
-        if "top_k" in sampling_params:
-            payload["top_k"] = sampling_params["top_k"]
-        if "repetition_penalty" in sampling_params:
-            payload["repetition_penalty"] = sampling_params["repetition_penalty"]
-        if "stop" in sampling_params:
-            payload["stop"] = sampling_params["stop"]
-
-        # Pass-through for non-gpt-oss models that support tools via chat completions.
-        if "tools" in sampling_params:
-            payload["tools"] = sampling_params["tools"]
-        if "tool_choice" in sampling_params:
-            payload["tool_choice"] = sampling_params["tool_choice"]
+        payload = self._chat_payload(messages, sampling_params)
         session = self._get_session()
         
         for attempt in range(3):
@@ -838,24 +841,7 @@ class VLLMInference:
         """
         self._ensure_server()
 
-        payload: Dict[str, Any] = {
-            "model": self.model_path,
-            "messages": messages,
-            "temperature": sampling_params.get("temperature", 0.7),
-            "max_tokens": sampling_params.get("max_tokens", 1024),
-        }
-        if "top_p" in sampling_params:
-            payload["top_p"] = sampling_params["top_p"]
-        if "top_k" in sampling_params:
-            payload["top_k"] = sampling_params["top_k"]
-        if "repetition_penalty" in sampling_params:
-            payload["repetition_penalty"] = sampling_params["repetition_penalty"]
-        if "stop" in sampling_params:
-            payload["stop"] = sampling_params["stop"]
-        if "tools" in sampling_params:
-            payload["tools"] = sampling_params["tools"]
-        if "tool_choice" in sampling_params:
-            payload["tool_choice"] = sampling_params["tool_choice"]
+        payload = self._chat_payload(messages, sampling_params)
 
         session = self._get_session()
         for attempt in range(3):
@@ -914,31 +900,7 @@ class VLLMInference:
         """
         self._ensure_server()
 
-        payload: Dict[str, Any] = {
-            "model": self.model_path,
-            "instructions": instructions or "",
-            "input": input_messages,
-            "temperature": sampling_params.get("temperature", 0.7),
-            "max_output_tokens": sampling_params.get("max_tokens", 1024),
-        }
-        if "top_p" in sampling_params:
-            payload["top_p"] = sampling_params["top_p"]
-        if "top_k" in sampling_params:
-            payload["top_k"] = sampling_params["top_k"]
-        if "repetition_penalty" in sampling_params:
-            payload["repetition_penalty"] = sampling_params["repetition_penalty"]
-        if "stop" in sampling_params:
-            payload["stop"] = sampling_params["stop"]
-        if "tools" in sampling_params:
-            payload["tools"] = sampling_params["tools"]
-        if "tool_choice" in sampling_params:
-            payload["tool_choice"] = sampling_params["tool_choice"]
-        responses_overrides = {
-            k: sampling_params[k]
-            for k in ("reasoning", "reasoning_effort", "include_reasoning")
-            if k in sampling_params
-        }
-        payload.update(self._normalize_responses_overrides(responses_overrides))
+        payload = self._responses_payload(instructions, input_messages, sampling_params)
 
         session = self._get_session()
         for attempt in range(3):
@@ -975,76 +937,3 @@ class VLLMInference:
                 print("  [VLLM] Connection error")
                 return "", {}
         return "", {}
-
-    def responses_json(
-        self,
-        *,
-        instructions: str,
-        input_messages: List[Dict[str, Any]],
-        sampling_params: Dict[str, Any],
-        request_overrides: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        """
-        Like responses(), but returns the full JSON payload from vLLM's /v1/responses.
-
-        This is useful for GPT-OSS Harmony tool calling, where the response may include
-        structured output items like {"type":"function_call", "name":..., "arguments":...}.
-        """
-        self._ensure_server()
-
-        payload: Dict[str, Any] = {
-            "model": self.model_path,
-            "instructions": instructions or "",
-            "input": input_messages,
-            "temperature": sampling_params.get("temperature", 0.7),
-            "max_output_tokens": sampling_params.get("max_tokens", 1024),
-        }
-        if "top_p" in sampling_params:
-            payload["top_p"] = sampling_params["top_p"]
-        if "top_k" in sampling_params:
-            payload["top_k"] = sampling_params["top_k"]
-        if "repetition_penalty" in sampling_params:
-            payload["repetition_penalty"] = sampling_params["repetition_penalty"]
-        if "stop" in sampling_params:
-            payload["stop"] = sampling_params["stop"]
-        if "tools" in sampling_params:
-            payload["tools"] = sampling_params["tools"]
-        if "tool_choice" in sampling_params:
-            payload["tool_choice"] = sampling_params["tool_choice"]
-        if request_overrides:
-            # e.g. {"parallel_tool_calls": False, "max_tool_calls": 1}
-            payload.update(self._normalize_responses_overrides(request_overrides))
-
-        session = self._get_session()
-        for attempt in range(3):
-            try:
-                response = session.post(
-                    f"http://127.0.0.1:{self._port}/v1/responses",
-                    json=payload,
-                    timeout=self.timeout,
-                )
-                if response.status_code == 200:
-                    return response.json()
-
-                if response.status_code == 400:
-                    body = response.text
-                    body = body[-1500:] if isinstance(body, str) else ""
-                    raise RuntimeError(f"vLLM /v1/responses 400 Bad Request: {body}")
-
-                if response.status_code in (500, 502, 503, 504, 529):
-                    if attempt < 2:
-                        time.sleep(2 ** attempt)
-                        continue
-                response.raise_for_status()
-            except requests.exceptions.Timeout:
-                if attempt < 2:
-                    continue
-                print(f"  [VLLM] Timeout after {self.timeout}s")
-                return {}
-            except requests.exceptions.ConnectionError:
-                if attempt < 2:
-                    time.sleep(2)
-                    continue
-                print("  [VLLM] Connection error")
-                return {}
-        return {}

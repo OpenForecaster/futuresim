@@ -1,5 +1,5 @@
 # AllQAgent Simulation Configuration
-# Usage: python mpi_scripts/run_sim/submit_sim.py --config configs/deepseek/allq_sim_ds.yaml --runs 1
+# Usage: python scripts/run_forecast_sim.py --config configs/deepseek/allq_sim_ds.yaml
 
 # --- Simulation Meta ---
 sim_name: "allq_sim_deepseek"

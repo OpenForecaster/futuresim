@@ -1,5 +1,5 @@
 # Default Simulation Configuration
-# Usage: python mpi_scripts/run_sim/submit_sim.py --config configs/shared/default_sim.yaml --runs 1
+# Usage: python scripts/run_forecast_sim.py --config configs/shared/default_sim.yaml
 
 # --- Simulation Meta ---
 sim_name: "deepseek_sim"
@@ -10,11 +10,10 @@ resolution_end: "2025-08-23"
 lookback_days: 7         # Days before first resolution to start simulation
 search_cutoff_days: 0    # Cap on search date based on current date in sim
 resolution_guard: null   # Warmup-only extra search cap: resolution_date - resolution_guard days
-split: "test"            # Dataset split: train, test, or validation
+split: "aljazeera2026Q1" # Dataset split
 
 # --- Data Paths ---
-# --- Data Paths ---
-dataset: "openforesight"  # Options: "openforesight", "metaculus_binary", "metaculus_mcq"
+dataset: "openforesight"  # Options: "openforesight", "custom"
 dataset_path: "${FSIM_DATASET_PATH}"  # For openforesight
 dataset_cache: "${FSIM_DATASET_CACHE}"  # For cached sources
 # Metaculus Filtering

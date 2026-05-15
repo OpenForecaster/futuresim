@@ -662,26 +662,8 @@ Requirements:
         return (source_name or "openforesight").lower()
 
     def _get_warmup_scoring_section(self, forecast_interface=None) -> str:
-        """
-        Dataset-conditional scoring instructions for warmup/allqd prompts.
-
-        - metaculus_binary: keep legacy binary raw-Brier wording
-        - all other datasets: mirror BasicAgent scoring section
-        """
-        if self._get_warmup_source_name(forecast_interface) == "metaculus_binary":
-            return """## SCORING (Brier Score)
-For this initial phase, you are evaluated strictly on **Brier Score** (accuracy).
-- **Brier Score**: Measures the squared difference between your predicted probability and the actual outcome (0 or 1).
-- **Goal**: Assign high probability to the TRUE outcome and low probability to FALSE outcomes.
-- Minimize your Brier score (lower is better).
-
-Key Mechanics:
-1. **Brier Score**: You are scored on the squared difference between your predicted probabilities and the resolution (0 or 1).
-2. **Distribution**: You must submit a list of (Outcome, Probability) pairs.
-3. **Max Outcomes**: You can submit at most {self.config.max_outcomes_per_question} outcomes per question. Focus on the most likely ones.
-4. **No Placeholders**: "Unknown", "TBD", "Other" are detrimental. Predict specific outcomes.
-"""
-
+        """Mirror BasicAgent scoring for warmup/allqd prompts."""
+        del forecast_interface
         return self._build_brier_skill_scoring_section(
             include_peer_summary=False,
             drop_mechanics={"time_weighted", "question_count"},

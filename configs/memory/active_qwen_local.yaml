@@ -4,8 +4,8 @@
 #
 # Usage:
 #   FSIM_VENV_PATH=${FSIM_REPO_DIR}/.venv-qwen35 \
-#   python aisa_scripts/run_sim/submit_sim_aisa.py \
-#     --config configs/memory/active_qwen_local.yaml --runs 1 \
+#   python scripts/run_forecast_sim.py \
+#     --config configs/memory/active_qwen_local.yaml \
 #     --set restart_from=/path/to/qwen_shared_warmup_r00/<timestamp> \
 #     --set restart_from_day=2025-04-25
 
@@ -91,5 +91,5 @@ defaults:
   memory_update_max_total_tokens: 16384
 
 agents:
-  - model: "/mnt/nfs/datasets_ac/models/Qwen3.5-4B"
+  - model: "${FSIM_DEFAULT_MODEL_PATH}"
     provider: "vllm"

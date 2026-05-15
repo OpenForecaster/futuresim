@@ -1,7 +1,7 @@
 # AllQDailyAgent (allqd) Simulation Configuration
 # Like allQ warmup, but runs per-question focused prediction EVERY day (no DF queries).
 #
-# Usage: python mpi_scripts/run_sim/submit_sim.py --config configs/deepseek/allqd_sim_ds.yaml --runs 1
+# Usage: python scripts/run_forecast_sim.py --config configs/deepseek/allqd_sim_ds.yaml
 
 # --- Simulation Meta ---
 sim_name: "allqd_sim_deepseek"

@@ -15,7 +15,7 @@
 #   Day 0 of the standard v37 runs (start_date 2025-12-31, lookback 7).
 #   resolution_start/end keep the full v37 question set loaded.
 #
-# Usage: python mpi_scripts/run_sim/submit_sim.py --config configs/memory/aljazeera_2026Q1v37_qwen36plus_warmup_only.yaml --runs 1
+# Usage: python scripts/run_forecast_sim.py --config configs/memory/aljazeera_2026Q1v37_qwen36plus_warmup_only.yaml
 
 # --- Simulation Meta ---
 sim_name: "qwen36plus_allq_warmup_only_aljazeeraQ12026v37"
@@ -33,14 +33,14 @@ dataset: "openforesight"
 dataset_path: "${FSIM_DATASET_PATH}"
 resolved_only: false
 min_forecasters: 0
-output_base: "/fast/sgoel/forecasting/current_sim/final_runs_v37"
+output_base: "${FSIM_OUTPUT_BASE}"
 warmup_parallelism: 64
 
 # --- Search Settings ---
 search_db: "${FSIM_SEARCH_DB}"
 embedding_model: "${FSIM_EMBEDDING_MODEL}"
 embedding_gpu_mem: 0.7
-articles_base: "/fast/sgoel/forecasting/news/deduped_articles/data"
+articles_base: "${FSIM_ARTICLES_BASE}"
 
 # --- Answer Matching ---
 matching: "openrouter"

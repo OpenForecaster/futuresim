@@ -1,8 +1,0 @@
-[submodule "data/news/news-please"]
-	path = data/news/news-please
-	url = https://github.com/fhamborg/news-please.git
-	ignore = dirty
-[submodule "forecast-sim-overleaf"]
-	path = forecast-sim-overleaf
-	url = https://github.com/nikhilchandak/forecast-sim-overleaf.git
-	branch = main

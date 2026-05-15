@@ -2,7 +2,7 @@
 # Runs Day 0 warmup + 2 loop days, then stops.
 # Use the output directory as restart_from for the mem/nomem restart configs.
 #
-# Usage: python mpi_scripts/run_sim/submit_sim.py --config configs/shared/allq_warmup_only.yaml --runs 1
+# Usage: python scripts/run_forecast_sim.py --config configs/shared/allq_warmup_only.yaml
 
 # --- Simulation Meta ---
 sim_name: "allq_warmup_only"

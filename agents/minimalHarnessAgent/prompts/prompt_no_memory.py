@@ -59,26 +59,7 @@ WORKFLOW_BASIC = _get_workflow_basic("v1")
 
 
 def _get_source_rules(source_name: str) -> str:
-    if source_name == "metaculus_binary":
-        return """
-## BINARY QUESTION RULES
-All questions are Yes/No binary. Your `mcp__forecast__submit_forecasts` tool call MUST use exactly:
-- **"Yes"** for the affirmative outcome
-- **"No"** for the negative outcome
-
-Example tool arguments:
-mcp__forecast__submit_forecasts(question_id="12345", outcomes={"Yes": 0.7, "No": 0.3})
-"""
-    elif source_name == "metaculus_mcq":
-        return """
-## MULTIPLE CHOICE RULES
-Each question has enumerated options shown in the 'options' column.
-Your `mcp__forecast__submit_forecasts` tool call MUST use the EXACT option text from the question.
-Do NOT paraphrase or abbreviate options.
-
-Example tool arguments (if options are ["Candidate A", "Candidate B", "Candidate C"]):
-mcp__forecast__submit_forecasts(question_id="12345", outcomes={"Candidate A": 0.5, "Candidate B": 0.3, "Candidate C": 0.2})
-"""
+    del source_name
     return ""
 
 
@@ -134,8 +115,7 @@ def _get_scoring_section(
     max_outcomes_per_question: int,
     handholding_version: str = "v1",
 ) -> str:
-    if source_name == "metaculus_binary":
-        return _build_binary_brier_scoring_section(handholding_version)
+    del source_name
     return _build_brier_skill_scoring_section(max_outcomes_per_question, handholding_version)
 
 

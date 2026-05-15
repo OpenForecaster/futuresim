@@ -229,9 +229,6 @@ Key Mechanics:
 
     def _get_scoring_section(self) -> str:
         """Get scoring description - single vs multi-agent mode."""
-        source_name = getattr(getattr(self, "_forecast_interface", None), "source_name", "openforesight")
-        if source_name == "metaculus_binary":
-            return self._build_binary_brier_scoring_section()
         return self._build_brier_skill_scoring_section()
 
     def _get_data_notes(self) -> str:
@@ -259,28 +256,6 @@ You are scored relative to your competitors: to earn a positive time-weighted pe
 
     def _get_source_rules(self) -> str:
         """Get source-specific submission rules."""
-        source_name = getattr(self._forecast_interface, 'source_name', 'openforesight')
-
-        if source_name == "metaculus_binary":
-            return """
-## BINARY QUESTION RULES
-All questions are Yes/No binary. Your `submit_forecasts` tool call MUST use exactly:
-- **"Yes"** for the affirmative outcome
-- **"No"** for the negative outcome
-
-Example tool arguments:
-{"forecasts":[{"qid":"12345","outcomes":{"Yes":0.7,"No":0.3}}]}
-"""
-        elif source_name == "metaculus_mcq":
-            return """
-## MULTIPLE CHOICE RULES
-Each question has enumerated options shown in the 'options' column.
-Your `submit_forecasts` tool call MUST use the EXACT option text from the question.
-Do NOT paraphrase or abbreviate options.
-
-Example tool arguments (if options are ["Candidate A", "Candidate B", "Candidate C"]):
-{"forecasts":[{"qid":"12345","outcomes":{"Candidate A":0.5,"Candidate B":0.3,"Candidate C":0.2}}]}
-"""
         return ""
 
     def _build_instructions(self, current_date: date) -> str:

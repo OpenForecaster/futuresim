@@ -8,9 +8,9 @@
 #     --embedding_gpu_mem 0.4
 #
 # Run:
-#   python mpi_scripts/run_sim/submit_sim.py \
+#   python scripts/run_forecast_sim.py \
 #     --config configs/minimalHarness/aljazeeraQ12026v37_codex_gpt55_rg1_static_search.yaml \
-#     --runs 1 \
+#     \
 #     --set defaults.codex_path="$(command -v codex)" \
 #     --set defaults.reasoning_effort=low \
 #     --set defaults.sandbox_proc_mode=host_ro \
@@ -38,7 +38,7 @@ output_base: "${FSIM_OUTPUT_BASE}/final_runs_v37"
 
 search_db: "${FSIM_SEARCH_DB}"
 embedding_model: "${FSIM_EMBEDDING_MODEL}"
-articles_base: "${FSIM_OUTPUT_BASE}/../news/deduped_articles/data"
+articles_base: "${FSIM_ARTICLES_BASE}"
 static_search_dir: "${FSIM_OUTPUT_BASE}/static_search/aljazeeraQ12026v37_rg1_title_hybrid"
 
 matching: "openrouter"

@@ -1,5 +1,5 @@
 # Default Simulation Configuration
-# Usage: python mpi_scripts/run_sim/submit_sim.py --config configs/shared/default_sim.yaml --runs 1
+# Usage: python scripts/run_forecast_sim.py --config configs/shared/default_sim.yaml
 
 # --- Simulation Meta ---
 sim_name: "deepseekv32_selfplay"

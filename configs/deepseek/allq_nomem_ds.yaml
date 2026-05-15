@@ -2,7 +2,7 @@
 #
 # Restarts an existing AllQ run from Day 1 onward. Day 0 in AllQ is warmup-only anyway.
 #
-# Usage: python mpi_scripts/run_sim/submit_sim.py --config configs/deepseek/allq_nomem_ds.yaml --runs 1
+# Usage: python scripts/run_forecast_sim.py --config configs/deepseek/allq_nomem_ds.yaml
 
 # --- Restart ---
 # Set locally with --set restart_from=/path/to/run

@@ -3,7 +3,7 @@ from typing import List, Dict, Optional, Iterator
 from dataclasses import dataclass
 from collections import defaultdict
 import heapq
-from data.fetchqs import get_fetcher
+from environment.datasets import get_fetcher
 
 @dataclass
 class Question:
@@ -25,7 +25,7 @@ class QuestionPool:
     Uses heap for O(log N) resolution lookups.
     
     Args:
-        dataset: Dataset name (openforesight, metaculus_binary, etc)
+        dataset: Dataset name (`openforesight` or `custom`)
         dataset_path: Path for openforesight dataset
         dataset_cache: Path for cached datasets directory
         split: Dataset split to use
@@ -69,8 +69,6 @@ class QuestionPool:
         
     def _load_questions(self, cache_dir):
         """Load questions from fetcher and build index."""
-        # Note: OpenForesight fetcher ignores cache_dir
-        # Metaculus fetcher needs it
         questions = self.fetcher.load_from_cache(
             cache_dir=cache_dir,
             resolution_start=self.resolution_start,

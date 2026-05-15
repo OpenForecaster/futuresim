@@ -181,10 +181,10 @@ class SandboxHelpers:
         daily_metrics.csv, test_daily_metrics.csv, actions.jsonl, matcher.jsonl
         in the parent output dir; and /home outside explicit harness dirs.
 
-        Bind realpaths and recreate /home, /fast, /is/cluster/fast aliases so
-        aliased paths resolve only to separately bound targets. Network is
-        shared by default for OpenRouter and local vLLM; network_isolation uses
-        a private net plus the host allowlist proxy/bridge.
+        Bind realpaths and recreate /home when it is a symlink so aliased paths
+        resolve only to separately bound targets. Network is shared by default
+        for OpenRouter and local vLLM; network_isolation uses a private net plus
+        the host allowlist proxy/bridge.
         """
         workspace_real = os.path.realpath(str(self.workspace))
         internal_real = os.path.realpath(str(self._internal_dir))
@@ -207,13 +207,10 @@ class SandboxHelpers:
         if self.config.sandbox_proc_mode == "new":
             args.extend(["--unshare-pid", "--proc", "/proc"])
         else:
-            # Some Condor envs forbid new procfs; keep FS isolation and expose
-            # process metadata read-only instead of a private PID namespace.
             args.extend(["--ro-bind", "/proc", "/proc"])
 
-        # Recreate aliases before binds create tmpfs DEST dirs; aliases resolve
-        # only to separately bound paths (e.g. /home -> /lustre/home).
-        for alias in ("/home", "/fast", "/is/cluster/fast"):
+        # Recreate aliases before binds create tmpfs DEST dirs.
+        for alias in ("/home",):
             if os.path.islink(alias):
                 target = os.readlink(alias)
                 if not os.path.isabs(target):

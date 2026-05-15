@@ -2,7 +2,7 @@
 # Runs Day 0 warmup + 2 loop days, then stops.
 # Use the output directory as restart_from for the mem/nomem restart configs.
 #
-# Usage: python mpi_scripts/run_sim/submit_sim.py --config configs/shared/allq_warmup_only.yaml --runs 1
+# Usage: python scripts/run_forecast_sim.py --config configs/shared/allq_warmup_only.yaml
 
 # --- Simulation Meta ---
 sim_name: "allq_skysports_300_warmup_only"
@@ -19,15 +19,15 @@ resolution_end: "2025-12-14"
 
 # --- Data Paths ---
 dataset: "openforesight"
-dataset_path: "/fast/nchandak/datasets/OpenForesight"
+dataset_path: "${FSIM_DATASET_PATH}"
 min_forecasters: 10
 resolved_only: true
-output_base: "/is/cluster/fast/sgoel/forecasting/current_sim"
+output_base: "${FSIM_OUTPUT_BASE}"
 warmup_parallelism: 64
 
 # --- Search Settings ---
-search_db: "/is/cluster/fast/sgoel/forecasting/news/deduped_articles/lance/Qwen3-Embedding-8B"
-embedding_model: "/is/cluster/fast/sgoel/models/Qwen3-Embedding-8B"
+search_db: "${FSIM_SEARCH_DB}"
+embedding_model: "${FSIM_EMBEDDING_MODEL}"
 embedding_gpu_mem: 0.7
 
 # --- Answer Matching ---

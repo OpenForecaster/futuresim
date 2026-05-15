@@ -9,7 +9,7 @@ from .data_loader import QuestionPool, Question
 from .scoring import (
     DailyPrediction, PredictionHistory, 
     compute_aggregate, resolve_question,
-    DEFAULT_SCORER, BinaryBrierScorer
+    DEFAULT_SCORER
 )
 from .ansmatching import AnswerMatcher
 from . import forecast_metrics as _fm
@@ -22,7 +22,7 @@ class SimulationEnvironment:
     """
     Main simulation environment for multi-agent forecasting.
     
-    Uses Metaculus-style scoring:
+    Uses forecasting scoring:
     - Log score for accuracy
     - Peer score relative to other agents
     - Time-weighted averaging across prediction history
@@ -118,12 +118,7 @@ class SimulationEnvironment:
         self.source_context = self.q_pool.fetcher.get_prompt_context()
         self.source_name = self.q_pool.fetcher.source_name
         
-        source_key = str(self.source_name or "").lower()
-        if source_key == "metaculus_binary":
-            # Keep scoring consistent with binary Brier prompt wording.
-            self.scorer = BinaryBrierScorer()
-        else:
-            self.scorer = DEFAULT_SCORER
+        self.scorer = DEFAULT_SCORER
         
         # Track prediction history per question
         self.prediction_histories: Dict[str, PredictionHistory] = {}

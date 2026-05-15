@@ -1,5 +1,5 @@
 # DeepSeek 4-Agent Simulation Configuration
-# Usage: python mpi_scripts/run_sim/submit_sim.py --config configs/deepseek/deepseek_4_agents.yaml
+# Usage: python scripts/run_forecast_sim.py --config configs/deepseek/deepseek_4_agents.yaml
 
 # --- Simulation Meta ---
 sim_name: "deepseekv32_selfplay"

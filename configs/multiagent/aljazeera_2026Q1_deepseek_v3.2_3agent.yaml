@@ -1,7 +1,7 @@
 # 3-agent active-memory run on the renamed v37 Al Jazeera 2026 Q1 split with deepseek-v3.2.
 # The v37 question set is published on HF as split `aljazeera2026Q1`.
 #
-# Usage: python mpi_scripts/run_sim/submit_sim.py --config configs/multiagent/aljazeera_2026Q1_deepseek_v3.2_3agent.yaml --runs 1
+# Usage: python scripts/run_forecast_sim.py --config configs/multiagent/aljazeera_2026Q1_deepseek_v3.2_3agent.yaml
 
 # --- Simulation Meta ---
 sim_name: "ds_v32_active_mem_aljazeera2026Q1_3agent"
@@ -27,7 +27,7 @@ warmup_parallelism: 64
 search_db: "${FSIM_SEARCH_DB}"
 embedding_model: "${FSIM_EMBEDDING_MODEL}"
 embedding_gpu_mem: 0.7
-articles_base: "${FSIM_NEWS_BASE}/deduped_articles/data"
+articles_base: "${FSIM_ARTICLES_BASE}"
 
 # --- Answer Matching ---
 matching: "openrouter"

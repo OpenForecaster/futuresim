@@ -1,8 +1,8 @@
 # AllQAgent Simulation Configuration (AISA paths)
-# Usage: python aisa_scripts/run_sim/submit_sim_aisa.py --config configs/deepseek/allq_sim_ds_aisa.yaml --runs 1
+# Usage: python scripts/run_forecast_sim.py --config configs/deepseek/allq_sim_ds_aisa.yaml
 #
 # Notes:
-# - Shared heavy assets (models/data/search/cache) are under /mnt/nfs/datasets_ac.
+# - Shared heavy assets are configured through .env.
 # - Project outputs go under ./logs/ (relative to repo root).
 # - For Hugging Face Hub datasets, you can set dataset_path to "<org>/<dataset_name>" instead.
 

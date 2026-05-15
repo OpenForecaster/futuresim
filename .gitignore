@@ -1,10 +1,18 @@
+# Local data, artifacts, and run outputs
+artifacts/
 analysis/
-analysis/openforesight_test_question_topic_distribution.csv
-analysis/openforesight_test_question_topics_manual.csv
-third_party/
+logs/
+outputs/
+runs/
 wandb/
+forecast-sim-overleaf/
+openforecaster.github.io/
+*.parquet
+*.jsonl
+
+# Local scratch files
 /.tmp*
-/=3
+*.log
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -34,9 +42,7 @@ wheels/
 
 # Virtual environments
 .venv/
-.skyrl-venv/
 .venv
-.skyrl-venv
 venv/
 ENV/
 env/
@@ -50,16 +56,6 @@ env/
 # Jupyter
 .ipynb_checkpoints/
 
-# Data files (keep on fast storage)
-*.parquet
-*.jsonl
-*.json
-!pyproject.json
-
-# Logs
-*.log
-logs/
-
 # OS
 .DS_Store
 Thumbs.db
@@ -70,10 +66,15 @@ core.[0-9]*
 vgcore.*
 *.stackdump
 
-# Agent artifacts (local only)
-.gemini/
+# Local secrets and tool artifacts
 .env
-.claude 
+.env.*
+!.env.example
+.agents/
+.codex/
+.gemini/
+.claude
+.claude.json
 .cache/
 .config/
 .ep_kernels_workspace/
@@ -81,22 +82,6 @@ vgcore.*
 .pytest_cache/
 .triton/
 
-# API Keys
-configs/openrouter_api_key.py
-configs/azure_openai_config.py
-inference/test_script.py
-
-# prompts 
-prompt_rendered/
-
 # Plotting
 plots/
 reports/
-
-numactl-2.0.16/
-
-# API Keys
-configs/glm_api_key.py
-configs/deepseek_api_key.py
-configs/qwen_api_key.py
-configs/brave_search_api.py

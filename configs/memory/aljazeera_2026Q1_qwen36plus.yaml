@@ -1,7 +1,7 @@
 # Active memory run on aljazeera2026Q1 split with qwen/qwen3.6-plus.
 # Mirrors configs/memory/aljazeera_2026Q1.yaml (deepseek) but swaps the agent model.
 #
-# Usage: python mpi_scripts/run_sim/submit_sim.py --config configs/memory/aljazeera_2026Q1_qwen36plus.yaml --runs 1
+# Usage: python scripts/run_forecast_sim.py --config configs/memory/aljazeera_2026Q1_qwen36plus.yaml
 
 # --- Simulation Meta ---
 sim_name: "qwen36plus_active_mem_aljazeera2026Q1"
@@ -24,7 +24,7 @@ warmup_parallelism: 64
 search_db: "${FSIM_SEARCH_DB}"
 embedding_model: "${FSIM_EMBEDDING_MODEL}"
 embedding_gpu_mem: 0.7
-articles_base: "/fast/sgoel/forecasting/news/deduped_articles/data"
+articles_base: "${FSIM_ARTICLES_BASE}"
 
 # --- Answer Matching ---
 matching: "openrouter"

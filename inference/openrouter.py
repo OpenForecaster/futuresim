@@ -1,17 +1,11 @@
 """
 OpenRouter inference provider.
 
-Drop-in replacement for VLLMInference - use chat() method with same interface.
-Features:
-- Automatic retries with exponential backoff
-- Prompt caching support (automatic for most providers)
-- Global rate limiting (shared across all instances)
-- Session reuse for connection pooling
-- Compatible sampling_params interface
+Drop-in replacement for VLLMInference. Exposes chat() and chat_json() with the
+same provider-facing interface used by the agents.
 """
 
 import os
-import sys
 import time
 import random
 from threading import Lock
@@ -23,16 +17,6 @@ except ImportError:
     raise ImportError(
         "requests module not found. Install with: pip install requests"
     )
-
-# Try to import API key from config file
-try:
-    # Add project root to path if not already there
-    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-    if project_root not in sys.path:
-        sys.path.insert(0, project_root)
-    from configs.openrouter_api_key import OPENROUTER_API_KEY as CONFIG_API_KEY
-except ImportError:
-    CONFIG_API_KEY = None
 
 
 class GlobalRateLimiter:
@@ -162,7 +146,6 @@ class OpenRouterInference:
                  max_retries: int = 3,
                  base_delay: float = 10.0,
                  max_delay: float = 60.0,
-                 enable_caching: bool = True,
                  **kwargs):
         """
         Initialize OpenRouter inference provider.
@@ -173,24 +156,21 @@ class OpenRouterInference:
             max_retries: Maximum retry attempts on transient errors (default 3)
             base_delay: Base delay in seconds for exponential backoff (default 1.0)
             max_delay: Maximum delay cap in seconds (default 30.0)
-            enable_caching: Enable prompt caching routing (default True)
             **kwargs: Additional default parameters for requests
         """
         self.model = model
         self.model_name = model  # For compatibility with VLLM interface
-        # Try: explicit parameter -> env var -> config file
-        self.api_key = api_key or os.environ.get("OPENROUTER_API_KEY") or CONFIG_API_KEY
+        self.api_key = api_key or os.environ.get("OPENROUTER_API_KEY")
         
         if not self.api_key:
             raise ValueError(
-                "OpenRouter API key required. Set OPENROUTER_API_KEY environment variable, "
-                "pass api_key parameter, or add to configs/openrouter_api_key.py"
+                "OpenRouter API key required. Set OPENROUTER_API_KEY or pass api_key."
             )
         
         self.max_retries = min(3, max(0, int(max_retries)))
         self.base_delay = base_delay
         self.max_delay = max_delay
-        self.enable_caching = enable_caching
+        kwargs.pop("enable_caching", None)
         self.default_kwargs = kwargs
         
         # Request headers

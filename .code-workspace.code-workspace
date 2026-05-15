@@ -1,20 +1,7 @@
 {
-	"folders": [
+    "folders": [
         {
             "path": "."
-        },
-        {
-            "path": "../../../fast/sgoel/logs/forecasting-sim"
-        },
-        {
-            "path": "../archive/scaling-forecasting-training"
-        },
-        {
-            "path": "../../../fast/sgoel/forecasting/current_sim"
-        },
-        {
-            "path": "../../../fast/sgoel/forecasting/skyrl"
         }
-    ],
-	"settings": {}
+    ]
 }

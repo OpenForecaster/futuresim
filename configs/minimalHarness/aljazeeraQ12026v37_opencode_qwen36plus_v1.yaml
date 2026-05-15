@@ -19,11 +19,11 @@ dataset_path: "${FSIM_DATASET_PATH}"
 split: "aljazeeraQ12026v37"
 resolved_only: false
 min_forecasters: 0
-output_base: "/fast/sgoel/forecasting/current_sim/final_runs_v37/"
+output_base: "${FSIM_OUTPUT_BASE}"
 
 search_db: "${FSIM_SEARCH_DB}"
 embedding_model: "${FSIM_EMBEDDING_MODEL}"
-articles_base: "/fast/sgoel/forecasting/news/deduped_articles/data"
+articles_base: "${FSIM_ARTICLES_BASE}"
 
 matching: "openrouter"
 matcher: "deepseek/deepseek-v3.2"

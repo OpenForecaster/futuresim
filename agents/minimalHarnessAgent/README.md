@@ -64,10 +64,6 @@ run directory and are not meant to be edited by the model.
 - `static_search.py`: static-search cache helpers for the Codex warmup ablation.
 - `README.md`: this folder guide.
 
-Manual local debugging harness: `tests/manual/minimal_harness_harness.py`.
-It is intentionally outside this package and is not part of normal pytest
-collection.
-
 ## Backends
 
 Set `harness_backend` in config:
@@ -151,5 +147,4 @@ After edits, at minimum run:
 
 ```bash
 python -m py_compile agents/minimalHarnessAgent/*.py
-pytest tests/test_minimal_harness_codex_args.py tests/test_sandbox_egress.py tests/test_raw_logging.py tests/test_resume_state.py tests/test_matcher_timing.py -q
 ```

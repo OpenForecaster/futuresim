@@ -2,7 +2,7 @@
 # Runs Day 0 warmup + 2 loop days, then stops.
 # Use the output directory as restart_from for the mem/nomem restart configs.
 #
-# Usage: python aisa_scripts/run_sim/submit_sim_aisa.py --config configs/shared/allq_warmup_only_aisa.yaml --runs 1 --gpus 1 --memory 80 --time 12:00:00
+# Usage: python scripts/run_forecast_sim.py --config configs/shared/allq_warmup_only_aisa.yaml
 
 # --- Simulation Meta ---
 sim_name: "allq_warmup_only_aisa_skysports2025"

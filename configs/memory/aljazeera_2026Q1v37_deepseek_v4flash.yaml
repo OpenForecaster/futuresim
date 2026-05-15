@@ -3,7 +3,7 @@
 # v4-flash has 1M context; xhigh maps to "max" reasoning on flash.
 # Requires BYOK DeepSeek key on openrouter (otherwise upstream rate-limits).
 #
-# Usage: python mpi_scripts/run_sim/submit_sim.py --config configs/memory/aljazeera_2026Q1v37_deepseek_v4flash.yaml --runs 1
+# Usage: python scripts/run_forecast_sim.py --config configs/memory/aljazeera_2026Q1v37_deepseek_v4flash.yaml
 
 # --- Simulation Meta ---
 sim_name: "ds_v4flash_active_mem_aljazeeraQ12026v37"
@@ -21,14 +21,14 @@ dataset: "openforesight"
 dataset_path: "${FSIM_DATASET_PATH}"
 resolved_only: false
 min_forecasters: 0
-output_base: "/fast/sgoel/forecasting/current_sim/final_runs_v37"
+output_base: "${FSIM_OUTPUT_BASE}"
 warmup_parallelism: 64
 
 # --- Search Settings ---
 search_db: "${FSIM_SEARCH_DB}"
 embedding_model: "${FSIM_EMBEDDING_MODEL}"
 embedding_gpu_mem: 0.7
-articles_base: "/fast/sgoel/forecasting/news/deduped_articles/data"
+articles_base: "${FSIM_ARTICLES_BASE}"
 
 # --- Answer Matching ---
 matching: "openrouter"

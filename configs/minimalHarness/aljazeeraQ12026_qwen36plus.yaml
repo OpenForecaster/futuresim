@@ -2,7 +2,7 @@
 # (434 questions, v11, Jan-Mar 2026). Mirrors aljazeeraQ12026_deepseek_v32.yaml.
 # Reasoning effort: high (default in agent.py via --variant high).
 #
-# Usage: python mpi_scripts/run_sim/submit_sim.py --config configs/minimalHarness/aljazeeraQ12026_qwen36plus.yaml --runs 1
+# Usage: python scripts/run_forecast_sim.py --config configs/minimalHarness/aljazeeraQ12026_qwen36plus.yaml
 
 sim_name: "opencode_aljazeeraQ12026_qwen36plus"
 
@@ -23,7 +23,7 @@ output_base: "${FSIM_OUTPUT_BASE}/final_runs"
 
 search_db: "${FSIM_SEARCH_DB}"
 embedding_model: "${FSIM_EMBEDDING_MODEL}"
-articles_base: "/fast/sgoel/forecasting/news/deduped_articles/data"
+articles_base: "${FSIM_ARTICLES_BASE}"
 
 matching: "openrouter"
 matcher: "deepseek/deepseek-v3.2"

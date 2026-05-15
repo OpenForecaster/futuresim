@@ -299,7 +299,7 @@ def main():
     parser.add_argument("--upstream-proxy", default=None,
                         help="Optional upstream HTTP proxy (host:port or http://host:port). "
                              "Overrides EGRESS_UPSTREAM_PROXY / HTTPS_PROXY / HTTP_PROXY env. "
-                             "Use to chain through cluster proxies that gate outbound traffic.")
+                             "Use to chain through another proxy that gates outbound traffic.")
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
     logging.basicConfig(

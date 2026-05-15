@@ -2,7 +2,7 @@
 #
 # Before using: replace <WARMUP_RUN_DIR> with the actual output directory from the warmup-only run (allq_warmup_only).
 #
-# Usage: python mpi_scripts/run_sim/submit_sim.py --config configs/openai/allq_nomem_restart_gpt-5-mini.yaml --runs 1
+# Usage: python scripts/run_forecast_sim.py --config configs/openai/allq_nomem_restart_gpt-5-mini.yaml
 
 # --- Restart ---
 # Set locally with --set restart_from=/path/to/run

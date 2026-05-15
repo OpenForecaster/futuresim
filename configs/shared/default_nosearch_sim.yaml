@@ -1,5 +1,5 @@
 # Default Simulation Configuration
-# Usage: python mpi_scripts/run_sim/submit_sim.py --config configs/shared/default_sim.yaml --runs 1
+# Usage: python scripts/run_forecast_sim.py --config configs/shared/default_nosearch_sim.yaml
 
 # --- Simulation Meta ---
 # sim_name: "gemini_3_flash_preview_nosearch_sim100turns"
@@ -10,11 +10,10 @@ end_date: "2025-08-23"   # Resolution window end
 lookback_days: 7         # Days before first resolution to start simulation
 search_cutoff_days: 0    # Cap on search date based on current date in sim
 resolution_guard: null   # Warmup-only extra search cap: resolution_date - resolution_guard days
-split: "test"            # Dataset split: train, test, or validation
+split: "aljazeera2026Q1" # Dataset split
 
 # --- Data Paths ---
-# --- Data Paths ---
-dataset: "openforesight"  # Options: "openforesight", "metaculus_binary", "metaculus_mcq"
+dataset: "openforesight"  # Options: "openforesight", "custom"
 dataset_path: "${FSIM_DATASET_PATH}"  # For openforesight
 dataset_cache: "${FSIM_DATASET_CACHE}"  # For cached sources
 # Metaculus Filtering
@@ -25,11 +24,12 @@ output_base: "${FSIM_OUTPUT_BASE}"
 
 # --- Search Settings ---
 # Leave search_db empty to disable search
+search_db: ""
 
 # --- Answer Matching ---
-matching: "vllm" # Options: "exact", "openrouter", "vllm"
-matcher: "/fast/rolmedo/models/qwen3-4b-it-2507"
-matcher_gpu_mem: 0.3
+matching: "openrouter" # Options: "exact", "openrouter", "vllm"
+matcher: "${FSIM_MATCHER_MODEL}"
+matcher_gpu_mem: 0.0
 max_model_len: 8192
 
 # --- Inference Defaults ---
