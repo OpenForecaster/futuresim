@@ -614,7 +614,7 @@ http = [
 
 [[package]]
 name = "futuresim"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "." }
 dependencies = [
     { name = "datasets", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },

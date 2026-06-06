@@ -75,6 +75,7 @@ vgcore.*
 !.env.example
 .agents/
 .codex/
+.prime/
 .gemini/
 .claude
 .claude.json

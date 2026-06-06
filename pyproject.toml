@@ -1,10 +1,11 @@
 [project]
 name = "futuresim"
-version = "0.1.0"
+version = "0.1.1"
 description = "Futuresim forecasting simulation environment"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 keywords = ["forecasting", "evaluation", "verifiers", "openreward", "ors"]
+tags = ["forecasting", "agent", "simulation", "verifiers", "openreward"]
 dependencies = [
     "datasets==4.4.2",
     "httpx==0.28.1",
@@ -69,32 +70,22 @@ hosted-hybrid = [
 futuresim-openreward-server = "integrations.openreward.server:main"
 
 [build-system]
-requires = ["setuptools>=69", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
 
-[tool.setuptools]
-py-modules = ["futuresim", "server"]
-packages = [
+[tool.hatch.build.targets.wheel]
+only-include = [
+    "agents",
     "environment",
-    "environment.datasets",
-    "environment.scoring",
-    "futuresim_agents",
-    "futuresim_agents.allQAgent",
-    "futuresim_agents.basicAgent",
-    "futuresim_agents.minimalHarnessAgent",
-    "futuresim_agents.minimalHarnessAgent.prompts",
-    "futuresim_agents.qwenAgent",
-    "futuresim_agents.search_tools",
-    "futuresim_agents.search_tools.lancedb",
-    "futuresim_agents.utils",
+    "futuresim.py",
     "inference",
     "integrations",
-    "integrations.openreward",
-    "integrations.verifiers",
+    "pathing.py",
+    "server.py",
 ]
 
-[tool.setuptools.package-dir]
-futuresim_agents = "agents"
+[tool.hatch.build.targets.wheel.sources]
+agents = "futuresim_agents"
 
 [tool.uv]
 dev-dependencies = []
