@@ -9,12 +9,22 @@ Both integrations run the Futuresim environment plus an optional
 MinimalHarness-compatible CLI agent such as Codex or Claude Code. The agent sees
 a date-gated filesystem workspace and talks to Futuresim through MCP.
 
+Useful links:
+
+- Blogpost: [openforecaster.github.io/futuresim](https://openforecaster.github.io/futuresim/)
+- Paper: [arxiv.org/abs/2605.15188](https://arxiv.org/abs/2605.15188)
+- Questions: [nikhilchandak/OpenForesight](https://huggingface.co/datasets/nikhilchandak/OpenForesight)
+- Article corpus: [shash42/forecast-news](https://huggingface.co/datasets/shash42/forecast-news)
+- LanceDB hybrid index: [shash42/forecast-news-embeddings](https://huggingface.co/datasets/shash42/forecast-news-embeddings)
+- Embedding model: [Qwen/Qwen3-Embedding-8B](https://huggingface.co/Qwen/Qwen3-Embedding-8B)
+
 ## What You Need
 
 For any run, provide:
 
-- A Futuresim dataset. The default is `nikhilchandak/OpenForesight` with split
-  `aljazeeraQ12026v37`.
+- A Futuresim dataset. The default is
+  [nikhilchandak/OpenForesight](https://huggingface.co/datasets/nikhilchandak/OpenForesight)
+  with split `aljazeeraQ12026v37`.
 - An article corpus directory, if you want filesystem news access. It must use:
 
 ```text
@@ -32,8 +42,11 @@ articles_base/
 
 For hybrid LanceDB search, also provide:
 
-- `search_db`: path to the prebuilt LanceDB index.
-- `embedding_model`: path/name for the embedding model, or an embedding server.
+- `search_db`: path to the prebuilt
+  [LanceDB index](https://huggingface.co/datasets/shash42/forecast-news-embeddings).
+- `embedding_model`: path/name for
+  [Qwen/Qwen3-Embedding-8B](https://huggingface.co/Qwen/Qwen3-Embedding-8B), or
+  an embedding server.
 - GPU or embedding-server access if your hybrid setup requires it.
 
 Hybrid search is opt-in because it needs extra artifacts and, depending on your

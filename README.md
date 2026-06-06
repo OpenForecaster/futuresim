@@ -4,6 +4,9 @@ Futuresim is a forecasting simulator for LLM agents. It advances a dated
 question market, exposes only the information available at each simulated date,
 records agent forecasts, and scores them over time.
 
+For background, see the [Futuresim blogpost](https://openforecaster.github.io/futuresim/)
+and [paper](https://arxiv.org/abs/2605.15188).
+
 ## Quick Start
 
 ```bash
@@ -54,9 +57,9 @@ python scripts/run_forecast_sim.py --config configs/shared/default_sim.yaml
 
 ## Data And Search
 
-OpenForesight questions load from Hugging Face by default:
-`nikhilchandak/OpenForesight`. The default config uses the `aljazeera2026Q1`
-split.
+[OpenForesight](https://huggingface.co/datasets/nikhilchandak/OpenForesight)
+questions load from Hugging Face by default. The default config uses the
+`aljazeera2026Q1` split.
 
 Futuresim separates the question market from agent retrieval:
 
@@ -65,7 +68,9 @@ Futuresim separates the question market from agent retrieval:
 - Agents own their retrieval strategy. They can use the filesystem article
   corpus, the bundled LanceDB hybrid search tool, or a custom tool.
 
-Download the prebuilt LanceDB artifact for the bundled hybrid search configs:
+Download the prebuilt
+[LanceDB artifact](https://huggingface.co/datasets/shash42/forecast-news-embeddings)
+for the bundled hybrid search configs:
 
 ```bash
 export FSIM_SEARCH_DB=${FSIM_SEARCH_DB:-$(pwd)/artifacts/forecast-news-embeddings}
@@ -78,7 +83,14 @@ hf download shash42/forecast-news-embeddings \
 python scripts/check_search_readiness.py --db-path "$FSIM_SEARCH_DB"
 ```
 
-Download the browsable article corpus separately:
+The public embedding model used with this index is
+[Qwen/Qwen3-Embedding-8B](https://huggingface.co/Qwen/Qwen3-Embedding-8B).
+Set `FSIM_EMBEDDING_MODEL` to a local checkout, a model id, or an embedding
+server target supported by your search backend.
+
+Download the browsable
+[article corpus](https://huggingface.co/datasets/shash42/forecast-news)
+separately:
 
 ```bash
 export FSIM_ARTICLES_BASE=${FSIM_ARTICLES_BASE:-$(pwd)/artifacts/forecast-news}
