@@ -4,7 +4,7 @@ import re
 from datetime import date, timedelta
 from typing import Dict, Optional
 
-from agents.utils.memory import ActiveMemory, StructuredMemory
+from futuresim_agents.utils.memory import ActiveMemory, StructuredMemory
 
 
 class BasicPromptBuilder:

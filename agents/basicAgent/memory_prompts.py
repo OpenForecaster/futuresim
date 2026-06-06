@@ -2,7 +2,7 @@
 
 from datetime import date
 
-from agents.utils.memory import ActiveMemory, StructuredMemory
+from futuresim_agents.utils.memory import ActiveMemory, StructuredMemory
 
 from .feedback import FeedbackHandler
 

@@ -23,11 +23,11 @@ tip line, "Begin") matches the AllQ flow.
 from datetime import date, timedelta
 from typing import Optional
 
-from agents.minimalHarnessAgent.prompts.prompt_active_memory import (
+from futuresim_agents.minimalHarnessAgent.prompts.prompt_active_memory import (
     _allq_reminder,
     _normalize_prompt_heading_spacing,
 )
-from agents.minimalHarnessAgent.prompts.prompt import (
+from futuresim_agents.minimalHarnessAgent.prompts.prompt import (
     _build_new_articles_text,
     _get_data_notes,
     _get_scoring_section,
@@ -305,7 +305,6 @@ def build_daily_prompt(
         "## Workspace:\n"
         "- market.csv — Read-only snapshot of all questions (refreshed each day).\n"
         "- articles/ — Browsable news articles organized by date as articles/YYYY/MM/DD/articles.jsonl (one JSON article per line). New date directories appear after calling `mcp__forecast__next_day`.\n"
-        "- predictions/ — Read-only record of your past submissions, one file per day as `predictions/YYYY-MM-DD.json`. A new file appears after each `mcp__forecast__next_day`.\n"
         "- memory/ — Read-only persisted notes (`memory/YYYY-MM-DD/{mem.csv, meta.yaml}`), written by the MCP server on each `mcp__forecast__next_day`. Read prior days' files for context; edit memory only through the `mcp__forecast__mem_*` / `mcp__forecast__memory_*` tools."
     )
 

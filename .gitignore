@@ -5,6 +5,8 @@ logs/
 outputs/
 runs/
 wandb/
+cluster_runs/
+configs/local/
 forecast-sim-overleaf/
 openforecaster.github.io/
 *.parquet

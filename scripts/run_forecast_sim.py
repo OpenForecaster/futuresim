@@ -44,9 +44,9 @@ load_repo_env(REPO_ROOT)
 
 from environment.env import SimulationEnvironment, SimForecastInterface
 from environment.matcher_cache import resolve_sim_matcher_cache_path
-from agents.basicAgent import BasicAgent, AgentConfig
-from agents.allQAgent import AllQAgent, AllQDailyAgent
-from agents.qwenAgent import QwenBasicAgent, QwenAllQAgent
+from futuresim_agents.basicAgent import BasicAgent, AgentConfig
+from futuresim_agents.allQAgent import AllQAgent, AllQDailyAgent
+from futuresim_agents.qwenAgent import QwenBasicAgent, QwenAllQAgent
 
 
 # Default paths
@@ -412,7 +412,7 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
         # Claude Code agent doesn't need an inference provider — skip the LLM setup
         # and jump straight to agent creation.
         if scaffold == 'minimalHarness':
-            from agents.minimalHarnessAgent.agent import MinimalHarnessAgent, MinimalHarnessConfig
+            from futuresim_agents.minimalHarnessAgent.agent import MinimalHarnessAgent, MinimalHarnessConfig
             agent_id = f"minimalHarness_{model.replace('/', '_').replace('.', '')}_{i+1:03d}"
             cc_search_cutoff = agent_def.get('search_cutoff_days', defaults.get('search_cutoff_days', getattr(args, 'search_cutoff_days', 0)))
             cc_freeze_search_after_start = _as_bool(agent_def.get(
@@ -1184,7 +1184,7 @@ def main():
     search_tool = None
     if args.search_db:
         print(f"\nSetting up search tool...", flush=True)
-        from agents.search_tools.lancedb import LanceDBSearchTool
+        from futuresim_agents.search_tools.lancedb import LanceDBSearchTool
         
         # Preload embedding model for zero-latency searches
         embedding_model = None
@@ -1390,7 +1390,7 @@ def main():
                 start_date=sim_start
             )
         elif args.scaffold == 'minimalHarness':
-            from agents.minimalHarnessAgent.agent import MinimalHarnessAgent, MinimalHarnessConfig
+            from futuresim_agents.minimalHarnessAgent.agent import MinimalHarnessAgent, MinimalHarnessConfig
             cc_config = MinimalHarnessConfig(
                 model=model_name,
                 search_db=getattr(args, 'search_db', '') or '',
@@ -1429,6 +1429,15 @@ def main():
         default=5,
     )
 
+    env_articles_base = getattr(args, 'articles_base', '') or os.environ.get('FSIM_ARTICLES_BASE', '')
+    env_article_stage_mode = 'copy'
+    if any(getattr(agent, 'article_workspace_config', None) for agent in agents):
+        # MinimalHarness sandboxes keep the raw article corpus hidden by using
+        # hardlinks; non-sandboxed harnesses use fast symlinks. Per-agent modes
+        # are registered by the agent, so this default is only for adapters or
+        # future non-agent workspaces.
+        env_article_stage_mode = 'symlink'
+
     # Initialize environment with resolution date filter
     print(f"\nLoading dataset: {args.dataset}")
     env = SimulationEnvironment(
@@ -1456,6 +1465,9 @@ def main():
             for agent in agents
             if getattr(agent, "agent_output_dir", None)
         },
+        articles_base=env_articles_base,
+        article_stage_mode=env_article_stage_mode,
+        article_search_cutoff_days=getattr(args, 'search_cutoff_days', 0),
     )
     
     # Add all agents

@@ -1,5 +1,6 @@
 import os
 from datetime import date, timedelta
+from pathlib import Path
 from threading import Lock
 from typing import List, Dict, Any, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -12,10 +13,22 @@ from .scoring import (
     DEFAULT_SCORER
 )
 from .ansmatching import AnswerMatcher
+from .article_corpus import ArticleCorpusView, ArticleWorkspace, StageMode
 from . import forecast_metrics as _fm
 from . import logging as env_logging
 from . import replay, scorekeeping
 from .updater import MarketWriter, SimLogger
+
+
+class _ExternalAgentRef:
+    """Lightweight participant used by external adapters for metric accounting."""
+
+    def __init__(self, agent_id: str):
+        self.agent_id = agent_id
+        self.model_name = ""
+
+    def act(self, *args, **kwargs) -> list:
+        return []
 
 
 class SimulationEnvironment:
@@ -55,7 +68,11 @@ class SimulationEnvironment:
                  matcher_cache_path: Optional[str] = None,
                  matcher_max_concurrency: int = 300,
                  max_outcomes_per_question: int = 5,
-                 agent_output_dirs: Optional[Dict[str, str]] = None):
+                 agent_output_dirs: Optional[Dict[str, str]] = None,
+                 articles_base: str = "",
+                 article_stage_mode: StageMode = "symlink",
+                 article_search_cutoff_days: int = 0,
+                 article_freeze_after_start: bool = False):
         
         # Handle positional args shift if someone called with positional args (unlikely in this codebase but safe)
         # We'll rely on kwargs mostly.
@@ -78,6 +95,14 @@ class SimulationEnvironment:
         self.timegap_days = max(1, int(timegap_days or 1))
         self.max_outcomes_per_question = max(1, int(max_outcomes_per_question or 1))
         self.matcher_max_concurrency = max(1, int(matcher_max_concurrency or 300))
+        self.article_stage_mode: StageMode = article_stage_mode
+        self.article_search_cutoff_days = max(0, int(article_search_cutoff_days or 0))
+        self.article_freeze_after_start = bool(article_freeze_after_start)
+        self.article_corpus = (
+            ArticleCorpusView(articles_base, default_start_date=start_date)
+            if articles_base else None
+        )
+        self._article_workspaces: List[ArticleWorkspace] = []
         self.agent_output_dirs: Dict[str, str] = {
             str(agent_id): str(agent_dir)
             for agent_id, agent_dir in (agent_output_dirs or {}).items()
@@ -149,24 +174,119 @@ class SimulationEnvironment:
         self.resolved_agent_predictions: Dict[str, Dict[str, Dict[str, Any]]] = {}
         
         self.market_csv_path: Optional[str] = None
+        self._day_open = False
+        self._day_active_questions: Optional[List[Question]] = None
+        self._day_matcher_before: Optional[Dict[str, float]] = None
         
         if self.resume_dir:
             self._restore_state(self.resume_dir)
         
     def add_agent(self, agent, output_dir: Optional[str] = None):
         self.agents.append(agent)
+        self._register_agent_tracking(agent.agent_id, output_dir=output_dir)
+        self._register_agent_article_workspace(agent)
+
+    def register_agent_id(self, agent_id: str, output_dir: Optional[str] = None) -> None:
+        """
+        Register an externally driven participant for metrics and scorekeeping.
+
+        ORS/Verifiers-style adapters can call this once, then submit forecasts
+        through :meth:`make_forecast_interface` or :meth:`submit_forecast`
+        without providing a BaseAgent implementation.
+        """
+        agent_id = str(agent_id)
+        if not any(str(getattr(agent, "agent_id", "")) == agent_id for agent in self.agents):
+            self.agents.append(_ExternalAgentRef(agent_id))
+        self._register_agent_tracking(agent_id, output_dir=output_dir)
+
+    def _register_agent_tracking(self, agent_id: str, output_dir: Optional[str] = None) -> None:
+        agent_id = str(agent_id)
         if output_dir:
             if not hasattr(self, "agent_output_dirs"):
                 self.agent_output_dirs = {}
-            self.agent_output_dirs[str(agent.agent_id)] = str(output_dir)
+            self.agent_output_dirs[agent_id] = str(output_dir)
         # Preserve restored resume stats if they were reconstructed before agents were added.
-        self.agent_scores.setdefault(agent.agent_id, 0.0)
-        self.agent_correct.setdefault(agent.agent_id, 0)
-        self.agent_wrong.setdefault(agent.agent_id, 0)
-        self.agent_questions.setdefault(agent.agent_id, 0)
-        self.agent_raw_brier.setdefault(agent.agent_id, 0.0)
-        self.agent_snapshot_peer.setdefault(agent.agent_id, 0.0)
-        self.agent_exp_acc_sum.setdefault(agent.agent_id, 0.0)
+        self.agent_scores.setdefault(agent_id, 0.0)
+        self.agent_correct.setdefault(agent_id, 0)
+        self.agent_wrong.setdefault(agent_id, 0)
+        self.agent_questions.setdefault(agent_id, 0)
+        self.agent_raw_brier.setdefault(agent_id, 0.0)
+        self.agent_snapshot_peer.setdefault(agent_id, 0.0)
+        self.agent_exp_acc_sum.setdefault(agent_id, 0.0)
+
+    def configure_article_corpus(self, articles_base: str) -> None:
+        """Set or replace the environment-owned dated article corpus."""
+        self.article_corpus = (
+            ArticleCorpusView(articles_base, default_start_date=self.start_date)
+            if articles_base else None
+        )
+
+    def register_article_workspace(
+        self,
+        articles_dir: str,
+        *,
+        mode: Optional[StageMode] = None,
+        search_cutoff_days: Optional[int] = None,
+        freeze_after_start: Optional[bool] = None,
+        start_date: Optional[date] = None,
+    ) -> None:
+        """Register a local article workspace for environment-controlled staging."""
+        path = os.path.abspath(os.path.expanduser(str(articles_dir)))
+        if any(str(workspace.articles_dir) == path for workspace in self._article_workspaces):
+            return
+        self._article_workspaces.append(
+            ArticleWorkspace(
+                articles_dir=Path(path),
+                mode=mode or self.article_stage_mode,
+                search_cutoff_days=(
+                    self.article_search_cutoff_days
+                    if search_cutoff_days is None
+                    else max(0, int(search_cutoff_days or 0))
+                ),
+                freeze_after_start=(
+                    self.article_freeze_after_start
+                    if freeze_after_start is None
+                    else bool(freeze_after_start)
+                ),
+                start_date=start_date or self.start_date,
+            )
+        )
+
+    def _register_agent_article_workspace(self, agent) -> None:
+        config_fn = getattr(agent, "article_workspace_config", None)
+        if not callable(config_fn):
+            return
+        config = config_fn() or {}
+        articles_base = config.get("articles_base") or ""
+        if self.article_corpus is None and articles_base:
+            self.configure_article_corpus(articles_base)
+        articles_dir = config.get("articles_dir") or config.get("path")
+        if articles_dir:
+            self.register_article_workspace(
+                str(articles_dir),
+                mode=config.get("mode"),
+                search_cutoff_days=config.get("search_cutoff_days"),
+                freeze_after_start=config.get("freeze_after_start"),
+                start_date=config.get("start_date"),
+            )
+
+    def stage_article_workspaces(self, current_date: Optional[date] = None) -> None:
+        """Stage date-visible article files into every registered local workspace."""
+        if self.article_corpus is None:
+            return
+        current_date = current_date or self.current_date
+        for workspace in self._article_workspaces:
+            max_date = self.article_corpus.stage_local(
+                workspace.articles_dir,
+                current_date,
+                mode=workspace.mode,
+                start_date=workspace.start_date,
+                search_cutoff_days=workspace.search_cutoff_days,
+                freeze_after_start=workspace.freeze_after_start,
+                since_date=workspace.last_staged_date,
+            )
+            if max_date is not None:
+                workspace.last_staged_date = max_date
         
     def run(self):
         env_logging.print_run_start(
@@ -185,7 +305,7 @@ class SimulationEnvironment:
                 )
                 self.step()
                 self._print_daily_scores()
-                self.current_date += timedelta(days=self.timegap_days)
+                self.advance_day()
 
             self._print_final_summary()
         finally:
@@ -238,9 +358,93 @@ class SimulationEnvironment:
         replay.rescore(self)
 
     def step(self):
-        matcher_before = self._get_env_matcher_timing_snapshot()
+        """Run one complete simulator wakeup using the configured in-process agents."""
+        active_questions = self.begin_day()
+        self.run_agents_for_current_day(active_questions)
+        self.end_day(active_questions)
 
-        # 1. Resolve questions expiring today
+    def begin_day(self) -> List[Question]:
+        """
+        Prepare the current wakeup without running any agents.
+
+        This is the adapter-friendly half of :meth:`step`: it resolves due
+        questions, initializes active-question histories, and writes the market
+        snapshot. Callers may then submit zero or more forecasts before
+        :meth:`end_day`.
+        """
+        if self._day_open:
+            return list(self._day_active_questions or [])
+
+        self._day_matcher_before = self._get_env_matcher_timing_snapshot()
+        self._resolve_due_questions()
+        active_questions = self.q_pool.get_active()
+        self._initialize_prediction_histories(active_questions)
+        self.market_csv_path = self._write_market_snapshot(active_questions)
+        self.stage_article_workspaces()
+
+        self._day_open = True
+        self._day_active_questions = active_questions
+        return list(active_questions)
+
+    def run_agents_for_current_day(self, active_questions: Optional[List[Question]] = None) -> None:
+        """
+        Run configured BaseAgent instances for the current wakeup.
+
+        Hosted adapters should usually skip this and drive submissions through
+        :meth:`make_forecast_interface` or :meth:`submit_forecast`.
+        """
+        active_questions = active_questions if active_questions is not None else self.q_pool.get_active()
+        if self.parallel and len(self.agents) > 1:
+            self._run_agents_parallel(active_questions)
+        else:
+            self._run_agents_sequential(active_questions)
+
+    def end_day(
+        self,
+        active_questions: Optional[List[Question]] = None,
+        *,
+        matcher_before: Optional[Dict[str, float]] = None,
+    ) -> None:
+        """
+        Finalize the current wakeup after zero or more forecast submissions.
+
+        Agents are allowed to make no predictions on a day; aggregate and metric
+        calculation naturally treats missing submissions as absent/zero
+        contribution where appropriate.
+        """
+        active_questions = active_questions if active_questions is not None else (
+            self._day_active_questions or self.q_pool.get_active()
+        )
+
+        self._update_aggregates(active_questions)
+
+        if self.matcher and active_questions:
+            self._warmup_matcher_cache(active_questions)
+
+        self._save_daily_metrics()
+
+        before = matcher_before if matcher_before is not None else self._day_matcher_before
+        if before is not None:
+            matcher_after = self._get_env_matcher_timing_snapshot()
+            day_matcher = self._compute_env_matcher_delta(before, matcher_after)
+            self._inject_env_matcher_timing_into_agent_logs(self.current_date, day_matcher)
+
+        self._day_open = False
+        self._day_active_questions = None
+        self._day_matcher_before = None
+
+    def advance_day(self) -> None:
+        """Advance the simulator clock by the configured wakeup interval."""
+        if self._day_open:
+            raise RuntimeError("Cannot advance the date before end_day() finalizes the current wakeup.")
+        self.current_date += timedelta(days=self.timegap_days)
+
+    def is_complete(self) -> bool:
+        """Return True when the simulator clock is beyond the configured end date."""
+        return self.end_date is not None and self.current_date > self.end_date
+
+    def _resolve_due_questions(self) -> None:
+        """Resolve questions whose resolution date has arrived."""
         resolving = self.q_pool.pop_resolving(self.current_date)
 
         if resolving and self.matcher:
@@ -249,11 +453,9 @@ class SimulationEnvironment:
         for q in resolving:
             self._resolve_question(q)
             self.resolved_questions.append(q)  # Track for agent learning
-            
-        # 2. Get active questions
-        active_questions = self.q_pool.get_active()
-        
-        # Initialize prediction histories for new questions
+
+    def _initialize_prediction_histories(self, active_questions: List[Question]) -> None:
+        """Ensure every active question has a prediction-history container."""
         for q in active_questions:
             if q.qid not in self.prediction_histories:
                 self.prediction_histories[q.qid] = PredictionHistory(
@@ -261,33 +463,79 @@ class SimulationEnvironment:
                     start_date=self.current_date,
                     resolution_date=q.resolution_date
                 )
-        
-        # 3. Write market.csv for agents to read
-        self.market_csv_path = self.market_writer.write(
+
+    def _write_market_snapshot(self, active_questions: List[Question]) -> str:
+        """Write the current market snapshot and return its CSV path."""
+        return self.market_writer.write(
             active_questions,
             self.resolved_questions,
             self.current_aggregates,
             self.prediction_histories
         )
-        
-        # 4. Collect predictions from all agents
-        if self.parallel and len(self.agents) > 1:
-            self._run_agents_parallel(active_questions)
-        else:
-            self._run_agents_sequential(active_questions)
-        
-        # 5. Update aggregates (end of day)
-        self._update_aggregates(active_questions)
-        
-        # 6. Pre-populate matcher cache for active-question scoring
-        if self.matcher and active_questions:
-            self._warmup_matcher_cache(active_questions)
 
-        # 7. Save daily metrics
-        self._save_daily_metrics()
-        matcher_after = self._get_env_matcher_timing_snapshot()
-        day_matcher = self._compute_env_matcher_delta(matcher_before, matcher_after)
-        self._inject_env_matcher_timing_into_agent_logs(self.current_date, day_matcher)
+    def make_forecast_interface(
+        self,
+        agent_id: Optional[str] = None,
+        *,
+        active_questions: Optional[List[Question]] = None,
+        hide_ground_truth: bool = True,
+        num_agents: Optional[int] = None,
+        market_csv_path: Optional[str] = None,
+    ) -> "SimForecastInterface":
+        """
+        Build a forecast interface for an agent or external adapter.
+
+        The interface can list active questions and submit predictions. It does
+        not require a submission before callers move to :meth:`end_day`.
+        """
+        if agent_id is not None:
+            self.register_agent_id(str(agent_id))
+        active_questions = active_questions if active_questions is not None else self.q_pool.get_active()
+        questions = (
+            self._get_safe_active_questions(active_questions)
+            if hide_ground_truth
+            else list(active_questions)
+        )
+        forecast_interface = SimForecastInterface(
+            questions,
+            self.current_aggregates,
+            self.prediction_histories,
+            self.current_date,
+            self.logger,
+            resolved_questions=self.resolved_questions,
+            resolution_events=self.resolution_events,
+            resolved_agent_predictions=self.resolved_agent_predictions,
+            histories_lock=self._histories_lock,
+            market_csv_path=self.market_csv_path if market_csv_path is None else market_csv_path,
+            timegap_days=self.timegap_days,
+            last_active_date=self._get_last_active_date(),
+            next_active_date=self._get_next_active_date(),
+            simulation_end_date=self.end_date,
+            num_agents=len(self.agents) if num_agents is None else num_agents,
+            max_outcomes_per_question=self.max_outcomes_per_question,
+        )
+        forecast_interface.source_name = getattr(self, "source_name", "openforesight")
+        forecast_interface.source_context = getattr(self, "source_context", "")
+        if agent_id is not None:
+            forecast_interface.set_agent_context(str(agent_id))
+        return forecast_interface
+
+    def submit_forecast(
+        self,
+        agent_id: str,
+        question_id: str,
+        outcomes: Dict[str, float],
+        *,
+        active_questions: Optional[List[Question]] = None,
+    ) -> None:
+        """Convenience helper for adapters that want to submit without holding an interface."""
+        forecast_interface = self.make_forecast_interface(
+            agent_id=agent_id,
+            active_questions=active_questions,
+        )
+        forecast_interface.submit_prediction(
+            PredictionSubmission(question_id=str(question_id), outcomes=dict(outcomes))
+        )
     
     def _normalize_outcome(self, s: str) -> str:
         """Normalize outcome strings for deterministic exact matching."""
@@ -413,6 +661,13 @@ class SimulationEnvironment:
             source_split=source_split,
         )
 
+    def metrics(self, *, source_split: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Return current cumulative metrics without writing CSV files."""
+        return self._build_metrics_list(
+            active_questions=self.q_pool.get_active(),
+            source_split=source_split,
+        )
+
     def _save_daily_metrics(self):
         """Save current cumulative metrics for this wakeup session to CSV."""
         scorekeeping.save_daily_metrics(self)
@@ -424,29 +679,10 @@ class SimulationEnvironment:
 
     def _run_agents_sequential(self, active_questions: List[Question]):
         """Run agents one at a time (original behavior)."""
-        # Hide ground truth from agents
-        safe_questions = self._get_safe_active_questions(active_questions)
-
-        forecast_interface = SimForecastInterface(
-            safe_questions,
-            self.current_aggregates,
-            self.prediction_histories,
-            self.current_date,
-            self.logger,
-            resolved_questions=self.resolved_questions,
-            resolution_events=self.resolution_events,
-            resolved_agent_predictions=self.resolved_agent_predictions,
-            histories_lock=self._histories_lock,
-            market_csv_path=self.market_csv_path,
-            timegap_days=self.timegap_days,
-            last_active_date=self._get_last_active_date(),
-            next_active_date=self._get_next_active_date(),
-            simulation_end_date=self.end_date,
-            num_agents=len(self.agents),
-            max_outcomes_per_question=self.max_outcomes_per_question,
+        forecast_interface = self.make_forecast_interface(
+            active_questions=active_questions,
+            hide_ground_truth=True,
         )
-        forecast_interface.source_name = getattr(self, 'source_name', 'openforesight')
-        forecast_interface.source_context = getattr(self, 'source_context', '')
 
         for agent in self.agents:
             forecast_interface.set_agent_context(agent.agent_id)
@@ -455,35 +691,13 @@ class SimulationEnvironment:
     def _run_agents_parallel(self, active_questions: List[Question]):
         """Run agents in parallel using thread pool."""
 
-        # Hide ground truth from agents
-        safe_questions = self._get_safe_active_questions(active_questions)
-
         def run_agent(agent):
             """Execute a single agent's turn."""
-            # Each agent gets its own forecast interface instance
-            # (they share the same underlying histories dict, but with thread-safe access)
-            forecast_interface = SimForecastInterface(
-                safe_questions,
-                self.current_aggregates,
-                self.prediction_histories,
-                self.current_date,
-                self.logger,
-                resolved_questions=self.resolved_questions,
-                resolution_events=self.resolution_events,
-                resolved_agent_predictions=self.resolved_agent_predictions,
-                histories_lock=self._histories_lock,
-                market_csv_path=self.market_csv_path,
-                timegap_days=self.timegap_days,
-                last_active_date=self._get_last_active_date(),
-                next_active_date=self._get_next_active_date(),
-                simulation_end_date=self.end_date,
-                num_agents=len(self.agents),
-                max_outcomes_per_question=self.max_outcomes_per_question,
+            forecast_interface = self.make_forecast_interface(
+                agent_id=agent.agent_id,
+                active_questions=active_questions,
+                hide_ground_truth=True,
             )
-            forecast_interface.source_name = getattr(self, 'source_name', 'openforesight')
-            forecast_interface.source_context = getattr(self, 'source_context', '')
-
-            forecast_interface.set_agent_context(agent.agent_id)
             
             try:
                 agent.act(None, forecast_interface, self.current_date)

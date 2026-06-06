@@ -3,13 +3,13 @@ from __future__ import annotations
 from datetime import date
 from typing import Any, Dict, List, Optional, Tuple
 
-from agents.allQAgent.agent import AllQAgent
-from agents.basicAgent.agent import BasicAgent
-from agents.basicAgent.tools import (
+from futuresim_agents.allQAgent.agent import AllQAgent
+from futuresim_agents.basicAgent.agent import BasicAgent
+from futuresim_agents.basicAgent.tools import (
     final_submit_tool_instruction_text,
 )
-from agents.utils.budget import BudgetTracker
-from agents.utils.forecast_parser import ParsedAction
+from futuresim_agents.utils.budget import BudgetTracker
+from futuresim_agents.utils.forecast_parser import ParsedAction
 
 
 def qwen_final_submit_instruction_text(

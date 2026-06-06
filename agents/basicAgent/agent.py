@@ -7,15 +7,15 @@ Uses Chat Completions tool-calling for all action and structured-memory loops.
 from datetime import date
 from typing import List, Dict, Any, Optional, Tuple
 
-from agents.base import BaseAgent
-from agents.utils.budget import (
+from futuresim_agents.base import BaseAgent
+from futuresim_agents.utils.budget import (
     BudgetSettings,
     BudgetTracker,
     build_budget_overview,
     build_start_budget_status,
     estimate_budget_tokens,
 )
-from agents.utils.timing import AgentTimer
+from futuresim_agents.utils.timing import AgentTimer
 
 from .actions import BasicActionHandlers
 from .chat_protocol import BasicChatProtocol
@@ -32,8 +32,8 @@ from .tools import (
     final_submit_tool_instruction_text,
     single_call_to_parsed_action,
 )
-from agents.utils.memory import StructuredMemory, ActiveMemory
-from agents.utils.output_logger import AgentOutputLogger
+from futuresim_agents.utils.memory import StructuredMemory, ActiveMemory
+from futuresim_agents.utils.output_logger import AgentOutputLogger
 from .query import QueryHandler
 from .search import SearchHandler
 from .feedback import FeedbackHandler

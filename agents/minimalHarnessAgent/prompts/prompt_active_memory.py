@@ -35,7 +35,7 @@ def _normalize_prompt_heading_spacing(prompt: str) -> str:
         return prompt
     return re.sub(r"\n{1,}(?=## )", "\n\n\n", prompt)
 
-from agents.minimalHarnessAgent.prompts.prompt import (
+from futuresim_agents.minimalHarnessAgent.prompts.prompt import (
     _build_cadence_section,
     _get_data_notes,
     _get_scoring_section,
@@ -230,7 +230,6 @@ def build_daily_prompt(
         "## Workspace:\n"
         "- market.csv — Read-only snapshot of all questions (refreshed each day).\n"
         "- articles/ — Browsable news articles organized by date as articles/YYYY/MM/DD/articles.jsonl (one JSON article per line). New date directories appear after calling `mcp__forecast__next_day`.\n"
-        "- predictions/ — Read-only record of your past submissions, one file per day as `predictions/YYYY-MM-DD.json`. Each file is a JSON list of `{\"question_id\": ..., \"outcomes\": {<outcome>: <prob>, ...}}` entries — the predictions you submitted that day. A new file appears after each `mcp__forecast__next_day`.\n"
         "- memory/ — Your structured per-day notes directory (`memory/YYYY-MM-DD/{mem.csv, meta.yaml}`). Read prior days' files at the start of each session and write today's files before calling `mcp__forecast__next_day`."
     )
 

@@ -3,7 +3,7 @@
 from datetime import date
 from typing import Dict, Any, Optional, Tuple
 
-from agents.utils.df_interface import DfInterface
+from futuresim_agents.utils.df_interface import DfInterface
 
 
 class QueryHandler:

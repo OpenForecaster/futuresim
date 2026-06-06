@@ -165,7 +165,7 @@ def _build_cadence_section(
     return (
         "## UPDATE CADENCE\n"
         f"You have the chance to update your predictions every {timegap_days} day(s). "
-        "Your past submissions are recorded at `predictions/YYYY-MM-DD.json` (one file per past day) — "
+        "Your current forecasts are shown in `market.csv` as `my_prediction` / `my_prediction_date`; "
         "**re-read market.csv each day, search the new articles for updates, and revise any forecast on a still-active question where new evidence has shifted your view**. A forecast is never \"done\" while its question is still active. "
         "Articles are available via the search tool and in the articles/ directory. "
         f"Current date: {_iso(current_date)}. {last_text}{next_text}\n"
@@ -280,7 +280,6 @@ Column descriptions of the DataFrame (market.csv):
 - market.csv — Read-only snapshot of all questions (refreshed each day).
 - articles/ — Browsable news articles organized by date as articles/YYYY/MM/DD/articles.jsonl (one JSON article per line). New date directories appear after calling `mcp__forecast__next_day`.
   - Each line has fields: `title` (headline), `source` (publisher domain, e.g. "www.reuters.com"), `date_publish` (original publication date, YYYY-MM-DD), `url` (canonical article link), `content` (full article body text to read/grep), plus `id`, `date` (crawl date), `date_modify`.
-- predictions/ — Read-only record of your past submissions, one file per day as `predictions/YYYY-MM-DD.json`. Each file is a JSON list of `{{"question_id": ..., "outcomes": {{<outcome>: <prob>, ...}}}}` entries — the predictions you submitted that day. A new file appears after each `mcp__forecast__next_day`.
 
 
 ## SUBMISSION RULES
@@ -296,8 +295,9 @@ Column descriptions of the DataFrame (market.csv):
 ## Rules
 - No web access is available. Use `mcp__forecast__search_news` and articles/ for information.
 - market.csv is read-only. DO NOT modify it.
-- You may use Bash/Read for read-only inspection of market.csv, predictions/, and articles/.
+- You may use Bash/Read for read-only inspection of market.csv and articles/.
 - You have no Write/Edit tools.
+- Always call `mcp__forecast__next_day()` before ending your turn. You may call it after submitting forecasts, or with zero forecasts if you choose not to forecast today.
 - Your job is to maximize your time-weighted score (TW-score).
 
 ---

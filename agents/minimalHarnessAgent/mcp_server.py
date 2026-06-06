@@ -42,6 +42,15 @@ def _parse_date(s: Optional[str]) -> Optional[date]:
     return datetime.strptime(s, "%Y-%m-%d").date()
 
 
+def _current_submission_snapshot() -> list:
+    by_qid = {}
+    for pred in _today_predictions:
+        qid = pred.get("question_id", pred.get("qid", ""))
+        if qid:
+            by_qid[str(qid)] = pred
+    return list(by_qid.values())
+
+
 # ── server ─────────────────────────────────────────────────────────────
 
 mcp = FastMCP("futuresim")
@@ -157,8 +166,8 @@ def _ensure_search() -> None:
     if not search_db or not os.path.exists(search_db):
         return
 
-    from agents.search_tools.lancedb.store import LanceDBSearchTool
-    from agents.basicAgent.search import SearchHandler
+    from futuresim_agents.search_tools.handler import SearchHandler
+    from futuresim_agents.search_tools.lancedb.store import LanceDBSearchTool
 
     embedding_model = None
     if args.embedding_server_url:
@@ -190,6 +199,8 @@ class _VLLMEmbeddingClient:
 
     def __init__(self, server_url: str, model_name: str = ""):
         self._url = server_url.rstrip("/")
+        if self._url.endswith("/v1"):
+            self._url = self._url[:-3].rstrip("/")
         self._model = model_name
 
     def embed(self, texts: list, use_tqdm: bool = False) -> list:
@@ -221,7 +232,7 @@ def _ensure_active_memory():
     if _active_memory is not None:
         return _active_memory
 
-    from agents.utils.memory import ActiveMemory
+    from futuresim_agents.utils.memory import ActiveMemory
 
     _active_memory = ActiveMemory(_agent_id, memory_dir=str(_workspace), max_entries=500)
     cur = _parse_date(_state.get("current_date"))
@@ -435,36 +446,12 @@ def submit_forecasts(question_id: str, outcomes: dict[str, float]) -> str:
     _session_touched_qids.add(question_id)
     _session_forecast_qids.add(question_id)
 
-    # Merge with any predictions already in the file (e.g. written via Bash).
-    # Later submissions for the same qid overwrite earlier ones.
-    cur_date = _state["current_date"]
-    pred_path = _internal_dir / "predictions" / f"{cur_date}.json"
-    pred_path.parent.mkdir(parents=True, exist_ok=True)
-    existing = []
-    if pred_path.exists():
-        try:
-            existing = json.loads(pred_path.read_text())
-        except (json.JSONDecodeError, OSError):
-            existing = []
-    # Build merged list: existing + _today_predictions, last write wins per qid.
-    by_qid = {}
-    for p in existing:
-        qid_key = p.get("question_id", p.get("qid", ""))
-        if qid_key:
-            by_qid[qid_key] = p
-    for p in _today_predictions:
-        qid_key = p.get("question_id", p.get("qid", ""))
-        if qid_key:
-            by_qid[qid_key] = p
-    merged = list(by_qid.values())
-    with open(pred_path, "w") as f:
-        json.dump(merged, f, default=str)
-
     if _state.get("submit_ends_session"):
+        cur_date = _state["current_date"]
         signal_dir = _internal_dir / "signals"
         signal_dir.mkdir(parents=True, exist_ok=True)
         _write_json(signal_dir / f"next_day_{cur_date}.json", {
-            "predictions": merged,
+            "predictions": _current_submission_snapshot(),
             "date": cur_date,
             "reason": "submit_ends_session",
         })
@@ -478,13 +465,13 @@ def next_day() -> str:
     """Signal that you are done with the current day. Blocks until the simulation advances.
 
     Returns context for the new day: new date, resolution events, and whether the simulation is complete.
-    Call this only after submitting predictions for all active questions.
+    You may call this after submitting forecasts, or with zero forecasts if you choose not to update today.
     """
     global _memory_phase_active
     cur_date = _state["current_date"]
 
     if _memory_tools_enabled and not _memory_phase_active:
-        from agents.minimalHarnessAgent.prompts.prompt_active_memory2 import (
+        from futuresim_agents.minimalHarnessAgent.prompts.prompt_active_memory2 import (
             build_memory_update_prompt,
         )
 
@@ -513,7 +500,7 @@ def next_day() -> str:
     signal_dir = _internal_dir / "signals"
     signal_dir.mkdir(parents=True, exist_ok=True)
     _write_json(signal_dir / f"next_day_{cur_date}.json", {
-        "predictions": _today_predictions,
+        "predictions": _current_submission_snapshot(),
         "date": cur_date,
     })
 
@@ -700,7 +687,9 @@ def main():
     global _memory_tools_enabled, _agent_id
 
     parser = argparse.ArgumentParser(description="Forecast-sim MCP server")
-    parser.add_argument("--workspace", required=True, help="Path to CLI workspace (predictions/)")
+    parser.add_argument("--config-file", default="",
+                        help="JSON file containing MCP server CLI options.")
+    parser.add_argument("--workspace", default="", help="Path to CLI workspace")
     parser.add_argument("--internal-dir", default="", help="Path to internal dir (state.json, signals/)")
     parser.add_argument("--repo-root", default="", help="Repo root to add to sys.path")
     parser.add_argument("--search-db", default="", help="Path to LanceDB search index")
@@ -722,6 +711,17 @@ def main():
                              "for prompt_mode='active_memory2'. Persists workspace/memory/{date}/{mem.csv,meta.yaml} "
                              "on next_day and chmods the snapshot read-only.")
     args = parser.parse_args()
+    if args.config_file:
+        config_path = Path(args.config_file)
+        try:
+            config_data = json.loads(config_path.read_text())
+        except Exception as exc:
+            parser.error(f"could not read --config-file {config_path}: {exc}")
+        for key, value in config_data.items():
+            if hasattr(args, key):
+                setattr(args, key, value)
+    if not args.workspace:
+        parser.error("--workspace is required unless supplied by --config-file")
     _cli_args = args
     _handholding_version = args.handholding_version
     _memory_tools_enabled = args.enable_memory_tools

@@ -130,9 +130,8 @@ class MinimalHarnessConfig:
     egress_allowlist: List[str] = field(default_factory=list)
     # Path to a fixedWarmup directory containing {mem.csv, meta.yaml,
     # prediction.json}. When set, on the first act() the agent copies the
-    # memory files into workspace/memory/<prev_date>/, the prediction file into
-    # predictions/<prev_date>.json, and pushes the predictions into the env's
-    # histories with day=<prev_date> so the workspace market.csv shows
+    # memory files into workspace/memory/<prev_date>/ and pushes prediction.json
+    # into the env's histories with day=<prev_date> so market.csv shows
     # my_prediction filled. <prev_date> = first sim day - 1. Used by the
     # active_memory mode to seed Day 1 from a prior agent's warmup output.
     bootstrap_dir: str = ""

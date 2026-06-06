@@ -21,9 +21,9 @@ class StateHelpers:
     def _apply_bootstrap(self, forecast_interface: Any, current_date: date) -> None:
         """Seed Day-1 from fixedWarmup memory/predictions.
 
-        Copies bootstrap_dir/{mem.csv,meta.yaml} to workspace/memory/<prev>/ and
-        prediction.json to predictions/<prev>.json, then injects each prediction
-        into env.histories with day=<prev> so Day 1 market.csv has my_prediction.
+        Copies bootstrap_dir/{mem.csv,meta.yaml} to workspace/memory/<prev>/,
+        then injects prediction.json into env.histories with day=<prev> so
+        Day 1 market.csv has my_prediction.
         """
         from environment.scoring.base import DailyPrediction
 
@@ -41,11 +41,7 @@ class StateHelpers:
             if src.exists():
                 shutil.copy2(src, mem_dst / fname)
 
-        pred_dst = self._internal_dir / "predictions"
-        pred_dst.mkdir(parents=True, exist_ok=True)
         pred_src = bdir / "prediction.json"
-        if pred_src.exists():
-            shutil.copy2(pred_src, pred_dst / f"{prev_iso}.json")
 
         injected = skipped = 0
         if pred_src.exists():
@@ -80,7 +76,7 @@ class StateHelpers:
 
         print(
             f"[{self.agent_id}] Bootstrap from {bdir}: "
-            f"copied memory/{prev_iso}, predictions/{prev_iso}.json; "
+            f"copied memory/{prev_iso}; "
             f"injected {injected} predictions ({skipped} skipped)."
         )
 
@@ -300,62 +296,3 @@ class StateHelpers:
             except Exception:
                 continue
         return ""
-
-    def _update_article_symlinks(self, current_date: date) -> None:
-        """Expose per-day articles.jsonl up to current_date.
-
-        sandbox=False uses fast symlinks and requires articles_base visible.
-        sandbox=True uses hardlinks so workspace files are real while
-        articles_base stays unbound, leaving date-gating with the driver rather
-        than FS ACLs. Only articles.jsonl is exposed; parquet is not greppable
-        and headlines JSON duplicates articles.jsonl.
-        """
-        if not self.articles_base or not self.articles_base.exists():
-            return
-
-        articles_dir = self.workspace / "articles"
-        if self._last_symlink_date:
-            start = self._last_symlink_date + timedelta(days=1)
-        elif self.config.start_date is not None:
-            start = min(self.config.start_date, current_date)
-        else:
-            start = current_date - timedelta(days=30)
-
-        d = start
-        while d <= current_date:
-            src = self.articles_base / f"{d.year}" / f"{d.month:02d}" / f"{d.day:02d}" / "articles.jsonl"
-            if src.exists():
-                dst = articles_dir / f"{d.year}" / f"{d.month:02d}" / f"{d.day:02d}" / "articles.jsonl"
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                if self.config.freeze_search_after_start:
-                    cutoff = current_date.isoformat()
-                    tmp = dst.with_suffix(".jsonl.tmp")
-                    with open(src) as inp, open(tmp, "w") as out:
-                        for line in inp:
-                            article = json.loads(line)
-                            article_date = str(article.get("date") or "")[:10]
-                            publish_date = str(article.get("date_publish") or "")[:10]
-                            if article_date and article_date > cutoff:
-                                continue
-                            if publish_date and publish_date > cutoff:
-                                continue
-                            out.write(line)
-                    if dst.exists() or dst.is_symlink():
-                        dst.unlink()
-                    tmp.replace(dst)
-                elif not dst.exists():
-                    if self.config.sandbox:
-                        try:
-                            os.link(src, dst)
-                        except OSError as e:
-                            if e.errno == 18:  # EXDEV
-                                raise RuntimeError(
-                                    f"sandbox=True requires workspace and articles_base on the same filesystem "
-                                    f"(hardlink failed: {src} -> {dst}). Move one of them or disable sandbox."
-                                ) from e
-                            raise
-                    else:
-                        dst.symlink_to(src)
-            d += timedelta(days=1)
-
-        self._last_symlink_date = current_date

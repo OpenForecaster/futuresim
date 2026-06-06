@@ -12,7 +12,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple
 
-from agents.utils.query_executor import QueryExecutor
+from futuresim_agents.utils.query_executor import QueryExecutor
 
 
 ## SHOULD ADD COLUMN DESCRIPTIONS TO THE DATAFRAME

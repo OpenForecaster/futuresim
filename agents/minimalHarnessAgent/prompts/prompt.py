@@ -358,7 +358,6 @@ Column descriptions of the DataFrame (market.csv):
 - market.csv — Read-only snapshot of all questions (refreshed each day).
 - articles/ — Browsable news articles organized by date as articles/YYYY/MM/DD/articles.jsonl (one JSON article per line). New date directories appear after calling `mcp__forecast__next_day`.
   - Each line has fields: `title` (headline), `source` (publisher domain, e.g. "www.reuters.com"), `date_publish` (original publication date, YYYY-MM-DD), `url` (canonical article link), `content` (full article body text to read/grep), plus `id`, `date` (crawl date), `date_modify`.
-- predictions/ — Read-only record of your past submissions, one file per day as `predictions/YYYY-MM-DD.json`. Each file is a JSON list of `{{"question_id": ..., "outcomes": {{<outcome>: <prob>, ...}}}}` entries — the predictions you submitted that day. A new file appears after each `mcp__forecast__next_day`.
 - memory/ — Your persistent notes directory. Read and write freely. Files here persist across days. Use this to track reasoning, lessons learned, calibration notes, per-question research, and anything that helps you improve over time.
 
 {HANDHOLDING_SECTION}
@@ -378,6 +377,7 @@ Column descriptions of the DataFrame (market.csv):
 - No web access is available. Use `mcp__forecast__search_news` and articles/ for information.
 - market.csv is read-only. DO NOT modify it.
 - You can use Bash, Read, Write, Grep, Glob, and other tools freely in your workspace.
+- Always call `mcp__forecast__next_day()` before ending your turn. You may call it after submitting forecasts, or with zero forecasts if you choose not to forecast today.
 - Your job is to maximize your time-weighted score (TW-score).
 
 ---

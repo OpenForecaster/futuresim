@@ -7,8 +7,8 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any, Dict, List, Optional, Tuple
 
-from agents.utils.budget import BudgetTracker
-from agents.utils.forecast_parser import ParsedAction
+from futuresim_agents.utils.budget import BudgetTracker
+from futuresim_agents.utils.forecast_parser import ParsedAction
 
 from .search import SearchHandler
 

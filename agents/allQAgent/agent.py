@@ -2,10 +2,10 @@ from datetime import date, timedelta
 from typing import List, Dict, Any, Optional, NamedTuple
 import time
 
-from agents.basicAgent.agent import BasicAgent
-from agents.basicAgent.config import AgentConfig
-from agents.basicAgent.tools import build_memory_phase_tools, chat_response_to_action
-from agents.utils.budget import BudgetSettings, BudgetTracker
+from futuresim_agents.basicAgent.agent import BasicAgent
+from futuresim_agents.basicAgent.config import AgentConfig
+from futuresim_agents.basicAgent.tools import build_memory_phase_tools, chat_response_to_action
+from futuresim_agents.utils.budget import BudgetSettings, BudgetTracker
 
 
 class WarmupLoopResult(NamedTuple):
@@ -58,7 +58,7 @@ class AllQAgent(BasicAgent):
         return self._build_final_submit_tool_instruction(target_qid, budget)
 
     def _warmup_memory_mode(self) -> Optional[str]:
-        from agents.utils.memory import ActiveMemory, StructuredMemory
+        from futuresim_agents.utils.memory import ActiveMemory, StructuredMemory
 
         if isinstance(self._memory, ActiveMemory):
             return "active"
@@ -133,12 +133,12 @@ Requirements:
 
         # Collect per-question mem entries from parallel warmup threads.
         # Python list.append is thread-safe (GIL), so no lock needed.
-        from agents.utils.memory import ActiveMemory
+        from futuresim_agents.utils.memory import ActiveMemory
         if isinstance(self._memory, ActiveMemory):
             self._warmup_mem_entries = []
 
         # Collect per-question structured memory entries from parallel warmup threads.
-        from agents.utils.memory import StructuredMemory
+        from futuresim_agents.utils.memory import StructuredMemory
         if isinstance(self._memory, StructuredMemory):
             self._warmup_structured_entries = []
 
@@ -218,7 +218,7 @@ Requirements:
         self._flush_warmup_raw_logs()
 
         # Active memory: seed mem_df from per-question warmup conversations.
-        from agents.utils.memory import ActiveMemory
+        from futuresim_agents.utils.memory import ActiveMemory
         if isinstance(self._memory, ActiveMemory) and hasattr(self, '_warmup_mem_entries'):
             entries = self._warmup_mem_entries
             print(f"[{self.agent_id}] Seeding mem_df with {len(entries)} warmup entries...")
@@ -235,7 +235,7 @@ Requirements:
             self._save_warmup_interop(current_date)
 
         # Structured memory: seed entries from per-question warmup conversations.
-        from agents.utils.memory import StructuredMemory
+        from futuresim_agents.utils.memory import StructuredMemory
         if isinstance(self._memory, StructuredMemory) and hasattr(self, '_warmup_structured_entries'):
             entries = self._warmup_structured_entries
             print(f"[{self.agent_id}] Seeding structured memory with {len(entries)} warmup entries...")
@@ -461,7 +461,7 @@ Requirements:
         --restart_from this warmup works with memory_format=structured.
         """
         from pathlib import Path
-        from agents.utils.memory import ActiveMemory
+        from futuresim_agents.utils.memory import ActiveMemory
 
         if not isinstance(self._memory, ActiveMemory) or not self.config.memory_dir:
             return

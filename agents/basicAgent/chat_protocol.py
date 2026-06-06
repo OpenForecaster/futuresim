@@ -3,7 +3,7 @@
 import json
 from typing import Any, Dict, List, Optional
 
-from agents.utils.budget import BudgetTracker
+from futuresim_agents.utils.budget import BudgetTracker
 
 
 class BasicChatProtocol:

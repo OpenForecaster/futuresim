@@ -7,7 +7,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Optional, Tuple
 
-from agents.basicAgent.search import SearchHandler
+from futuresim_agents.basicAgent.search import SearchHandler
 
 
 def safe_qid(qid: Any) -> str:

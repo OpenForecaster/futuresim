@@ -11,7 +11,7 @@ from datetime import date
 from pathlib import Path
 from typing import List, Optional
 
-from agents.minimalHarnessAgent.agent import MinimalHarnessAgent
+from futuresim_agents.minimalHarnessAgent.agent import MinimalHarnessAgent
 
 logger = logging.getLogger(__name__)
 

@@ -13,12 +13,12 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from agents.base import BaseAgent
-from agents.minimalHarnessAgent.config import MinimalHarnessConfig
-from agents.minimalHarnessAgent.mcp_helpers import McpHelpers
-from agents.minimalHarnessAgent.prompts.prompt import build_system_prompt
-from agents.minimalHarnessAgent.sandbox import SandboxHelpers
-from agents.minimalHarnessAgent.state import StateHelpers
+from futuresim_agents.base import BaseAgent
+from futuresim_agents.minimalHarnessAgent.config import MinimalHarnessConfig
+from futuresim_agents.minimalHarnessAgent.mcp_helpers import McpHelpers
+from futuresim_agents.minimalHarnessAgent.prompts.prompt import build_system_prompt
+from futuresim_agents.minimalHarnessAgent.sandbox import SandboxHelpers
+from futuresim_agents.minimalHarnessAgent.state import StateHelpers
 from environment.interfaces import PredictionSubmission
 
 logger = logging.getLogger(__name__)
@@ -37,15 +37,15 @@ class MinimalHarnessAgent(StateHelpers, McpHelpers, SandboxHelpers, BaseAgent):
         if cls is MinimalHarnessAgent:
             backend = getattr(config, "harness_backend", "claude_code")
             if backend == "claude_code":
-                from agents.minimalHarnessAgent.claude_code_agent import ClaudeCodeAgent
+                from futuresim_agents.minimalHarnessAgent.claude_code_agent import ClaudeCodeAgent
 
                 cls = ClaudeCodeAgent
             elif backend == "opencode":
-                from agents.minimalHarnessAgent.opencode_agent import OpenCodeAgent
+                from futuresim_agents.minimalHarnessAgent.opencode_agent import OpenCodeAgent
 
                 cls = OpenCodeAgent
             elif backend == "codex":
-                from agents.minimalHarnessAgent.codex_agent import CodexAgent
+                from futuresim_agents.minimalHarnessAgent.codex_agent import CodexAgent
 
                 cls = CodexAgent
             else:
@@ -73,7 +73,6 @@ class MinimalHarnessAgent(StateHelpers, McpHelpers, SandboxHelpers, BaseAgent):
         self.articles_base = Path(articles_base or config.articles_base)
         self._harness_proc: Optional[subprocess.Popen] = None
         self._started = False
-        self._last_symlink_date: Optional[date] = None
         self._current_date: Optional[date] = None
         self._resume_attempts: Dict[date, int] = {}
         self._bootstrap_applied: bool = False
@@ -129,7 +128,7 @@ class MinimalHarnessAgent(StateHelpers, McpHelpers, SandboxHelpers, BaseAgent):
                     "not a persistent claude session."
                 )
             # Stateful feedback aggregator (shared across days, dedups on qid).
-            from agents.basicAgent.feedback import FeedbackHandler
+            from futuresim_agents.basicAgent.feedback import FeedbackHandler
             self._feedback_handler: Optional[FeedbackHandler] = FeedbackHandler(self.agent_id)
         elif self.config.prompt_mode in {"warmup", "static_search"}:
             if self.config.harness_backend != "codex":
@@ -180,6 +179,17 @@ class MinimalHarnessAgent(StateHelpers, McpHelpers, SandboxHelpers, BaseAgent):
                 f"handholding_version {self.config.handholding_version!r} -> 'v3'."
             )
             self.config.handholding_version = "v3"
+
+    def article_workspace_config(self) -> Dict[str, Any]:
+        """Describe this agent's article workspace for environment-owned staging."""
+        return {
+            "articles_base": str(self.articles_base) if self.articles_base else "",
+            "articles_dir": str(self.workspace / "articles"),
+            "mode": "hardlink" if self.config.sandbox else "symlink",
+            "search_cutoff_days": self.config.search_cutoff_days,
+            "freeze_after_start": self.config.freeze_search_after_start,
+            "start_date": self.config.start_date,
+        }
 
     # ── Backend hooks ──────────────────────────────────────────────────
     # Optional hooks default to no-op/False so backends only override real differences.
@@ -258,6 +268,19 @@ class MinimalHarnessAgent(StateHelpers, McpHelpers, SandboxHelpers, BaseAgent):
 
         launch_cmd = self._maybe_sandbox(cmd)
         popen_cwd = None if self.config.sandbox else str(self.workspace)
+        debug_path = self._internal_dir / f"{label}_launch.json"
+        try:
+            with open(debug_path, "w") as f:
+                json.dump({
+                    "cmd": launch_cmd,
+                    "cwd": popen_cwd,
+                    "codex_home": env.get("CODEX_HOME", ""),
+                    "sandbox": bool(self.config.sandbox),
+                    "network_isolation": bool(self.config.network_isolation),
+                    "sandbox_proc_mode": self.config.sandbox_proc_mode,
+                }, f, indent=2)
+        except OSError:
+            logger.warning("failed to write harness launch debug file", exc_info=True)
 
         logger.info(
             "Starting %s%s%s: %s",
@@ -305,21 +328,9 @@ class MinimalHarnessAgent(StateHelpers, McpHelpers, SandboxHelpers, BaseAgent):
         for d in ("signals",):
             (self._internal_dir / d).mkdir(parents=True, exist_ok=True)
 
-        # Internal dirs (driver/MCP coordination — harness doesn't see these).
-        (self._internal_dir / "predictions").mkdir(parents=True, exist_ok=True)
-
         # Workspace dirs (harness' working directory — only what the harness needs).
         for d in ("memory", "articles"):
             (self.workspace / d).mkdir(parents=True, exist_ok=True)
-
-        # Expose past predictions/ as a symlink inside the workspace so the
-        # harness can always recall what it submitted on previous days
-        # (the in-CSV `my_prediction` column only carries the latest
-        # forecast per qid). _internal_dir is bind-mounted into the sandbox
-        # at the same absolute path, so the symlink resolves there too.
-        pred_link = self.workspace / "predictions"
-        if not pred_link.exists():
-            pred_link.symlink_to(self._internal_dir / "predictions")
 
         # 0. Bootstrap from fixedWarmup only on the true first sim day.
         # Env-level resumes may start mid-run with copied memory already present.
@@ -346,15 +357,12 @@ class MinimalHarnessAgent(StateHelpers, McpHelpers, SandboxHelpers, BaseAgent):
         # 2. chmod market.csv read-only so the harness can't corrupt it.
         self._protect_market_csv(forecast_interface)
 
-        # 3. Update article symlinks up to the same date visible to search.
-        self._update_article_symlinks(search_current_date or current_date)
-
-        # 3b. If network_isolation is on, ensure the host-side egress proxy is
+        # 3. If network_isolation is on, ensure the host-side egress proxy is
         # running before we spawn (or re-spawn) the harness. Idempotent.
         if self.config.network_isolation:
             self._start_egress_proxy()
 
-        # 3c. If sandboxed, start the host-side MCP relay so search_db and
+        # 3b. If sandboxed, start the host-side MCP relay so search_db and
         # the embedding model stay out of the sandbox. The harness reaches
         # MCP only via the bind-mounted unix socket. Idempotent.
         if self.config.sandbox:
@@ -452,7 +460,7 @@ class MinimalHarnessAgent(StateHelpers, McpHelpers, SandboxHelpers, BaseAgent):
             prompt_date = self._current_date or self.config.start_date
             new_articles_count = self._count_new_articles(last_active_date, prompt_date)
         if self.config.prompt_mode == "no_memory":
-            from agents.minimalHarnessAgent.prompts.prompt_no_memory import (
+            from futuresim_agents.minimalHarnessAgent.prompts.prompt_no_memory import (
                 build_system_prompt as _build_system_prompt,
             )
         else:
@@ -493,10 +501,10 @@ class MinimalHarnessAgent(StateHelpers, McpHelpers, SandboxHelpers, BaseAgent):
         which advertises the MCP memory tools instead of native filesystem reads/writes.
         """
         if self.config.prompt_mode == "active_memory2":
-            from agents.minimalHarnessAgent.prompts.prompt_active_memory2 import build_daily_prompt
+            from futuresim_agents.minimalHarnessAgent.prompts.prompt_active_memory2 import build_daily_prompt
         else:
-            from agents.minimalHarnessAgent.prompts.prompt_active_memory import build_daily_prompt
-        from agents.utils.memory import ActiveMemory
+            from futuresim_agents.minimalHarnessAgent.prompts.prompt_active_memory import build_daily_prompt
+        from futuresim_agents.utils.memory import ActiveMemory
 
         source_context = getattr(forecast_interface, "source_context", "") or ""
         source_name = getattr(forecast_interface, "source_name", "openforesight")
@@ -573,9 +581,8 @@ class MinimalHarnessAgent(StateHelpers, McpHelpers, SandboxHelpers, BaseAgent):
     def _wait_for_next_day(self, current_date: date) -> List[Dict[str, Any]]:
         """Poll for the MCP server's next_day signal, then return predictions.
 
-        Reads predictions from the signal file (authoritative snapshot from
-        _today_predictions at the moment next_day was called), falling back to
-        the predictions/{date}.json file if the signal doesn't contain them.
+        The signal file is the authoritative snapshot from _today_predictions
+        at the moment next_day was called.
         """
         signal_path = self._internal_dir / "signals" / f"next_day_{current_date.isoformat()}.json"
         poll_interval = 1.0
@@ -600,30 +607,25 @@ class MinimalHarnessAgent(StateHelpers, McpHelpers, SandboxHelpers, BaseAgent):
                     "(resume attempts=%d)",
                     backend, self._harness_proc.returncode, attempts,
                 )
-                return self._read_predictions(current_date)
+                return []
             if time.time() - start > timeout:
                 logger.error("Timeout waiting for next_day signal on %s", current_date)
-                return self._read_predictions(current_date)
+                return []
             time.sleep(poll_interval)
 
-        # Read predictions from the predictions file — this is the durable record
-        # of all submit_forecasts MCP calls. Each call writes to this file immediately,
-        # so it survives MCP server restarts (unlike the in-memory _today_predictions).
         self._after_next_day_signal(current_date, timeout, start)
-        return self._read_predictions(current_date)
-
-    def _read_predictions(self, current_date: date) -> List[Dict[str, Any]]:
-        pred_path = self._internal_dir / "predictions" / f"{current_date.isoformat()}.json"
-        if not pred_path.exists():
-            logger.warning("No predictions file for %s", current_date)
+        try:
+            data = json.loads(signal_path.read_text())
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning("Could not read next_day signal for %s: %s", current_date, exc)
             return []
-        with open(pred_path) as f:
-            preds = json.load(f)
-        # Normalize direct file submissions that used qid instead of question_id.
+        preds = data.get("predictions", [])
+        if not isinstance(preds, list):
+            return []
         for p in preds:
-            if "qid" in p and "question_id" not in p:
+            if isinstance(p, dict) and "qid" in p and "question_id" not in p:
                 p["question_id"] = p["qid"]
-        return preds
+        return [p for p in preds if isinstance(p, dict)]
 
     def _write_continue_signal(self, current_date: date) -> None:
         """Tell the MCP server's next_day poll that a new day is ready."""

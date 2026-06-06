@@ -7,7 +7,6 @@ import json
 import logging
 import os
 import shlex
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -15,13 +14,17 @@ import time
 from pathlib import Path
 from typing import List, Tuple
 
-from agents.minimalHarnessAgent.sandbox import _resolve_sandbox_socat_cmd
+from futuresim_agents.minimalHarnessAgent.sandbox_common import (
+    resolve_socat_cmd,
+    terminate_process,
+    write_mcp_connector,
+)
 
 logger = logging.getLogger(__name__)
 
 
 def _resolve_socat_cmd() -> str:
-    return shutil.which("socat") or ("/usr/bin/socat" if os.path.exists("/usr/bin/socat") else "socat")
+    return resolve_socat_cmd(prefer_path=True)
 
 
 class McpHelpers:
@@ -92,7 +95,7 @@ class McpHelpers:
                 )
             if self._mcp_bridge_wrapper is not None:
                 return (str(self._mcp_bridge_wrapper), [])
-            return (_resolve_sandbox_socat_cmd(), ["-", f"UNIX-CONNECT:{self._mcp_relay_sock}"])
+            return (resolve_socat_cmd(), ["-", f"UNIX-CONNECT:{self._mcp_relay_sock}"])
 
         repo_root = str(Path(__file__).resolve().parents[2])
         venv_python = os.path.join(repo_root, ".venv", "bin", "python")
@@ -136,22 +139,7 @@ class McpHelpers:
         wrapper.chmod(0o755)
 
         bridge_wrapper = d / "connect_mcp.sh"
-        bridge_wrapper.write_text(
-            "#!/bin/sh\n"
-            f"sock={shlex.quote(str(self._mcp_relay_sock))}\n"
-            'if [ ! -S "$sock" ]; then\n'
-            '  echo "MCP relay socket missing: $sock" >&2\n'
-            "  exit 127\n"
-            "fi\n"
-            "for socat_cmd in /usr/bin/socat /bin/socat socat; do\n"
-            '  if command -v "$socat_cmd" >/dev/null 2>&1; then\n'
-            '    exec "$socat_cmd" - "UNIX-CONNECT:$sock"\n'
-            "  fi\n"
-            "done\n"
-            'echo "socat not found in sandbox" >&2\n'
-            "exit 127\n"
-        )
-        bridge_wrapper.chmod(0o755)
+        write_mcp_connector(bridge_wrapper, self._mcp_relay_sock)
         self._mcp_bridge_wrapper = bridge_wrapper
 
         # Do not add EXEC `stderr`: it dup2s stderr onto stdout and corrupts
@@ -188,12 +176,7 @@ class McpHelpers:
         )
 
     def _stop_mcp_relay(self) -> None:
-        if self._mcp_relay_proc and self._mcp_relay_proc.poll() is None:
-            self._mcp_relay_proc.terminate()
-            try:
-                self._mcp_relay_proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self._mcp_relay_proc.kill()
+        terminate_process(self._mcp_relay_proc)
         self._mcp_relay_proc = None
         if self._mcp_relay_sock and self._mcp_relay_sock.exists():
             try:

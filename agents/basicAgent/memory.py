@@ -1,5 +1,5 @@
-"""BasicAgent memory - re-exports from agents.utils."""
+"""BasicAgent memory - re-exports from futuresim_agents.utils."""
 
-from agents.utils.memory import BasicMemory
+from futuresim_agents.utils.memory import BasicMemory
 
 __all__ = ['BasicMemory']

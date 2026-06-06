@@ -1,6 +1,8 @@
 # Futuresim
 
-Multi-agent forecasting simulator where LLM agents predict on free-form questions and are scored against each other.
+Futuresim is a forecasting simulator for LLM agents. It advances a dated
+question market, exposes only the information available at each simulated date,
+records agent forecasts, and scores them over time.
 
 ## Quick Start
 
@@ -12,38 +14,38 @@ uv sync
 source .venv/bin/activate
 
 cp .env.example .env
-# Edit .env: set OPENROUTER_API_KEY and, if needed, storage paths.
+# Edit .env if you need OpenRouter keys, custom output paths, or local artifacts.
 
 python scripts/run_forecast_sim.py --config configs/shared/default_sim.yaml
 ```
-- OpenRouter configs require `OPENROUTER_API_KEY`.
-- The default search-enabled configs use LanceDB. Use
-  `configs/shared/default_nosearch_sim.yaml` to run without retrieval.
 
-## Environment
+The default search-enabled configs use LanceDB and require `FSIM_SEARCH_DB`.
+For a no-retrieval smoke run, use:
 
-`scripts/run_forecast_sim.py` loads `.env` from the repo root automatically.
-Shell exports override `.env` values. Inside `.env`, `${FSIM_REPO_DIR}` expands
-to this checkout. The `FSIM_*` prefix is kept for compatibility with existing
-configs. `pathing.py` is the small helper that loads `.env`, expands config
-placeholders, and errors if a required placeholder is still unresolved.
+```bash
+python scripts/run_forecast_sim.py --config configs/shared/default_nosearch_sim.yaml
+```
+
+## Configuration
+
+`scripts/run_forecast_sim.py` loads `.env` from the repo root. Shell exports
+override `.env` values. `${FSIM_REPO_DIR}` expands to this checkout.
 
 Common variables:
 
-| Variable | Required? | Use |
-|----------|-----------|-----|
-| `OPENROUTER_API_KEY` | yes for OpenRouter configs | Agent and answer-matcher API calls |
-| `FSIM_OUTPUT_BASE` | no | Simulation output root |
-| `FSIM_DATASET_PATH` | no | Hugging Face dataset id or local dataset path |
-| `FSIM_DATASET_CACHE` | no | Hugging Face dataset cache directory |
-| `FSIM_ARTIFACT_BASE` | no | Parent directory for downloaded public artifacts |
-| `FSIM_SEARCH_DB` | for bundled LanceDB search | LanceDB artifact path |
-| `FSIM_ARTICLES_BASE` | for MinimalHarness article browsing | Dated article JSONL tree |
-| `FSIM_EMBEDDING_MODEL` | for search | Embedding model used by the LanceDB index |
-| `FSIM_MATCHER_MODEL` | no | OpenRouter/vLLM model used for answer matching |
-| `FSIM_SIM_MATCHER_CACHE_DIR` | no | Optional shared matcher-cache directory |
+| Variable | Use |
+| --- | --- |
+| `OPENROUTER_API_KEY` | Required for OpenRouter-backed agents or answer matching |
+| `FSIM_OUTPUT_BASE` | Simulation output root |
+| `FSIM_DATASET_PATH` | Hugging Face dataset id or local dataset path |
+| `FSIM_DATASET_CACHE` | Hugging Face dataset cache directory |
+| `FSIM_SEARCH_DB` | LanceDB index path for bundled hybrid search |
+| `FSIM_ARTICLES_BASE` | Dated article JSONL tree for filesystem article browsing |
+| `FSIM_EMBEDDING_MODEL` | Embedding model used by the LanceDB index |
+| `FSIM_MATCHER_MODEL` | OpenRouter/vLLM answer-matcher model |
+| `FSIM_SIM_MATCHER_CACHE_DIR` | Optional shared answer-matcher cache directory |
 
-For local overrides, edit `.env`; for one-off runs, prefix the command:
+One-off override example:
 
 ```bash
 FSIM_OUTPUT_BASE=/scratch/$USER/futuresim-runs \
@@ -53,15 +55,19 @@ python scripts/run_forecast_sim.py --config configs/shared/default_sim.yaml
 ## Data And Search
 
 OpenForesight questions load from Hugging Face by default:
-`nikhilchandak/OpenForesight`. The default config uses the
-`aljazeera2026Q1` split.
+`nikhilchandak/OpenForesight`. The default config uses the `aljazeera2026Q1`
+split.
 
-The simulator itself does not require a search backend. The bundled
-search-enabled configs use LanceDB through `agents/search_tools`; download the
-prebuilt artifact for those runs:
+Futuresim separates the question market from agent retrieval:
+
+- The environment owns dates, visible questions, visible article files, forecast
+  ingestion, answer matching, and scoring.
+- Agents own their retrieval strategy. They can use the filesystem article
+  corpus, the bundled LanceDB hybrid search tool, or a custom tool.
+
+Download the prebuilt LanceDB artifact for the bundled hybrid search configs:
 
 ```bash
-source .venv/bin/activate
 export FSIM_SEARCH_DB=${FSIM_SEARCH_DB:-$(pwd)/artifacts/forecast-news-embeddings}
 
 hf download shash42/forecast-news-embeddings \
@@ -72,9 +78,7 @@ hf download shash42/forecast-news-embeddings \
 python scripts/check_search_readiness.py --db-path "$FSIM_SEARCH_DB"
 ```
 
-Set `FSIM_SEARCH_DB` in `.env` to keep this artifact outside the repo.
-
-The browsable article corpus is a separate dated tree:
+Download the browsable article corpus separately:
 
 ```bash
 export FSIM_ARTICLES_BASE=${FSIM_ARTICLES_BASE:-$(pwd)/artifacts/forecast-news}
@@ -87,42 +91,29 @@ hf download shash42/forecast-news \
   --max-workers 8
 ```
 
-`FSIM_SEARCH_DB` is read by the default runner to construct the bundled
-LanceDB search tool. `articles_base` is only for MinimalHarness runs that expose the existing
-`articles/YYYY/MM/DD/articles.jsonl` files inside the agent workspace. The
-current Hugging Face corpus covers articles through 2026-03-31.
+`FSIM_ARTICLES_BASE` must point to a dated tree:
+`YYYY/MM/DD/articles.jsonl`. Rows should include `title`, `source`, `date`, and
+`content`; `date_publish`, `url`, `id`, and `date_modify` are optional.
 
-### Custom Question Sets
+## Custom Data
 
-The simulator needs smaller schema than the full OpenForesight columns.
 Use `--dataset custom --dataset_path <file-or-dir>` with CSV, JSONL, JSON, or
-Parquet. A directory may contain `test.jsonl`, `test.parquet`, or
-`test-*.parquet` style split files.
+Parquet. A directory may contain split files such as `test.jsonl`,
+`test.parquet`, or `test-*.parquet`.
 
 Required columns:
 
-| Column | Meaning | Accepted aliases |
-|--------|---------|------------------|
-| `qid` | Stable question id | `question_id`, `id` |
-| `title` | Forecast question shown to agents | `question_title`, `question` |
-| `resolution_date` | Date when the question resolves | `close_time`, `resolve_time` |
-| `ground_truth_answer` | Resolved answer used for scoring | `ground_truth`, `answer`, `resolution`, `resolved_to` |
+| Column | Accepted aliases |
+| --- | --- |
+| `qid` | `question_id`, `id` |
+| `title` | `question_title`, `question` |
+| `resolution_date` | `close_time`, `resolve_time` |
+| `ground_truth_answer` | `ground_truth`, `answer`, `resolution`, `resolved_to` |
 
-Optional columns:
+Optional columns: `background`, `resolution_criteria`, `answer_type`,
+`options`, `source_split`, and `prompt`.
 
-| Column | Default | Use |
-|--------|---------|-----|
-| `background` | empty | Context shown to agents |
-| `resolution_criteria` | empty | Resolution rules shown to agents |
-| `answer_type` | `freeform` | Prompt hint such as `binary`, `mcq`, `numeric`, or `freeform` |
-| `options` | empty | JSON/list of allowed options for enumerated questions |
-| `source_split` | CLI `--split` | Split-specific metrics, especially `test_daily_metrics.csv` |
-| `prompt` | empty | Optional upstream prompt text retained for compatible scaffolds |
-
-OpenForesight-specific article columns such as `url`, `article_maintext`,
-`article_publish_date`, and `prompt_without_retrieval` are not required by the
-simulator. For example, a ForecastBench-style source should first be converted
-by joining its questions and resolutions into the columns above, then run with:
+Example:
 
 ```bash
 python scripts/run_forecast_sim.py \
@@ -131,118 +122,96 @@ python scripts/run_forecast_sim.py \
   --split test
 ```
 
-### Custom News Corpora
+To use a custom search backend, implement the `BaseSearchTool` contract in
+[agents/search_tools/base.py](agents/search_tools/base.py). For LanceDB,
+semantic/hybrid search needs an `articles` table with chunk ids, article ids,
+date fields, content, optional metadata, and vectors built with the configured
+embedding model.
 
-Question sets and news corpora are independent. The environment advances time,
-exposes questions, and scores forecasts; agents decide what retrieval tools to
-use. In the public runner, leaving `search_db` empty disables retrieval. When
-`search_db`/`FSIM_SEARCH_DB` is set, `scripts/run_forecast_sim.py` constructs
-the bundled LanceDB tool and passes it into the agents.
+## Platform Integrations
 
-To swap in another corpus while using the bundled LanceDB tool, build a table
-named `articles` with these fields:
+Futuresim includes adapters for Prime Intellect Verifiers and OpenReward/ORS.
+They use the same `SimulationEnvironment` and run a MinimalHarness-compatible
+CLI agent through the packaged MCP server:
 
-| Field | Meaning |
-|-------|---------|
-| `chunk_id` | Unique id for this retrieved chunk |
-| `article_id` | Source document id |
-| `chunk_index` | Chunk number within the document |
-| `title` | Article/document title |
-| `source` | Publisher or corpus source |
-| `date` | Timestamp used for no-future-leakage filtering |
-| `date_publish` | Optional publish timestamp, also leakage-filtered when present |
-| `content` | Text searched and returned to agents |
-| `url` | Optional source URL |
-| `vector` | Embedding vector, required for semantic/hybrid search |
+```bash
+python -m futuresim_agents.minimalHarnessAgent.mcp_server
+```
 
-Keyword search only needs `content` plus an FTS index. Semantic and hybrid
-search also need vectors built with the same embedding model named by
-`FSIM_EMBEDDING_MODEL`.
+Important defaults:
 
-To use a different retrieval backend, add an implementation of
-`agents/search_tools/base.py`'s `BaseSearchTool` contract and wire it into your
-agent or runner. The search results consumed by agents are only
-`article_id`, `title`, `source`, `date`, optional `date_publish`, `snippet`,
-`score`, and optional `url`.
+- The filesystem article corpus is the default information source.
+- Hybrid LanceDB search is opt-in via `futuresim.enable_hybrid_search: true`.
+- Hosted runs only accept forecasts submitted through MCP
+  `submit_forecasts` and finalized with `next_day`.
+- Sandboxes block general internet by default to avoid future leakage.
+- Codex/Claude CLI reproductions require each user to provide their own private
+  CLI/provider credentials through platform secrets or an equivalent private
+  setup.
 
-For MinimalHarness article browsing, set `articles_base`/`FSIM_ARTICLES_BASE` to
-a dated JSONL tree: `YYYY/MM/DD/articles.jsonl`. Rows should provide `title`,
-`source`, `date`, and `content`; `date_publish`, `url`, `id`, and `date_modify`
-are optional but useful.
+See [integrations/README.md](integrations/README.md) for sandbox image
+requirements, credential handling, network/egress guidance, and publication
+steps for Verifiers and OpenReward.
 
-## Directory Structure
+## Common Commands
 
-| Directory | Description |
-|-----------|-------------|
-| `agents/` | Agent implementations (BasicAgent, AllQAgent) |
-| `environment/` | Simulation environment, scoring, data loading |
-| `scripts/` | CLI scripts for running simulations |
-| `configs/` | YAML configuration files |
-
-## Key Commands
-
-### Run Simulation
 ```bash
 # Default shared simulation
 python scripts/run_forecast_sim.py --config configs/shared/default_sim.yaml
 
-# Shared variant without search
+# No-retrieval variant
 python scripts/run_forecast_sim.py --config configs/shared/default_nosearch_sim.yaml
-```
 
-Shared answer-matching cache:
-- Sim runs still fall back to a per-run `matcher_cache.json`.
-- If `FSIM_SIM_MATCHER_CACHE_DIR` is set, `split: "test"` runs automatically reuse `<cache_dir>/<matcher_slug>.json` and merge new entries back only when the run exits.
-- For non-`test` runs, opt in with top-level YAML:
-  `matcher_cache: {enabled: true, path: null}`
-- Set `matcher_cache.path` to pin a specific JSON file, or `matcher_cache.enabled: false` to force the old per-run cache.
-- Point `FSIM_SIM_MATCHER_CACHE_DIR` at a writable shared directory if multiple runs should reuse matcher results.
-
-### Scaffold Names
-
-Scaffold selection is explicit.
-
-- `basic`, `allQ`, and `allqd` are the base chat-tools scaffolds.
-- `qwenbasic` and `qwenallq` are thin Qwen-named compatibility wrappers over the shared chat-tools loop.
-- `minimalHarness` runs external CLI backends such as Codex, Claude Code, and OpenCode.
-- Qwen scaffolds intentionally do not replay historical hidden thinking across turns; only final assistant content and tool calls are fed back into history.
-- Model names do not automatically switch scaffolds.
-
-Set the scaffold in the config under `defaults.scaffold`.
-
-### Resume / Restart
-```bash
-# Resume from last day
+# Resume from the last day in a run directory
 python scripts/run_forecast_sim.py --resume /path/to/output_dir
 
-# Restart from specific day (preserves predictions before that day)
+# Restart from a specific day while preserving prior forecasts
 python scripts/run_forecast_sim.py \
-    --restart_from /path/to/original/run \
-    --restart_from_day 2025-04-05
+  --restart_from /path/to/original/run \
+  --restart_from_day 2025-04-05
 ```
 
-## Documentation
+Scaffold selection is explicit in config under `defaults.scaffold`:
 
-- **[agents/search_tools/README.md](agents/search_tools/README.md)** — Search tool contract used by agents
-- **[agents/allQAgent/README.md](agents/allQAgent/README.md)** — AllQ scaffold notes and token-budget fields
-- **[agents/minimalHarnessAgent/README.md](agents/minimalHarnessAgent/README.md)** — External CLI harness notes
+- `basic`, `allQ`, `allqd`: base chat-tools scaffolds.
+- `qwenbasic`, `qwenallq`: Qwen-named compatibility wrappers.
+- `minimalHarness`: external CLI backends such as Codex, Claude Code, and
+  OpenCode.
 
-## Output
+## Outputs
 
-Simulation results are saved to `FSIM_OUTPUT_BASE/<sim_name>/<timestamp>/`:
-- `config.json` — Run configuration
-- `actions.jsonl` — All predictions and resolutions
-- `daily_metrics.csv` — One cumulative metrics row per wakeup session, including daily submission count and average TV shift vs the previous submission
-- `test_daily_metrics.csv` — Same metrics, filtered to questions whose `source_split` is `test`
-- `agents/<agent_id>/model_raw_warmup.jsonl` — Warmup raw logs written by the agent scaffold, grouped by question id and logging only per-turn input deltas
-- `agents/<agent_id>/model_raw_daily.jsonl` — Post-warmup raw logs written by the agent scaffold, logging only per-turn input deltas
-- `agents/<agent_id>/` — Per-agent logs and memory
+Runs are saved to `FSIM_OUTPUT_BASE/<sim_name>/<timestamp>/`.
 
-## OpenForesight Notes
+Key files:
 
-- `timegap_days` changes the simulator from daily wakeups to one session every `N` days. BasicAgent-style prompts mention the last and next wakeup dates during normal sessions, and metrics for active questions are evaluated through the end of that wakeup interval.
-- OpenForesight configs can prepend a window from the `train` split ahead of the main `split` with:
-  - `prepend_train_resolution_start`
-  - `prepend_train_resolution_end`
-  - `subsample_per_month`
-- Each OpenForesight question carries a `source_split` tag at load time so split-specific metrics can be logged without a separate loader path.
+| File | Contents |
+| --- | --- |
+| `config.json` | Fully resolved run configuration |
+| `actions.jsonl` | Predictions and resolutions |
+| `daily_metrics.csv` | Cumulative metrics per wakeup session |
+| `test_daily_metrics.csv` | Same metrics filtered to `source_split == "test"` |
+| `matcher_cache.json` | Per-run answer-matcher cache unless shared caching is configured |
+| `agents/<agent_id>/` | Per-agent transcripts, logs, and memory |
+
+If `FSIM_SIM_MATCHER_CACHE_DIR` is set, `split: "test"` runs reuse
+`<cache_dir>/<matcher_slug>.json` and merge new entries back when the run exits.
+Other splits can opt in with top-level YAML:
+`matcher_cache: {enabled: true, path: null}`.
+
+## Notes
+
+- `timegap_days` changes the simulator from daily wakeups to one session every
+  `N` days. Metrics for active questions are evaluated through the end of that
+  wakeup interval.
+- OpenForesight configs can prepend train-split questions with
+  `prepend_train_resolution_start`, `prepend_train_resolution_end`, and
+  `subsample_per_month`.
+- Each OpenForesight question carries a `source_split` tag so split-specific
+  metrics can be logged without a separate loader path.
+
+## More Documentation
+
+- [agents/search_tools/README.md](agents/search_tools/README.md): search tool contract.
+- [agents/allQAgent/README.md](agents/allQAgent/README.md): AllQ scaffold notes.
+- [agents/minimalHarnessAgent/README.md](agents/minimalHarnessAgent/README.md): external CLI harness notes.
+- [integrations/README.md](integrations/README.md): Verifiers and OpenReward integration details.

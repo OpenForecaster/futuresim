@@ -5,8 +5,6 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
-import shlex
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -14,16 +12,21 @@ import time
 from pathlib import Path
 from typing import Dict, List
 
-from agents.minimalHarnessAgent.config import DEFAULT_EGRESS_ALLOWLIST
+from futuresim_agents.minimalHarnessAgent.config import DEFAULT_EGRESS_ALLOWLIST
+from futuresim_agents.minimalHarnessAgent.sandbox_common import (
+    LOOPBACK_HOST,
+    egress_bridge_command,
+    proxy_env,
+    real_path,
+    resolve_socat_cmd,
+    terminate_process,
+)
 
 logger = logging.getLogger(__name__)
 
 
 def _resolve_sandbox_socat_cmd() -> str:
-    for candidate in ("/usr/bin/socat", "/bin/socat"):
-        if os.path.exists(candidate):
-            return candidate
-    return "socat"
+    return resolve_socat_cmd()
 
 
 class SandboxHelpers:
@@ -57,7 +60,7 @@ class SandboxHelpers:
         if host_embed_url:
             self._egress_embed_port = int(host_embed_url.rsplit(":", 1)[1])
             self._egress_embed_sock = d / "embed.sock"
-            raw_forwards.append(f"{self._egress_embed_sock}=127.0.0.1:{self._egress_embed_port}")
+            raw_forwards.append(f"{self._egress_embed_sock}={LOOPBACK_HOST}:{self._egress_embed_port}")
 
         allow = list(self.config.egress_allowlist) or list(DEFAULT_EGRESS_ALLOWLIST)
 
@@ -114,12 +117,7 @@ class SandboxHelpers:
             )
 
     def _stop_egress_proxy(self) -> None:
-        if self._egress_proc and self._egress_proc.poll() is None:
-            self._egress_proc.terminate()
-            try:
-                self._egress_proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self._egress_proc.kill()
+        terminate_process(self._egress_proc)
         self._egress_proc = None
 
     def _wrap_for_egress_bridge(self, cmd: List[str]) -> List[str]:
@@ -127,53 +125,38 @@ class SandboxHelpers:
 
         Only used with network_isolation=True.
         """
-        proxy_sock = str(self._egress_proxy_sock)
-        proxy_port = self._egress_proxy_port
-        socat_cmd = shlex.quote(_resolve_sandbox_socat_cmd())
-        bridge = (
-            f"{socat_cmd} TCP-LISTEN:{proxy_port},bind=127.0.0.1,fork,reuseaddr "
-            f"UNIX-CONNECT:{proxy_sock} 2>/dev/null & "
-        )
+        raw_bridges: list[tuple[Path, int]] = []
         if self._egress_embed_sock and self._egress_embed_port:
-            bridge += (
-                f"{socat_cmd} TCP-LISTEN:{self._egress_embed_port},bind=127.0.0.1,"
-                f"fork,reuseaddr UNIX-CONNECT:{self._egress_embed_sock} 2>/dev/null & "
-            )
-        # Give socat 0.3s to bind before the harness' first request; typical is <50ms.
-        wrapper = bridge + 'sleep 0.3; exec "$@"'
-        return ["/bin/sh", "-c", wrapper, "egress-bridge", *cmd]
+            raw_bridges.append((self._egress_embed_sock, int(self._egress_embed_port)))
+        return egress_bridge_command(
+            cmd,
+            proxy_sock=str(self._egress_proxy_sock),
+            proxy_port=int(self._egress_proxy_port),
+            raw_bridges=raw_bridges,
+            socat_cmd=_resolve_sandbox_socat_cmd(),
+        )
 
     def _egress_env_overrides(self) -> Dict[str, str]:
         """Proxy env vars that route SDK clients through the host proxy bridge."""
-        proxy_url = f"http://127.0.0.1:{self._egress_proxy_port}"
         # Keep loopback local: the embedding client already bypasses HTTPS_PROXY,
         # and the embedding server reaches the host via the same-port raw bridge.
-        return {
-            "HTTPS_PROXY": proxy_url,
-            "https_proxy": proxy_url,
-            "HTTP_PROXY": proxy_url,
-            "http_proxy": proxy_url,
-            "ALL_PROXY": proxy_url,
-            "all_proxy": proxy_url,
-            "NO_PROXY": "127.0.0.1,localhost",
-            "no_proxy": "127.0.0.1,localhost",
-        }
+        return proxy_env(int(self._egress_proxy_port))
 
     def _build_bwrap_cmd(self, inner_cmd: List[str]) -> List[str]:
         """Wrap `inner_cmd` in bwrap, exposing only the harness needs.
 
         Exposed: workspace rw (cwd, articles/, memory/, market.csv, model
-        outputs); _internal_dir rw (MCP signals, predictions, state.json,
+        outputs); _internal_dir rw (MCP signals, state.json,
         system_prompt.md); mcp_relay_dir rw (per-agent host MCP/retrieval
         socket); harness install ro plus backend state dirs rw (codex
-        ~/.codex; Claude ~/.claude, ~/.claude.json, ~/.cache/claude*; opencode
+        CODEX_HOME when set, else ~/.codex; Claude ~/.claude, ~/.claude.json, ~/.cache/claude*; opencode
         ~/.cache|.local|.config/opencode plus XDG_DATA_HOME SQLite scratch);
         OS dirs ro (/usr, /etc, /lib*, /bin, /sbin); stripped /dev; tmpfs /tmp;
         and /proc private by default or host_ro via sandbox_proc_mode.
 
         Hidden: the repo (MCP is host-side and harnesses are self-contained;
         binding it exposes analysis/reports, ground-truth tables, logs/sims,
-        prior state/predictions, and YAML configs/answers); .venv/sys.base_prefix
+        prior state and YAML configs/answers); .venv/sys.base_prefix
         (no repo Python runs inside; /usr/bin/python3 is enough); search_db,
         lancedb, and embedding_model (only host MCP `search_news` is reachable,
         with date-capping); articles_base (only date-gated workspace hardlinks
@@ -186,8 +169,8 @@ class SandboxHelpers:
         for OpenRouter and local vLLM; network_isolation uses a private net plus
         the host allowlist proxy/bridge.
         """
-        workspace_real = os.path.realpath(str(self.workspace))
-        internal_real = os.path.realpath(str(self._internal_dir))
+        workspace_real = real_path(self.workspace)
+        internal_real = real_path(self._internal_dir)
 
         args = [
             "bwrap",
@@ -210,7 +193,7 @@ class SandboxHelpers:
             args.extend(["--ro-bind", "/proc", "/proc"])
 
         # Recreate aliases before binds create tmpfs DEST dirs.
-        for alias in ("/home",):
+        for alias in ("/home", "/fast"):
             if os.path.islink(alias):
                 target = os.readlink(alias)
                 if not os.path.isabs(target):
@@ -237,25 +220,25 @@ class SandboxHelpers:
 
         home = os.path.expanduser("~")
         for sub in self._sandbox_harness_home_subdirs():
-            p = os.path.realpath(os.path.join(home, sub))
+            p = real_path(os.path.join(home, sub))
             if os.path.exists(p):
                 args.extend(["--bind-try", p, p])
 
         # Per-agent XDG_DATA_HOME scratch for opencode's SQLite session DB.
         data_home = getattr(self, "_opencode_data_home", None)
         if data_home:
-            dh = os.path.realpath(str(data_home))
+            dh = real_path(data_home)
             if os.path.exists(dh):
                 args.extend(["--bind", dh, dh])
 
         # Bind per-agent egress socket dir at realpath for sandbox UNIX-CONNECT.
         if self.config.network_isolation and self._egress_dir:
-            ed = os.path.realpath(str(self._egress_dir))
+            ed = real_path(self._egress_dir)
             args.extend(["--bind", ed, ed])
 
         # Bind MCP relay socket dir so `socat - UNIX-CONNECT:<sock>` reaches host MCP.
         if self._mcp_relay_dir:
-            md = os.path.realpath(str(self._mcp_relay_dir))
+            md = real_path(self._mcp_relay_dir)
             if os.path.exists(md):
                 args.extend(["--bind", md, md])
 

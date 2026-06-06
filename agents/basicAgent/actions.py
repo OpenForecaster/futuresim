@@ -2,8 +2,8 @@
 
 from typing import Any, Dict, List, Optional
 
-from agents.utils.budget import BudgetTracker
-from agents.utils.memory import ActiveMemory, StructuredMemory
+from futuresim_agents.utils.budget import BudgetTracker
+from futuresim_agents.utils.memory import ActiveMemory, StructuredMemory
 from environment.interfaces import PredictionSubmission
 
 from .tools import execute_news_search, optional_search_dates_from_parsed

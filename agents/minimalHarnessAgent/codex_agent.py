@@ -14,9 +14,9 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from agents.minimalHarnessAgent.agent import MinimalHarnessAgent
-from agents.minimalHarnessAgent.static_search import safe_qid
-from agents.utils.output_logger import AgentOutputLogger
+from futuresim_agents.minimalHarnessAgent.agent import MinimalHarnessAgent
+from futuresim_agents.minimalHarnessAgent.static_search import safe_qid
+from futuresim_agents.utils.output_logger import AgentOutputLogger
 from environment.interfaces import PredictionSubmission
 
 logger = logging.getLogger(__name__)
@@ -229,6 +229,16 @@ class CodexAgent(MinimalHarnessAgent):
             args.extend(["--ro-bind", install, install])
 
     def _sandbox_harness_home_subdirs(self) -> tuple[str, ...]:
+        codex_home = os.environ.get("CODEX_HOME")
+        if codex_home:
+            home_real = os.path.realpath(os.path.expanduser("~"))
+            codex_home_real = os.path.realpath(os.path.expanduser(codex_home))
+            try:
+                rel = os.path.relpath(codex_home_real, home_real)
+            except ValueError:
+                rel = ""
+            if rel and rel != os.curdir and not rel.startswith(os.pardir + os.sep):
+                return (rel,)
         return (".codex",)
 
     def _get_warmup_current_date(self, current_date: date, q: Any) -> date:
@@ -244,7 +254,7 @@ class CodexAgent(MinimalHarnessAgent):
         q: Any,
         effective_current_date: date,
     ) -> str:
-        from agents.minimalHarnessAgent.prompts.prompt import build_warmup_prompt
+        from futuresim_agents.minimalHarnessAgent.prompts.prompt import build_warmup_prompt
 
         source_context = getattr(forecast_interface, "source_context", "") or ""
         source_name = getattr(forecast_interface, "source_name", "openforesight")
@@ -279,7 +289,7 @@ class CodexAgent(MinimalHarnessAgent):
         return self._internal_dir / "static_search"
 
     def _ensure_static_search_file(self, q: Any, effective_current_date: date) -> Tuple[Path, str]:
-        from agents.minimalHarnessAgent.static_search import ensure_static_search_file
+        from futuresim_agents.minimalHarnessAgent.static_search import ensure_static_search_file
 
         return ensure_static_search_file(
             output_dir=self._static_search_root(),
@@ -324,20 +334,22 @@ class CodexAgent(MinimalHarnessAgent):
         log_dir: Path,
         qid: str,
         current_date: date,
+        predictions: List[Dict[str, Any]],
     ) -> None:
         """Preserve per-question raw logs, then allow the runtime dir to be deleted."""
+        del current_date
         log_dir.mkdir(parents=True, exist_ok=True)
         copy_map = {
             runtime_dir / "codex_stdout.jsonl": log_dir / "codex_stdout.jsonl",
             runtime_dir / "codex_stderr.log": log_dir / "codex_stderr.log",
             runtime_dir / "mcp_relay.log": log_dir / "mcp_relay.log",
             runtime_dir / "state.json": log_dir / "state.json",
-            runtime_dir / "predictions" / f"{current_date.isoformat()}.json": log_dir / "predictions.json",
             runtime_dir / "warmup_prompts" / f"{safe_qid(qid)}.md": log_dir / "prompt.md",
         }
         for src, dst in copy_map.items():
             if src.exists():
                 shutil.copy2(src, dst)
+        (log_dir / "predictions.json").write_text(json.dumps(predictions, default=str))
 
     def _stop_warmup_worker(self, worker: "MinimalHarnessAgent") -> None:
         worker._terminate_harness_process()
@@ -372,8 +384,9 @@ class CodexAgent(MinimalHarnessAgent):
         )
 
         effective_current_date = self._get_warmup_current_date(current_date, q)
+        predictions: List[Dict[str, Any]] = []
         try:
-            for d in ("signals", "predictions"):
+            for d in ("signals",):
                 (worker._internal_dir / d).mkdir(parents=True, exist_ok=True)
             for d in ("memory", "articles"):
                 (worker.workspace / d).mkdir(parents=True, exist_ok=True)
@@ -406,7 +419,7 @@ class CodexAgent(MinimalHarnessAgent):
             return qid, effective_current_date, predictions
         finally:
             self._stop_warmup_worker(worker)
-            self._copy_warmup_runtime_logs(runtime_dir, log_dir, qid, current_date)
+            self._copy_warmup_runtime_logs(runtime_dir, log_dir, qid, current_date, predictions)
             shutil.rmtree(runtime_dir, ignore_errors=True)
 
     def _append_warmup_log_index(
