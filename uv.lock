@@ -685,9 +685,9 @@ requires-dist = [
     { name = "lancedb", marker = "extra == 'hosted-hybrid'", specifier = "==0.29.1" },
     { name = "lancedb", marker = "extra == 'hybrid-search'", specifier = "==0.29.1" },
     { name = "mcp", specifier = "==1.25.0" },
-    { name = "openreward", marker = "extra == 'hosted'", specifier = ">=0.1.125" },
-    { name = "openreward", marker = "extra == 'hosted-hybrid'", specifier = ">=0.1.125" },
-    { name = "openreward", marker = "extra == 'openreward'", specifier = ">=0.1.125" },
+    { name = "openreward", marker = "extra == 'hosted'", specifier = ">=0.1.126" },
+    { name = "openreward", marker = "extra == 'hosted-hybrid'", specifier = ">=0.1.126" },
+    { name = "openreward", marker = "extra == 'openreward'", specifier = ">=0.1.126" },
     { name = "pandas", specifier = "==2.3.3" },
     { name = "prime-sandboxes", marker = "extra == 'hosted'", specifier = ">=0.2.26" },
     { name = "prime-sandboxes", marker = "extra == 'hosted-hybrid'", specifier = ">=0.2.26" },
@@ -1633,7 +1633,7 @@ wheels = [
 
 [[package]]
 name = "openreward"
-version = "0.1.125"
+version = "0.1.126"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
@@ -1650,9 +1650,9 @@ dependencies = [
     { name = "typing-extensions", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "uvicorn", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/9d/dd/b69264c77fd9720f69443c5f6420a7ae9934b4e2799e276d8655f6dc0721/openreward-0.1.125.tar.gz", hash = "sha256:519687307f960ab3a395bf844d6c2fc018d8a0faad0fc367ad3b24331366d390", size = 138936 }
+sdist = { url = "https://files.pythonhosted.org/packages/47/ab/5f87589b0e8e4fdd586cd4610db7e31fce6cda48e726d3cb477149e8d7e7/openreward-0.1.126.tar.gz", hash = "sha256:11c9e983f2ca16f7ea57bc3036dc14bfafb48d4345a6936581bb6a700a814083", size = 139466 }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/72/11/51c5473d5b3d209ecaacee6ac5418eef15114d0817a98f9cee0a2d6364ee/openreward-0.1.125-py3-none-any.whl", hash = "sha256:784faeeef6aba2ce8f175bd9af5dff29b3bb0c07a4c3642eb56dc431c9af2924", size = 135521 },
+    { url = "https://files.pythonhosted.org/packages/22/c8/30c1fdd11684c8f34a1c78a5be8e00c52ea472a82aeeb4430f4190deeadd/openreward-0.1.126-py3-none-any.whl", hash = "sha256:3a01148f566839033845da8a9d966e501bf755ead18e59ae41ef63f8fbf869a2", size = 135826 },
 ]
 
 [[package]]
