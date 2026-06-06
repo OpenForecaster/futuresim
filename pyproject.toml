@@ -1,6 +1,6 @@
 [project]
 name = "futuresim"
-version = "0.1.1"
+version = "0.1.2"
 description = "Futuresim forecasting simulation environment"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"

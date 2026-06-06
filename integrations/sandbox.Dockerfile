@@ -7,7 +7,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml README.md ./
-COPY futuresim.py server.py ./
+COPY futuresim.py pathing.py server.py ./
 COPY agents ./agents
 COPY environment ./environment
 COPY inference ./inference

@@ -268,6 +268,26 @@ This example uses the lightweight exact match and no embeddings search quick set
 `block_network: false` is for the outer OpenReward sandbox. The inner CLI agent
 still runs with Futuresim's network isolation unless you explicitly disable it.
 
+To deploy on OpenReward, create a standard ORS environment and link this GitHub
+repository:
+
+```bash
+export OPENREWARD_API_KEY=...
+
+orwd create futuresim \
+  --namespace <your-openreward-namespace> \
+  --description "Futuresim forecasting simulation environment"
+
+orwd link <your-openreward-namespace>/futuresim OpenForecaster/futuresim \
+  --cpu-memory 2:4 \
+  --concurrency 20 \
+  --max-scale 2
+```
+
+Do not enable Harbor mode for this integration. Futuresim ships a custom ORS
+server in `server.py`; Harbor is for repositories made of Harbor task
+directories where OpenReward generates the server.
+
 ## Credentials
 
 Supply credentials through platform secrets, environment variables, or private
