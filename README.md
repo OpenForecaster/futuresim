@@ -135,10 +135,10 @@ python scripts/run_forecast_sim.py \
 ```
 
 To use a custom search backend, implement the `BaseSearchTool` contract in
-[agents/search_tools/base.py](agents/search_tools/base.py). For LanceDB,
-semantic/hybrid search needs an `articles` table with chunk ids, article ids,
-date fields, content, optional metadata, and vectors built with the configured
-embedding model.
+[agents/search_tools/base.py](https://github.com/OpenForecaster/futuresim/blob/main/agents/search_tools/base.py).
+For LanceDB, semantic/hybrid search needs an `articles` table with chunk ids,
+article ids, date fields, content, optional metadata, and vectors built with the
+configured embedding model.
 
 ## Platform Integrations
 
@@ -161,9 +161,9 @@ Important defaults:
   CLI/provider credentials through platform secrets or an equivalent private
   setup.
 
-See [integrations/README.md](integrations/README.md) for sandbox image
-requirements, credential handling, network/egress guidance, and publication
-steps for Verifiers and OpenReward.
+See [integrations/README.md](https://github.com/OpenForecaster/futuresim/blob/main/integrations/README.md)
+for sandbox image requirements, credential handling, network/egress guidance,
+and publication steps for Verifiers and OpenReward.
 
 ## Common Commands
 
@@ -223,7 +223,7 @@ Other splits can opt in with top-level YAML:
 
 ## More Documentation
 
-- [agents/search_tools/README.md](agents/search_tools/README.md): search tool contract.
-- [agents/allQAgent/README.md](agents/allQAgent/README.md): AllQ scaffold notes.
-- [agents/minimalHarnessAgent/README.md](agents/minimalHarnessAgent/README.md): external CLI harness notes.
-- [integrations/README.md](integrations/README.md): Verifiers and OpenReward integration details.
+- [agents/search_tools/README.md](https://github.com/OpenForecaster/futuresim/blob/main/agents/search_tools/README.md): search tool contract.
+- [agents/allQAgent/README.md](https://github.com/OpenForecaster/futuresim/blob/main/agents/allQAgent/README.md): AllQ scaffold notes.
+- [agents/minimalHarnessAgent/README.md](https://github.com/OpenForecaster/futuresim/blob/main/agents/minimalHarnessAgent/README.md): external CLI harness notes.
+- [integrations/README.md](https://github.com/OpenForecaster/futuresim/blob/main/integrations/README.md): Verifiers and OpenReward integration details.
