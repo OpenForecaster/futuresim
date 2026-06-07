@@ -28,6 +28,15 @@ Useful links:
 The OpenReward/ORS integration is also available in the GitHub repository, but
 this package page focuses on the Verifiers environment.
 
+## Current Hosted Limitation
+
+Strict hosted Codex/Claude MinimalHarness reproduction is currently blocked on
+default Prime/Verifiers sandboxes. Futuresim needs an inner `bubblewrap`
+sandbox, or equivalent custom URL/network blocklisting, so the agent shell
+cannot use arbitrary web access while still reaching its model provider.
+Current hosted sandboxes do not yet expose that capability, so the integration
+fails fast instead of running an unfaithful evaluation.
+
 ## Quick Start
 
 Install from Prime:
@@ -46,6 +55,7 @@ env = load_environment(
     env_args={
         "futuresim": {
             "articles_base": "/path/to/articles",
+            "split": "aljazeera2026Q1",
             "matching": "exact"
         },
         "minimal_harness": {
@@ -113,7 +123,7 @@ Recommended Futuresim settings:
 {
   "futuresim": {
     "dataset_path": "nikhilchandak/OpenForesight",
-    "split": "aljazeeraQ12026v37",
+    "split": "aljazeera2026Q1",
     "start_date": "2025-12-31",
     "end_date": "2026-03-28",
     "resolution_start": "2025-12-31",
@@ -127,7 +137,7 @@ Recommended Futuresim settings:
       "search_db": "/path/to/lancedb",
       "embedding_model": "/path/to/embedding-model",
       "search_type": "hybrid",
-      "max_results": 10
+      "max_results": 5
     }
   }
 }
@@ -141,8 +151,15 @@ credentials; Futuresim does not ship maintainer keys.
 
 Use `agent_filesystem_sandbox: true` and `network_isolation: true` for public
 or reproducibility runs. The outer Prime sandbox may need `network_access: true`
-so the CLI can reach its model provider, while Futuresim's inner runner blocks
-general agent egress and routes allowed provider traffic through its proxy.
+so the CLI can reach its model provider. With a supported platform sandbox,
+Futuresim's inner runner blocks general agent egress and routes allowed provider
+traffic through its proxy.
+
+Strict MinimalHarness CLI reproduction requires a sandbox backend that can run
+`bubblewrap` inside the sandbox, or equivalent custom URL/network blocklisting.
+Default hosted sandboxes currently fail that preflight, so this path stops with
+a clear error rather than running without the intended filesystem/network
+boundary.
 
 The agent may submit zero forecasts on a day. Forecasts count only after the
 agent calls MCP `submit_forecasts` and then `next_day`.

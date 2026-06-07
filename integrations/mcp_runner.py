@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shlex
+import tarfile
 import tempfile
 from dataclasses import asdict, dataclass, field, fields
 from datetime import date
@@ -21,6 +22,15 @@ from integrations.adapter_runtime import (
     SandboxUpload,
     parse_iso_date,
 )
+
+
+SANDBOX_RUNTIME_DEPS = ["mcp==1.25.0"]
+SANDBOX_HYBRID_DEPS = [
+    "lancedb==0.29.1",
+    "lance-namespace==0.4.5",
+    "pylance>=1.0.0b14",
+    "tantivy==0.25.0",
+]
 
 
 class SandboxController(Protocol):
@@ -69,6 +79,9 @@ class MinimalHarnessRunnerConfig:
     egress_allowlist: list[str] = field(default_factory=list)
     egress_proxy_port: int = 18765
     host_runtime_dir: str = ""
+    sandbox_bootstrap_runtime: bool = True
+    sandbox_bootstrap_deps: list[str] = field(default_factory=list)
+    sandbox_bootstrap_timeout_seconds: int = 900
 
     @classmethod
     def from_mapping(cls, value: dict[str, Any] | None) -> "MinimalHarnessRunnerConfig":
@@ -117,6 +130,8 @@ class MinimalHarnessRunnerConfig:
             raise ValueError("sandbox_proc_mode must be 'none', 'new', or 'host_ro'.")
         if self.egress_allowlist is None:
             self.egress_allowlist = []
+        if self.sandbox_bootstrap_deps is None:
+            self.sandbox_bootstrap_deps = []
         if (
             self.futuresim.enable_hybrid_search
             and not self.agent_filesystem_sandbox
@@ -209,6 +224,8 @@ class FuturesimMcpRunner:
         self._stage = tempfile.TemporaryDirectory(prefix="futuresim-mcp-runner-")
         self._codex_thread_id: Optional[str] = config.codex_thread_id or None
         self._claude_session_id: Optional[str] = config.claude_session_id or None
+        self._runtime_archive_path: Optional[Path] = None
+        self._sandbox_runtime_ready = False
 
     def close(self) -> None:
         self.runtime.close()
@@ -258,6 +275,7 @@ class FuturesimMcpRunner:
                 ]
             )
         )
+        await self._ensure_sandbox_runtime(sandbox)
 
         uploads, article_marker = self._prepare_day_uploads()
         for upload in uploads:
@@ -439,6 +457,7 @@ class FuturesimMcpRunner:
                 "--spec",
                 f"{self._remote_host_runtime_dir(current_date)}/harness_spec.json",
             ]
+            cmd = self._with_runtime_pythonpath(cmd)
         elif self.config.harness_backend == "codex":
             cmd = self._codex_command(current_date)
         elif self.config.harness_backend == "claude_code":
@@ -499,6 +518,164 @@ class FuturesimMcpRunner:
             f"if [ -f {quoted_log} ]; then cat {quoted_log}; fi; "
             'exit "$status"'
         )
+
+    async def _ensure_sandbox_runtime(self, sandbox: SandboxController) -> None:
+        if self._sandbox_runtime_ready or not self.config.agent_filesystem_sandbox:
+            return
+
+        check = self._runtime_import_check_command()
+        result = await sandbox.run(check, timeout_seconds=30)
+        if result.exit_code == 0:
+            self._sandbox_runtime_ready = True
+            return
+
+        if not self.config.sandbox_bootstrap_runtime:
+            raise RuntimeError(
+                "The sandbox cannot import Futuresim's hosted harness. Install futuresim in "
+                "the sandbox image or set sandbox_bootstrap_runtime=True."
+            )
+
+        archive = self._build_runtime_archive()
+        remote_archive = f"{self._remote_runtime_source_dir()}.tar.gz"
+        await sandbox.upload_file(archive, remote_archive)
+        bootstrap = self._runtime_bootstrap_command(remote_archive)
+        result = await sandbox.run(
+            bootstrap,
+            timeout_seconds=max(60, int(self.config.sandbox_bootstrap_timeout_seconds)),
+        )
+        if result.exit_code != 0:
+            detail = result.output[-2000:] if result.output else ""
+            raise RuntimeError(f"Futuresim sandbox runtime bootstrap failed.\n{detail}")
+        self._sandbox_runtime_ready = True
+
+    def _build_runtime_archive(self) -> Path:
+        if self._runtime_archive_path is not None:
+            return self._runtime_archive_path
+
+        root = Path(__file__).resolve().parents[1]
+        archive = Path(self._stage.name) / "futuresim_runtime.tar.gz"
+        include = [
+            "futuresim_agents",
+            "agents",
+            "environment",
+            "integrations",
+            "inference",
+            "futuresim.py",
+            "pathing.py",
+            "server.py",
+        ]
+
+        def _filter(info: tarfile.TarInfo) -> tarfile.TarInfo | None:
+            parts = PurePosixPath(info.name).parts
+            if "__pycache__" in parts or info.name.endswith((".pyc", ".pyo")):
+                return None
+            return info
+
+        with tarfile.open(archive, "w:gz") as tf:
+            for rel in include:
+                path = root / rel
+                if path.exists():
+                    tf.add(path, arcname=rel, filter=_filter)
+        self._runtime_archive_path = archive
+        return archive
+
+    def _runtime_bootstrap_command(self, remote_archive: str) -> str:
+        remote_root = self._remote_runtime_source_dir()
+        deps = list(SANDBOX_RUNTIME_DEPS)
+        if self.config.futuresim.enable_hybrid_search:
+            deps.extend(SANDBOX_HYBRID_DEPS)
+        deps.extend(str(dep) for dep in self.config.sandbox_bootstrap_deps)
+        bwrap_check_args = [
+            "bwrap",
+            "--unshare-net" if self.config.network_isolation else "--share-net",
+            "--dev",
+            "/dev",
+            "--tmpfs",
+            "/tmp",
+            "--ro-bind",
+            "/usr",
+            "/usr",
+            "--ro-bind-try",
+            "/bin",
+            "/bin",
+            "--ro-bind-try",
+            "/lib",
+            "/lib",
+            "--ro-bind-try",
+            "/lib64",
+            "/lib64",
+            "--",
+            "/usr/bin/true",
+        ]
+        bwrap_check = (
+            f"{shlex.join(bwrap_check_args)} 2>/tmp/futuresim_bwrap_check.err || "
+            "{ echo 'Futuresim requires a sandbox runtime that can run bubblewrap. "
+            "The current sandbox image/platform cannot create the required inner "
+            "filesystem/network sandbox.' >&2; cat /tmp/futuresim_bwrap_check.err >&2; exit 1; }"
+        )
+
+        commands = [
+            "set -e",
+            (
+                "if ! command -v bwrap >/dev/null 2>&1 || ! command -v socat >/dev/null 2>&1; then "
+                "if [ \"$(id -u)\" = \"0\" ] && command -v apt-get >/dev/null 2>&1; then "
+                "export DEBIAN_FRONTEND=noninteractive; "
+                "{ apt-get update >/dev/null && "
+                "apt-get install -y --no-install-recommends bubblewrap socat ca-certificates >/dev/null; } || true; "
+                "fi; "
+                "fi"
+            ),
+            (
+                "command -v bwrap >/dev/null 2>&1 || "
+                "{ echo 'Futuresim requires bubblewrap inside the sandbox image. "
+                "Install bubblewrap in the image or use a platform sandbox that provides it.' >&2; exit 1; }"
+            ),
+            (
+                "command -v socat >/dev/null 2>&1 || "
+                "{ echo 'Futuresim requires socat inside the sandbox image for the MCP socket relay.' >&2; exit 1; }"
+            ),
+            bwrap_check,
+            f"rm -rf {shlex.quote(remote_root)}",
+            f"mkdir -p {shlex.quote(remote_root)}",
+            shlex.join(
+                [
+                    self.config.python_path,
+                    "-m",
+                    "tarfile",
+                    "-e",
+                    remote_archive,
+                    remote_root,
+                ]
+            ),
+        ]
+        if deps:
+            commands.append(
+                shlex.join(
+                    [
+                        self.config.python_path,
+                        "-m",
+                        "pip",
+                        "install",
+                        "--quiet",
+                        "--disable-pip-version-check",
+                        *deps,
+                    ]
+                )
+            )
+        commands.append(self._runtime_import_check_command())
+        return " && ".join(commands)
+
+    def _runtime_import_check_command(self) -> str:
+        py = shlex.quote(self.config.python_path)
+        pythonpath = shlex.quote(self._remote_runtime_source_dir())
+        code = (
+            "import integrations.sandbox_harness; "
+            "import futuresim_agents.minimalHarnessAgent.mcp_server"
+        )
+        return f"PYTHONPATH={pythonpath} {py} -c {shlex.quote(code)}"
+
+    def _with_runtime_pythonpath(self, cmd: list[str]) -> list[str]:
+        return ["env", f"PYTHONPATH={self._remote_runtime_source_dir()}", *cmd]
 
     def _codex_command(self, current_date: date) -> list[str]:
         mcp_command, mcp_args = self._mcp_command_and_args()
@@ -696,6 +873,13 @@ class FuturesimMcpRunner:
             digest = hashlib.sha1(self.config.agent_root_path.encode()).hexdigest()[:12]
             base = f"/tmp/futuresim-hosted-{digest}"
         return f"{base}/{current_date.isoformat()}"
+
+    def _remote_runtime_source_dir(self) -> str:
+        base = self.config.host_runtime_dir.rstrip("/")
+        if not base:
+            digest = hashlib.sha1(self.config.agent_root_path.encode()).hexdigest()[:12]
+            base = f"/tmp/futuresim-hosted-{digest}"
+        return f"{base}/runtime_src"
 
     def _signal_path(self, current_date: date) -> str:
         return self._remote_internal_path("signals", f"next_day_{current_date.isoformat()}.json")

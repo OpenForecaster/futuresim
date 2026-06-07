@@ -24,7 +24,7 @@ For any run, provide:
 
 - A Futuresim dataset. The default is
   [nikhilchandak/OpenForesight](https://huggingface.co/datasets/nikhilchandak/OpenForesight)
-  with split `aljazeeraQ12026v37`.
+  with split `aljazeera2026Q1`.
 - An article corpus directory, if you want filesystem news access. It must use:
 
 ```text
@@ -36,9 +36,10 @@ articles_base/
 ```
 
 - Your own model/API credentials. Futuresim does not include maintainer keys.
-- A sandbox image with Futuresim installed.
-- If reproducing a CLI-agent run, the sandbox image also needs the selected CLI
-  installed, for example `codex` or `claude`.
+- A sandbox image with the selected CLI installed, for example `codex` or
+  `claude`, if reproducing a CLI-agent run. The hosted runner can bootstrap the
+  Futuresim harness code into the sandbox, but baking it into the image is
+  faster and more stable for long runs.
 
 For hybrid LanceDB search, also provide:
 
@@ -53,6 +54,15 @@ Hybrid search is opt-in because it needs extra artifacts and, depending on your
 setup, GPU or embedding-server access. For faithful reproduction of the original
 paper experiments, use hybrid LanceDB search and answer matching. The default
 exact/no-hybrid setup is only meant for quick setup checks.
+
+## Current Hosted Limitation
+
+Strict hosted Codex/Claude MinimalHarness reproduction is currently blocked on
+default Prime/Verifiers and OpenReward sandboxes. Futuresim needs an inner
+`bubblewrap` sandbox, or equivalent custom URL/network blocklisting, so the
+agent shell cannot use arbitrary web access while still reaching its model
+provider. Current hosted sandboxes do not yet expose that capability, so the
+integration fails fast instead of running an unfaithful evaluation.
 
 ## Build The Sandbox Image
 
@@ -75,6 +85,8 @@ credentials.
 
 The default sandbox expects `bubblewrap` and `socat`. These keep the CLI agent
 from reading raw LanceDB/search artifacts or using arbitrary network access.
+The platform sandbox must also allow bubblewrap to create an inner filesystem
+and network sandbox.
 
 ## Common Task Config
 
@@ -86,7 +98,7 @@ test:
   "futuresim": {
     "dataset": "openforesight",
     "dataset_path": "nikhilchandak/OpenForesight",
-    "split": "aljazeeraQ12026v37",
+    "split": "aljazeera2026Q1",
     "start_date": "2025-12-31",
     "end_date": "2026-03-28",
     "resolution_start": "2025-12-31",
@@ -136,7 +148,7 @@ LanceDB hybrid MCP search tool:
       "search_db": "/path/to/lancedb",
       "embedding_model": "/path/to/embedding-model",
       "search_type": "hybrid",
-      "max_results": 10
+      "max_results": 5
     }
   },
   "minimal_harness": {
@@ -145,8 +157,9 @@ LanceDB hybrid MCP search tool:
 }
 ```
 
-Keep `agent_filesystem_sandbox: true` for public or reproducibility runs. The MCP
-server can access LanceDB, but the agent shell cannot directly read the raw index or embedding-model files.
+Keep `agent_filesystem_sandbox: true` for public or reproducibility runs. With a
+supported platform sandbox, the MCP server can access LanceDB while the agent
+shell cannot directly read the raw index or embedding-model files.
 
 ## Verifiers / Prime
 
@@ -201,8 +214,9 @@ env = load_environment(
 This example uses the lightweight exact match and no embeddings search quick setup. We recommend adding LLM answer matching and the LanceDB search tool for reproducing our results.
 
 `network_access: True` is for the outer platform sandbox so the CLI can reach
-its model provider. The inner agent process is still network-isolated by
-Futuresim and uses the allowlisted egress proxy.
+its model provider. Strict CLI-agent reproduction still requires platform
+support for the inner `bubblewrap` sandbox or equivalent custom URL/network
+blocklisting; until then this path fails fast.
 
 ## OpenReward / ORS
 
@@ -265,8 +279,11 @@ OpenReward task spec example:
 
 This example uses the lightweight exact match and no embeddings search quick setup. We recommend adding LLM answer matching and the LanceDB search tool for reproducing our results.
 
-`block_network: false` is for the outer OpenReward sandbox. The inner CLI agent
-still runs with Futuresim's network isolation unless you explicitly disable it.
+`block_network: false` is for the outer OpenReward sandbox so the CLI can reach
+its model provider. OpenReward's current `block_network: true` blocks too much
+for Codex/Claude reproduction, while `block_network: false` still needs the
+inner `bubblewrap` sandbox or equivalent custom URL/network blocklisting. Until
+that is supported, strict CLI-agent reproduction fails fast.
 
 To deploy on OpenReward, create a standard ORS environment and link this GitHub
 repository:

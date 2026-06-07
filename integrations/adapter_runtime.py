@@ -32,7 +32,7 @@ class FuturesimAdapterConfig:
     dataset: str = "openforesight"
     dataset_path: str = "nikhilchandak/OpenForesight"
     dataset_cache: str = ""
-    split: str = "aljazeeraQ12026v37"
+    split: str = "aljazeera2026Q1"
     start_date: str = "2025-12-31"
     end_date: str = "2026-03-28"
     resolution_start: str = ""
@@ -380,8 +380,15 @@ def coerce_command_result(value: Any) -> SandboxCommandResult:
             truncated=bool(getattr(value, "truncated", False)),
         )
     if isinstance(value, dict):
-        output = value.get("stdout", value.get("output", value.get("text", "")))
-        exit_code = value.get("exit_code", value.get("returncode", value.get("code", 0)))
+        stdout = value.get("stdout", value.get("output", value.get("text", "")))
+        stderr = value.get("stderr", "")
+        output = "\n".join(str(part) for part in (stdout, stderr) if part)
+        exit_code = value.get(
+            "exit_code",
+            value.get("return_code", value.get("returncode", value.get("code", 0))),
+        )
+        if value.get("timed_out") and not exit_code:
+            exit_code = 124
         return SandboxCommandResult(
             output=str(output or ""),
             exit_code=int(exit_code or 0),
@@ -389,13 +396,22 @@ def coerce_command_result(value: Any) -> SandboxCommandResult:
         )
 
     output = getattr(value, "stdout", None)
+    stderr = getattr(value, "stderr", None)
     if output is None:
         output = getattr(value, "output", None)
     if output is None:
         output = getattr(value, "text", None)
     if output is None:
         output = str(value or "")
-    exit_code = getattr(value, "exit_code", getattr(value, "returncode", 0))
+    if stderr:
+        output = "\n".join(str(part) for part in (output, stderr) if part)
+    exit_code = getattr(value, "exit_code", None)
+    if exit_code is None:
+        exit_code = getattr(value, "return_code", None)
+    if exit_code is None:
+        exit_code = getattr(value, "returncode", 0)
+    if getattr(value, "timed_out", False) and not exit_code:
+        exit_code = 124
     return SandboxCommandResult(
         output=str(output or ""),
         exit_code=int(exit_code or 0),

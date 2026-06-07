@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import inspect
 import shlex
 import tempfile
 from pathlib import Path, PurePosixPath
@@ -82,7 +83,13 @@ if _OPENREWARD_IMPORT_ERROR is None:
             *,
             timeout_seconds: Optional[int] = None,
         ) -> SandboxCommandResult:
-            result = await self.env.sandbox.run(command)
+            run_params = inspect.signature(self.env.sandbox.run).parameters
+            if timeout_seconds is not None and "timeout" in run_params:
+                result = await self.env.sandbox.run(command, timeout=timeout_seconds)
+            elif timeout_seconds is not None and "timeout_seconds" in run_params:
+                result = await self.env.sandbox.run(command, timeout_seconds=timeout_seconds)
+            else:
+                result = await self.env.sandbox.run(command)
             return coerce_command_result(result)
 
 
@@ -128,6 +135,8 @@ if _OPENREWARD_IMPORT_ERROR is None:
                 block_network=_resolve_block_network(sandbox_cfg),
                 env=sandbox_cfg.get("env"),
                 bucket_config=SandboxBucketConfig(**bucket_config) if bucket_config else None,
+                sidecars=sandbox_cfg.get("sidecars"),
+                host_aliases=sandbox_cfg.get("host_aliases"),
             )
             self.sandbox = AsyncOpenReward(api_key=api_key).sandbox(self.sandbox_settings)
 
