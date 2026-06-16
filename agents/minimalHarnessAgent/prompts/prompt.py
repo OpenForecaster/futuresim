@@ -165,6 +165,7 @@ def _build_cadence_section(
     next_active_date=None,
     imminent_qids: Optional[list] = None,
     handholding_version: str = "v1",
+    article_files_available: bool = True,
 ) -> str:
     """Matches BasicAgent._build_cadence_section template.
     HARNESS-SPECIFIC: The system prompt is written once for persistent modes,
@@ -202,6 +203,11 @@ def _build_cadence_section(
     else:
         imminent_reminder = ""
     trailing = f"{imminent_reminder}\n" if imminent_reminder else ""
+    article_access = (
+        "Articles are available via the search tool and in the articles/ directory. "
+        if article_files_available
+        else "News evidence is available via the search tool. "
+    )
     return (
         "## UPDATE CADENCE\n"
         f"You have the chance to update your predictions every {timegap_days} day(s). "
@@ -209,7 +215,7 @@ def _build_cadence_section(
         # every session and your memory (along with past predictions) is the
         # only information retained between sessions."
         "Your workspace files (memory/, scripts, notes) persist across days — use them to track reasoning and lessons learned. "
-        "Articles are available via the search tool and in the articles/ directory. "
+        f"{article_access}"
         f"Current date: {_iso(current_date)}. {next_text}\n"
         f"{trailing}\n"
     )
@@ -217,8 +223,16 @@ def _build_cadence_section(
 
 # ── Matches BasicAgent._search_results_description ──
 
-def _search_results_description(max_search_results: int = 5, chunk_tokens: int = 512) -> str:
-    extra_info = "The search tool uses a hybrid approach to retrieve articles, combining both semantic similarity (through an embedding model) and keyword matching."
+def _search_results_description(
+    max_search_results: int = 5,
+    chunk_tokens: int = 512,
+    mention_embedding_model: bool = True,
+) -> str:
+    extra_info = (
+        "The search tool uses a hybrid approach to retrieve articles, combining both semantic similarity (through an embedding model) and keyword matching."
+        if mention_embedding_model
+        else "The search tool uses a hybrid approach to retrieve articles, combining semantic similarity and keyword matching."
+    )
     return (
         f"You have access to a search tool that returns up to {max_search_results} retrieved article chunks, "
         f"each roughly {chunk_tokens} tokens long. {extra_info}"
@@ -250,6 +264,10 @@ def build_system_prompt(
     last_active_date=None,
     next_active_date=None,
     handholding_version: str = "v1",
+    prompt_mode: str = "default",
+    article_files_available: bool = True,
+    predictions_files_available: bool = True,
+    tool_prefix: str = "mcp__forecast__",
 ) -> str:
     if handholding_version not in HANDHOLDING_VERSIONS:
         raise ValueError(
@@ -292,13 +310,16 @@ def build_system_prompt(
         last_active_date=last_active_date,
         next_active_date=next_active_date,
         handholding_version=handholding_version,
+        article_files_available=article_files_available,
     )
     data_notes = _get_data_notes()
 
     # Matches BasicAgent search_advice text verbatim.
-    search_results_desc = _search_results_description()
+    search_results_desc = _search_results_description(
+        mention_embedding_model=article_files_available,
+    )
     # search_advice = f"You have access to a news article database which is updated **daily**. {search_results_desc} You can also access the articles directly in the articles/ directory."
-    search_advice = f"You have access to a news article database which is updated **daily** through a search tool, that you can use to find evidence for your forecasts."
+    search_advice = "You have access to a news article database which is updated **daily** through a search tool, that you can use to find evidence for your forecasts."
     # Matches BasicAgent search_tool_line cutoff description.
     cutoff_desc = "today's date"
     if search_cutoff_days > 0:
@@ -309,6 +330,35 @@ def build_system_prompt(
     search_tool_line = (
         f"- `mcp__forecast__search_news(query, from_date?, to_date?)`: search the news corpus for evidence. "
         f"`to_date` is capped at {cutoff_desc}. {search_results_desc}\n"
+    )
+    max_search_section = ""
+    if prompt_mode == "max_search" and _iso(current_date) == _iso(start_date):
+        max_search_section = """\
+## DAY 0 MAX_SEARCH MODE
+Today is simulation day 0. Before calling `mcp__forecast__next_day`, work question by question through every active row in market.csv.
+
+For each active question:
+1. Read its title, background, resolution criteria, answer type, and any options.
+2. Make multiple `mcp__forecast__search_news` query for each question before submitting its first forecast; Use these search queries to gather relevant context about any uncertainty relevant to forecasting that question you have.
+3. Submit a calibrated forecast for that question before moving on to search for the next active question.
+
+Do not call `mcp__forecast__next_day` until this question-by-question research and first forecast submission pass is complete for all active questions. Track progress in memory/max_search_day0.md so that if context compaction occurs, you preserve this instruction, resume from the next unfinished qid, and continue the same exhaustive day-0 process.
+"""
+    articles_workspace = (
+        "- articles/ — Browsable news articles organized by date as articles/YYYY/MM/DD/articles.jsonl (one JSON article per line). New date directories appear after calling `mcp__forecast__next_day`.\n"
+        "  - Each line has fields: `title` (headline), `source` (publisher domain, e.g. \"www.reuters.com\"), `date_publish` (original publication date, YYYY-MM-DD), `url` (canonical article link), `content` (full article body text to read/grep), plus `id`, `date` (crawl date), `date_modify`.\n"
+        if article_files_available
+        else ""
+    )
+    predictions_workspace = (
+        "- predictions/ — Read-only record of your past submissions, one file per day as `predictions/YYYY-MM-DD.json`. Each file is a JSON list of `{\"question_id\": ..., \"outcomes\": {<outcome>: <prob>, ...}}` entries — the predictions you submitted that day. A new file appears after each `mcp__forecast__next_day`.\n"
+        if predictions_files_available
+        else ""
+    )
+    information_rule = (
+        "Use `mcp__forecast__search_news` and articles/ for information."
+        if article_files_available
+        else "Use `mcp__forecast__search_news` for information."
     )
 
     # ── Assemble prompt (matches BasicAgent._build_instructions order) ──
@@ -321,7 +371,7 @@ def build_system_prompt(
     ]
     intro_block = "\n\n".join(section for section in intro_sections if section)
 
-    return f"""\
+    prompt = f"""\
 {intro_block}
 
 
@@ -347,6 +397,7 @@ Column descriptions of the DataFrame (market.csv):
 
 {data_notes}
 
+{max_search_section}
 
 ## TOOLS AVAILABLE FOR YOUR USE
 {search_tool_line}\
@@ -356,8 +407,8 @@ Column descriptions of the DataFrame (market.csv):
 
 ## Workspace:
 - market.csv — Read-only snapshot of all questions (refreshed each day).
-- articles/ — Browsable news articles organized by date as articles/YYYY/MM/DD/articles.jsonl (one JSON article per line). New date directories appear after calling `mcp__forecast__next_day`.
-  - Each line has fields: `title` (headline), `source` (publisher domain, e.g. "www.reuters.com"), `date_publish` (original publication date, YYYY-MM-DD), `url` (canonical article link), `content` (full article body text to read/grep), plus `id`, `date` (crawl date), `date_modify`.
+{articles_workspace}\
+{predictions_workspace}\
 - memory/ — Your persistent notes directory. Read and write freely. Files here persist across days. Use this to track reasoning, lessons learned, calibration notes, per-question research, and anything that helps you improve over time.
 
 {HANDHOLDING_SECTION}
@@ -374,7 +425,7 @@ Column descriptions of the DataFrame (market.csv):
 
 
 ## Rules
-- No web access is available. Use `mcp__forecast__search_news` and articles/ for information.
+- No web access is available. {information_rule}
 - market.csv is read-only. DO NOT modify it.
 - You can use Bash, Read, Write, Grep, Glob, and other tools freely in your workspace.
 - Always call `mcp__forecast__next_day()` before ending your turn. You may call it after submitting forecasts, or with zero forecasts if you choose not to forecast today.
@@ -383,6 +434,9 @@ Column descriptions of the DataFrame (market.csv):
 ---
 
 Begin."""
+    if tool_prefix != "mcp__forecast__":
+        prompt = prompt.replace("mcp__forecast__", tool_prefix)
+    return prompt
 
 
 def build_warmup_prompt(

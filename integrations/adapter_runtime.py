@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 from dataclasses import asdict, dataclass, field, fields
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Mapping, Optional
+
+import pandas as pd
 
 from futuresim_agents.search_tools.hybrid import HybridSearchConfig
 from environment.matcher_cache import resolve_sim_matcher_cache_path
@@ -37,7 +40,7 @@ class FuturesimAdapterConfig:
     end_date: str = "2026-03-28"
     resolution_start: str = ""
     resolution_end: str = ""
-    lookback_days: int = 0
+    lookback_days: int = 7
     timegap_days: int = 1
     min_forecasters: int = 0
     resolved_only: bool = False
@@ -51,6 +54,8 @@ class FuturesimAdapterConfig:
     agent_id: str = "agent"
     sandbox_workspace: str = "/workspace"
     workspace_articles_subdir: str = "articles"
+    prompt_mode: str = "default"
+    handholding_version: str = "v3"
     enable_hybrid_search: bool = False
     hybrid_search: HybridSearchConfig = field(default_factory=HybridSearchConfig)
     matching: str = "exact"
@@ -73,6 +78,8 @@ class FuturesimAdapterConfig:
             value = dict(value["futuresim"])
         if "matcher_cache_path" in value:
             value["matcher_cache"] = {"path": value.pop("matcher_cache_path")}
+        if "output_dir" in value and "output_base" not in value:
+            value["output_base"] = value.pop("output_dir")
         if "search_cutoff_days" in value and "article_search_cutoff_days" not in value:
             value["article_search_cutoff_days"] = value["search_cutoff_days"]
         if "freeze_search_after_start" in value and "article_freeze_after_start" not in value:
@@ -268,6 +275,23 @@ class FuturesimAdapterRuntime:
             active_questions=self.active_questions,
         )
 
+    def write_agent_market_csv(self, path: str | Path) -> None:
+        forecast_interface = self.forecast_interface()
+        src = forecast_interface.get_market_csv_path()
+        if not src:
+            raise RuntimeError("Simulation did not produce a market.csv path.")
+        df = pd.read_csv(src, dtype={"qid": str})
+        agent_preds = forecast_interface.get_agent_predictions(self.agent_id) or {}
+        df["my_prediction"] = df["qid"].apply(
+            lambda qid: json.dumps(agent_preds[qid]["outcomes"])
+            if qid in agent_preds and agent_preds[qid].get("outcomes") else None
+        )
+        df["my_prediction_date"] = df["qid"].apply(
+            lambda qid: str(agent_preds[qid]["date"])
+            if qid in agent_preds and agent_preds[qid].get("date") else None
+        )
+        df.to_csv(path, index=False)
+
     def submit_predictions(self, predictions: list[dict[str, Any]]) -> list[dict[str, Any]]:
         accepted: list[dict[str, Any]] = []
         forecast_interface = self.forecast_interface()
@@ -285,9 +309,10 @@ class FuturesimAdapterRuntime:
     def finish_day(self) -> AdapterDayResult:
         self.env.end_day(self.active_questions)
         self.active_questions = []
+        reward = self.reward()
         self.env.advance_day()
         if self.env.is_complete():
-            return AdapterDayResult(done=True, reward=self.reward())
+            return AdapterDayResult(done=True, reward=reward)
         return AdapterDayResult(done=False, reward=0.0)
 
     def prepare_article_uploads(self) -> tuple[list[SandboxUpload], Optional[date]]:
