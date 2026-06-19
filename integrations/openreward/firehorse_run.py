@@ -53,6 +53,7 @@ def main(argv: list[str] | None = None) -> int:
 try:
     from openreward.api.sandboxes import secrets as _secrets
     from openreward.api.sandboxes import client as _client
+    from openreward.api.environments import client as _env_client
 
     _original = _secrets.build_secrets_header
 
@@ -67,6 +68,7 @@ try:
 
     _secrets.build_secrets_header = _build_secrets_header
     _client.build_secrets_header = _build_secrets_header
+    _env_client.build_secrets_header = _build_secrets_header
 except Exception:
     pass
 """
