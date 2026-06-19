@@ -98,7 +98,7 @@ if _OPENREWARD_IMPORT_ERROR is None:
             super().__init__(task_spec, secrets)
             self.secrets = dict(secrets or {})
             self.task_spec = dict(task_spec or {})
-            if self.secrets.get("OPENROUTER_API_KEY") and not os.environ.get("OPENROUTER_API_KEY"):
+            if self.secrets.get("OPENROUTER_API_KEY"):
                 os.environ["OPENROUTER_API_KEY"] = self.secrets["OPENROUTER_API_KEY"]
             self.config = FuturesimAdapterConfig.from_mapping(self.task_spec)
             api_key = (

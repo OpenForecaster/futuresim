@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 import sys
 import tempfile
@@ -83,6 +84,20 @@ except Exception:
             else shim_dir
         )
         exec(compile(shim_code, str(shim), "exec"), {})
+
+        original_create_subprocess_exec = asyncio.create_subprocess_exec
+
+        async def create_subprocess_exec(*cmd, **kwargs):
+            if len(cmd) >= 2 and str(cmd[1]) == "exec":
+                cmd = (
+                    *cmd[:-1],
+                    "-c",
+                    f"mcp_servers.openreward.env.PYTHONPATH={json.dumps(os.environ['PYTHONPATH'])}",
+                    cmd[-1],
+                )
+            return await original_create_subprocess_exec(*cmd, **kwargs)
+
+        asyncio.create_subprocess_exec = create_subprocess_exec
 
         from firehorse.config import RunConfig
         from firehorse.orchestrator import run_evaluation
