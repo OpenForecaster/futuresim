@@ -255,10 +255,14 @@ For Codex, authenticate the local Codex CLI in the normal way:
 codex login
 ```
 
-Run a hosted OpenReward environment with the native Codex harness:
+Run a hosted OpenReward environment with the native Codex harness. Use the
+Futuresim wrapper instead of bare `firehorse` when answer matching uses
+OpenRouter; it passes `OPENROUTER_API_KEY` as a domain-scoped OpenReward secret.
 
 ```bash
-firehorse \
+export OPENROUTER_API_KEY=...
+
+futuresim-openreward-firehorse \
   --env <namespace>/futuresim \
   --agent codex \
   --model openai/gpt-5.5 \

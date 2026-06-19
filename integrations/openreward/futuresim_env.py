@@ -6,7 +6,7 @@ import json
 import os
 import shlex
 import tempfile
-from datetime import date, timedelta
+from datetime import date
 from pathlib import Path, PurePosixPath
 from typing import Any, Optional
 
@@ -98,6 +98,8 @@ if _OPENREWARD_IMPORT_ERROR is None:
             super().__init__(task_spec, secrets)
             self.secrets = dict(secrets or {})
             self.task_spec = dict(task_spec or {})
+            if self.secrets.get("OPENROUTER_API_KEY") and not os.environ.get("OPENROUTER_API_KEY"):
+                os.environ["OPENROUTER_API_KEY"] = self.secrets["OPENROUTER_API_KEY"]
             self.config = FuturesimAdapterConfig.from_mapping(self.task_spec)
             api_key = (
                 self.secrets.get("OPENREWARD_API_KEY")
@@ -270,30 +272,6 @@ if _OPENREWARD_IMPORT_ERROR is None:
                 f"Day advanced to {new_date.isoformat()}.",
                 self._new_articles_message(previous_date, new_date),
             ]
-            if self.config.handholding_version in {"v2", "v3"}:
-                parts.append(
-                    f"{len(self.runtime.active_questions)} question(s) are still active. Re-read market.csv, "
-                    "scan today's news, and resubmit any forecast where new evidence "
-                    "has shifted your view before calling next_day again. A forecast "
-                    "is never \"done\" while its question is still active."
-                )
-            if self.config.handholding_version == "v3":
-                tomorrow = new_date + timedelta(days=1)
-                imminent = [
-                    str(q.qid) for q in self.runtime.active_questions
-                    if getattr(q, "resolution_date", None) == tomorrow
-                ]
-                if imminent:
-                    parts.append(
-                        f"**IMPORTANT**: {len(imminent)} question(s) resolve tomorrow ({tomorrow.isoformat()}): "
-                        f"{imminent}. Make sure your prediction on each is up-to-date before calling next_day — "
-                        "stale forecasts might hurt your performance."
-                    )
-                else:
-                    parts.append(
-                        f"No questions resolve tomorrow ({tomorrow.isoformat()}), but still scan for ones "
-                        "resolving soon (check the resolution_date column in market.csv)."
-                    )
             feedback = self._feedback_recap(
                 f"{previous_date.isoformat()} -> {new_date.isoformat()}",
                 active_count=len(self.runtime.active_questions),

@@ -68,6 +68,7 @@ hosted-hybrid = [
 
 [project.scripts]
 futuresim-openreward-server = "integrations.openreward.server:main"
+futuresim-openreward-firehorse = "integrations.openreward.firehorse_run:main"
 
 [build-system]
 requires = ["hatchling>=1.27"]

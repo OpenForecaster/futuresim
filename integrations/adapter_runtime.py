@@ -55,14 +55,14 @@ class FuturesimAdapterConfig:
     sandbox_workspace: str = "/workspace"
     workspace_articles_subdir: str = "articles"
     prompt_mode: str = "default"
-    handholding_version: str = "v3"
+    handholding_version: str = "v1"
     enable_hybrid_search: bool = False
     hybrid_search: HybridSearchConfig = field(default_factory=HybridSearchConfig)
-    matching: str = "exact"
+    matching: str = "openrouter"
     matcher: str = "deepseek/deepseek-v3.2"
     matcher_cache: dict[str, Any] | None = None
     matcher_max_concurrency: int = 300
-    matcher_api_key_env: str = ""
+    matcher_api_key_env: str = "OPENROUTER_API_KEY"
     matcher_openrouter_provider_order: list[str] | None = None
     matcher_openrouter_provider: dict[str, Any] | None = None
     matcher_vllm_max_model_len: int = 32768
