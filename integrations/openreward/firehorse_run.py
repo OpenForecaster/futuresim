@@ -112,6 +112,21 @@ def _run_with_firehorse_shim(target: Any, *, resume_mode: bool = False) -> int:
         shim_code = (
             """
 try:
+    import aiohttp as _aiohttp
+
+    _original_client_session_init = _aiohttp.ClientSession.__init__
+
+    def _client_session_init(self, *args, **kwargs):
+        kwargs.setdefault("trust_env", True)
+        return _original_client_session_init(self, *args, **kwargs)
+
+    if not getattr(_aiohttp.ClientSession.__init__, "_futuresim_trust_env_default", False):
+        _client_session_init._futuresim_trust_env_default = True
+        _aiohttp.ClientSession.__init__ = _client_session_init
+except Exception:
+    pass
+
+try:
     from openreward.api.sandboxes import secrets as _secrets
     from openreward.api.sandboxes import client as _client
     from openreward.api.environments import client as _env_client
