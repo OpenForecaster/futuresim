@@ -458,7 +458,7 @@ if _OPENREWARD_IMPORT_ERROR is None:
 
         def _daily_update_instruction(self, current_date: date) -> str:
             active_count = len(self.runtime.active_questions)
-            return (
+            instruction = (
                 f"{active_count} question(s) are still active. Re-read market.csv for "
                 f"{current_date.isoformat()}, including your existing my_prediction / "
                 "my_prediction_date values; search the newly available news; update "
@@ -466,6 +466,13 @@ if _OPENREWARD_IMPORT_ERROR is None:
                 "then call next_day. Do not immediately call next_day again until you "
                 "have reviewed whether forecasts should change."
             )
+            if self.runtime.env.end_date == current_date:
+                instruction += (
+                    " This is the final forecasting day, not the end of the task: "
+                    "submit forecasts for this date and call next_day once more so "
+                    "the environment can score the final day and mark the simulation complete."
+                )
+            return instruction
 
         def _feedback_recap(
             self,
