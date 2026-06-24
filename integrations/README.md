@@ -251,7 +251,7 @@ Minimal task spec:
     "output_base": "/path/writable/by/the/ors-server",
     "agent_id": "minimalHarness_gpt-55_001",
     "matching": "openrouter",
-    "matcher": "deepseek/deepseek-v4-flash",
+    "matcher": "deepseek/deepseek-v3.2",
     "matcher_api_key_env": "OPENROUTER_API_KEY"
   },
   "openreward_sandbox": {
@@ -493,7 +493,7 @@ The recommended evaluation setup uses answer matching with OpenRouter:
 {
   "futuresim": {
     "matching": "openrouter",
-    "matcher": "deepseek/deepseek-v4-flash",
+    "matcher": "deepseek/deepseek-v3.2",
     "matcher_api_key_env": "OPENROUTER_API_KEY"
   }
 }

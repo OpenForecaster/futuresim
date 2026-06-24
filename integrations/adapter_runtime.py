@@ -59,7 +59,7 @@ class FuturesimAdapterConfig:
     enable_hybrid_search: bool = False
     hybrid_search: HybridSearchConfig = field(default_factory=HybridSearchConfig)
     matching: str = "openrouter"
-    matcher: str = "deepseek/deepseek-v4-flash"
+    matcher: str = "deepseek/deepseek-v3.2"
     matcher_cache: dict[str, Any] | None = None
     matcher_max_concurrency: int = 300
     matcher_api_key_env: str = "OPENROUTER_API_KEY"

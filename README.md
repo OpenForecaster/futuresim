@@ -217,7 +217,7 @@ python scripts/run_forecast_sim.py \
   --provider openrouter \
   --openrouter_model deepseek/deepseek-v4-flash \
   --matching openrouter \
-  --matcher deepseek/deepseek-v4-flash \
+  --matcher deepseek/deepseek-v3.2 \
   --scaffold allQ \
   --dataset openforesight \
   --dataset_path nikhilchandak/OpenForesight \
@@ -238,7 +238,7 @@ python scripts/run_forecast_sim.py \
   --provider openrouter \
   --openrouter_model deepseek/deepseek-v4-flash \
   --matching openrouter \
-  --matcher deepseek/deepseek-v4-flash \
+  --matcher deepseek/deepseek-v3.2 \
   --scaffold allQ \
   --dataset openforesight \
   --dataset_path nikhilchandak/OpenForesight \

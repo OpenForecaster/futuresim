@@ -23,7 +23,7 @@ search_backend: "openreward"
 articles_base: "${FSIM_ARTICLES_BASE}"
 
 matching: "openrouter"
-matcher: "deepseek/deepseek-v4-flash"
+matcher: "deepseek/deepseek-v3.2"
 
 defaults:
   provider: "none"
