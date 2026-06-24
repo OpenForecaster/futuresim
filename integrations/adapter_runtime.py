@@ -61,7 +61,7 @@ class FuturesimAdapterConfig:
     matching: str = "openrouter"
     matcher: str = "deepseek/deepseek-v3.2"
     matcher_cache: dict[str, Any] | None = None
-    matcher_max_concurrency: int = 300
+    matcher_max_concurrency: int = 32
     matcher_api_key_env: str = "OPENROUTER_API_KEY"
     matcher_openrouter_provider_order: list[str] | None = None
     matcher_openrouter_provider: dict[str, Any] | None = None

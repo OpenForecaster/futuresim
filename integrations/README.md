@@ -252,6 +252,7 @@ Minimal task spec:
     "agent_id": "minimalHarness_gpt-55_001",
     "matching": "openrouter",
     "matcher": "deepseek/deepseek-v3.2",
+    "matcher_max_concurrency": 32,
     "matcher_api_key_env": "OPENROUTER_API_KEY"
   },
   "openreward_sandbox": {
@@ -279,6 +280,9 @@ Paths and fields new users usually need to change:
   OpenReward runs write `matcher_cache.json` under `output_base`; when
   `FSIM_SIM_MATCHER_CACHE_DIR` is set and `split: test`, they use the shared
   `<matcher_slug>.json` cache there.
+- `matcher_max_concurrency`: maximum concurrent answer-matcher requests.
+  OpenReward defaults to `32`; raise it only if your model provider and network
+  path can handle higher fan-out reliably.
 - `articles_base`: optional dated article tree. Leave it unset when using the
   OpenReward search tool without filesystem article mounting.
 - `openreward_sandbox.environment`: the OpenReward environment used to create

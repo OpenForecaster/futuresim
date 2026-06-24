@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shlex
@@ -148,6 +149,7 @@ if _OPENREWARD_IMPORT_ERROR is None:
             self.search_tool = OpenRewardSdkSearchTool.from_env(api_key=api_key)
             self._sandbox_started = False
             self._day_started = False
+            self._next_day_lock = asyncio.Lock()
             self.mount_articles = as_bool(sandbox_cfg.get("mount_articles", False))
             self._feedback_seen_qids: set[str] = set()
             self._today_predictions: list[dict[str, Any]] = []
@@ -280,49 +282,78 @@ if _OPENREWARD_IMPORT_ERROR is None:
         @tool
         async def next_day(self, params: NextDayParams) -> ToolOutput:
             """Advance the simulation after the agent is done with the current day."""
-            previous_date = self.runtime.env.current_date
-            previous_active_count = len(self.runtime.active_questions)
-            result = self.runtime.finish_day()
-            await self._upload_prediction_snapshot(previous_date)
-            self._day_started = False
-            if result.done:
+            async with self._next_day_lock:
+                if not self._day_started:
+                    if self.runtime.env.is_complete():
+                        return ToolOutput(
+                            blocks=[TextBlock(text="Simulation is already complete. No more days to process.")],
+                            metadata={"reward": self.runtime.reward()},
+                            reward=self.runtime.reward(),
+                            finished=True,
+                        )
+                    await self._start_day()
+                    return self._text(
+                        f"Day is already advanced to {self.runtime.env.current_date.isoformat()}. "
+                        "Continue forecasting from the current market.csv before calling next_day again."
+                    )
+
+                if not self.runtime.active_questions:
+                    self._day_started = False
+                    await self._start_day()
+                    return self._text(
+                        f"Day is already advanced to {self.runtime.env.current_date.isoformat()}. "
+                        "Continue forecasting from the current market.csv before calling next_day again."
+                    )
+
+                if not self._today_predictions:
+                    return self._text(
+                        f"No forecasts have been submitted for {self.runtime.env.current_date.isoformat()}. "
+                        "Submit at least one forecast before calling next_day."
+                    )
+
+                previous_date = self.runtime.env.current_date
+                previous_active_count = len(self.runtime.active_questions)
+                result = await asyncio.to_thread(self.runtime.finish_day)
+                self._day_started = False
+                await self._upload_prediction_snapshot(previous_date)
+                if result.done:
+                    feedback = self._feedback_recap(
+                        previous_date.isoformat(),
+                        active_count=0,
+                        mutate=True,
+                        metrics=result.metrics,
+                    )
+                    text = "\n\n".join(
+                        part for part in (
+                            feedback,
+                            "Simulation is complete. No more days to process.",
+                            f"Final reward: {result.reward:.6f}",
+                        )
+                        if part
+                    )
+                    return ToolOutput(
+                        blocks=[TextBlock(text=text)],
+                        metadata={"reward": result.reward},
+                        reward=result.reward,
+                        finished=True,
+                    )
+
+                await self._start_day()
+                new_date = self.runtime.env.current_date
+                parts = [
+                    f"Day advanced to {new_date.isoformat()}.",
+                    self._new_articles_message(previous_date, new_date),
+                    self._daily_update_instruction(new_date),
+                ]
                 feedback = self._feedback_recap(
-                    previous_date.isoformat(),
-                    active_count=0,
+                    f"{previous_date.isoformat()} -> {new_date.isoformat()}",
+                    active_count=previous_active_count,
                     mutate=True,
                     metrics=result.metrics,
                 )
-                text = "\n\n".join(
-                    part for part in (
-                        feedback,
-                        "Simulation is complete. No more days to process.",
-                        f"Final reward: {result.reward:.6f}",
-                    )
-                    if part
-                )
-                return ToolOutput(
-                    blocks=[TextBlock(text=text)],
-                    metadata={"reward": result.reward},
-                    reward=result.reward,
-                    finished=True,
-                )
-
-            await self._start_day()
-            new_date = self.runtime.env.current_date
-            parts = [
-                f"Day advanced to {new_date.isoformat()}.",
-                self._new_articles_message(previous_date, new_date),
-                self._daily_update_instruction(new_date),
-            ]
-            feedback = self._feedback_recap(
-                f"{previous_date.isoformat()} -> {new_date.isoformat()}",
-                active_count=previous_active_count,
-                mutate=True,
-                metrics=result.metrics,
-            )
-            if feedback:
-                parts.append("\n" + feedback)
-            return self._text("\n".join(parts))
+                if feedback:
+                    parts.append("\n" + feedback)
+                return self._text("\n".join(parts))
 
         async def _start_day(self) -> None:
             if self._day_started:
