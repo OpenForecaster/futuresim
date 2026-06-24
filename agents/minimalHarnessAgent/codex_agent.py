@@ -15,11 +15,37 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from futuresim_agents.minimalHarnessAgent.agent import MinimalHarnessAgent
+from futuresim_agents.minimalHarnessAgent.sandbox_common import real_path
 from futuresim_agents.minimalHarnessAgent.static_search import safe_qid
 from futuresim_agents.utils.output_logger import AgentOutputLogger
 from environment.interfaces import PredictionSubmission
 
 logger = logging.getLogger(__name__)
+
+
+_CODEX_MCP_NAME_REPLACEMENTS = (
+    (
+        "`mcp__forecast__search_news(query, from_date?, to_date?)`",
+        "`search_news(query, from_date?, to_date?)` on the Forecast MCP server",
+    ),
+    (
+        "`mcp__forecast__submit_forecasts(question_id, outcomes)`",
+        "`submit_forecasts(question_id, outcomes)` on the Forecast MCP server",
+    ),
+    (
+        "`mcp__forecast__next_day()`",
+        "`next_day()` on the Forecast MCP server",
+    ),
+    ("`mcp__forecast__search_news`", "`search_news` on the Forecast MCP server"),
+    ("`mcp__forecast__submit_forecasts`", "`submit_forecasts` on the Forecast MCP server"),
+    ("`mcp__forecast__next_day`", "`next_day` on the Forecast MCP server"),
+)
+
+
+def _use_codex_mcp_tool_names(prompt: str) -> str:
+    for old, new in _CODEX_MCP_NAME_REPLACEMENTS:
+        prompt = prompt.replace(old, new)
+    return prompt
 
 
 def _read_json_file(path: Path, default: Any = None) -> Any:
@@ -227,6 +253,19 @@ class CodexAgent(MinimalHarnessAgent):
         if os.path.exists(bin_real):
             install = os.path.dirname(os.path.dirname(bin_real))
             args.extend(["--ro-bind", install, install])
+        codex_home = os.environ.get("CODEX_HOME")
+        if not codex_home:
+            return
+        home_real = os.path.realpath(os.path.expanduser("~"))
+        codex_home_real = real_path(os.path.expanduser(codex_home))
+        try:
+            rel = os.path.relpath(codex_home_real, home_real)
+        except ValueError:
+            rel = os.pardir
+        if rel and rel != os.curdir and not rel.startswith(os.pardir + os.sep) and rel != os.pardir:
+            return
+        if os.path.exists(codex_home_real):
+            args.extend(["--bind", codex_home_real, codex_home_real])
 
     def _sandbox_harness_home_subdirs(self) -> tuple[str, ...]:
         codex_home = os.environ.get("CODEX_HOME")
@@ -563,6 +602,7 @@ class CodexAgent(MinimalHarnessAgent):
                 stale_agents_md.unlink()
         else:
             system_prompt = (self._internal_dir / "system_prompt.md").read_text()
+            system_prompt = _use_codex_mcp_tool_names(system_prompt)
             (self.workspace / "AGENTS.md").write_text(system_prompt)
 
         # When sandboxed, pass the realpath of the codex binary as argv[0] so
@@ -632,6 +672,7 @@ class CodexAgent(MinimalHarnessAgent):
                     "and your existing predictions; update predictions where "
                     "new info changes your view, then call next_day."
                 )
+            resume_prompt = _use_codex_mcp_tool_names(resume_prompt)
             cmd = [
                 codex_bin, "exec", "resume", self._codex_thread_id,
                 *common_args, resume_prompt,
@@ -647,6 +688,7 @@ class CodexAgent(MinimalHarnessAgent):
                     "Begin forecasting. Read market.csv to see your questions, "
                     "then research and submit predictions."
                 )
+            initial_prompt = _use_codex_mcp_tool_names(initial_prompt)
             cmd = [
                 codex_bin, "exec",
                 *common_args,

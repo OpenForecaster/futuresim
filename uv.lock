@@ -614,7 +614,7 @@ http = [
 
 [[package]]
 name = "futuresim"
-version = "0.1.2"
+version = "0.1.3"
 source = { editable = "." }
 dependencies = [
     { name = "datasets", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
@@ -685,9 +685,9 @@ requires-dist = [
     { name = "lancedb", marker = "extra == 'hosted-hybrid'", specifier = "==0.29.1" },
     { name = "lancedb", marker = "extra == 'hybrid-search'", specifier = "==0.29.1" },
     { name = "mcp", specifier = "==1.25.0" },
-    { name = "openreward", marker = "extra == 'hosted'", specifier = ">=0.1.126" },
-    { name = "openreward", marker = "extra == 'hosted-hybrid'", specifier = ">=0.1.126" },
-    { name = "openreward", marker = "extra == 'openreward'", specifier = ">=0.1.126" },
+    { name = "openreward", marker = "extra == 'hosted'", specifier = ">=0.1.133" },
+    { name = "openreward", marker = "extra == 'hosted-hybrid'", specifier = ">=0.1.133" },
+    { name = "openreward", marker = "extra == 'openreward'", specifier = ">=0.1.133" },
     { name = "pandas", specifier = "==2.3.3" },
     { name = "prime-sandboxes", marker = "extra == 'hosted'", specifier = ">=0.2.26" },
     { name = "prime-sandboxes", marker = "extra == 'hosted-hybrid'", specifier = ">=0.2.26" },
@@ -1633,7 +1633,7 @@ wheels = [
 
 [[package]]
 name = "openreward"
-version = "0.1.126"
+version = "0.1.134"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
@@ -1642,6 +1642,9 @@ dependencies = [
     { name = "fastapi", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "google-genai", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "openai", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
+    { name = "opentelemetry-api", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
+    { name = "opentelemetry-exporter-otlp-proto-grpc", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
+    { name = "opentelemetry-sdk", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "pydantic", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "pyyaml", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "sse-starlette", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
@@ -1650,9 +1653,9 @@ dependencies = [
     { name = "typing-extensions", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "uvicorn", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/47/ab/5f87589b0e8e4fdd586cd4610db7e31fce6cda48e726d3cb477149e8d7e7/openreward-0.1.126.tar.gz", hash = "sha256:11c9e983f2ca16f7ea57bc3036dc14bfafb48d4345a6936581bb6a700a814083", size = 139466 }
+sdist = { url = "https://files.pythonhosted.org/packages/55/a0/69d842a18efff7a43086d160cf4521c23e68275983766a1ecf12243b5dcb/openreward-0.1.134.tar.gz", hash = "sha256:fe285d44cbd537c4bbb5c1754005f1bb58493f8f0aa1c07bcaa26c7995c32845", size = 169564 }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/22/c8/30c1fdd11684c8f34a1c78a5be8e00c52ea472a82aeeb4430f4190deeadd/openreward-0.1.126-py3-none-any.whl", hash = "sha256:3a01148f566839033845da8a9d966e501bf755ead18e59ae41ef63f8fbf869a2", size = 135826 },
+    { url = "https://files.pythonhosted.org/packages/19/ad/e0f5364888e353eab3f1fd1a617d90b15e931b247286fbf341ef87646f1e/openreward-0.1.134-py3-none-any.whl", hash = "sha256:488e7cd8c4ce16ddeee1356bbfe9e599ea88312c6a5ce4eee443271d21f410f1", size = 159497 },
 ]
 
 [[package]]

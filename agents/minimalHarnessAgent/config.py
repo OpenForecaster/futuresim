@@ -12,10 +12,13 @@ class MinimalHarnessConfig:
     model: str = "claude-opus-4-6"
     timeout_seconds: int = 7200
     max_budget_usd: Optional[float] = None  # None = unconstrained
+    search_backend: str = ""  # ""/lancedb/openreward
     search_db: str = ""
     embedding_model: str = ""
     search_type: str = "hybrid"
     search_cutoff_days: int = 0
+    openreward_search_url: str = ""
+    openreward_fetch_url: str = ""
     freeze_search_after_start: bool = False
     # Warmup-only per-question current/search date:
     # effective_date = question.resolution_date - resolution_guard days.
@@ -77,6 +80,8 @@ class MinimalHarnessConfig:
     #   filesystem reads/writes. The MCP server owns an ActiveMemory instance,
     #   loads the prior day's memory at startup, and persists today's mem.csv +
     #   meta.yaml on next_day before the harness exits.
+    # - "max_search": normal default mode plus a day-0 instruction to research
+    #   every active question with targeted search before submitting.
     prompt_mode: str = "default"
     # Handholding "stay-on-it" guidance level (orthogonal to prompt_mode):
     # - "v1": minimal (state before commit dadfc2f)

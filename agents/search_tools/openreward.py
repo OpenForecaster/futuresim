@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-import json
+import asyncio
 import os
 import re
-import urllib.error
 import urllib.parse
-import urllib.request
-from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any, Optional
 
@@ -17,6 +14,8 @@ from .base import Article, BaseSearchTool, SearchResult
 
 DEFAULT_SEARCH_URL = "https://search.openreward.ai/search"
 DEFAULT_FETCH_URL = "https://search.openreward.ai/fetch"
+DEFAULT_DOMAIN_INFO_URL = "https://search.openreward.ai/policy/domain_info"
+SEARCH_RESULT_TEXT_CHARS = 5000
 
 
 def _parse_date(value: Any) -> Optional[date]:
@@ -56,55 +55,78 @@ def _hostname(url: str) -> str:
     return urllib.parse.urlparse(url).netloc
 
 
-def _is_loopback_url(url: str) -> bool:
-    host = urllib.parse.urlparse(url).hostname or ""
-    return host in {"127.0.0.1", "::1", "localhost"}
+def _run_async(coro: Any) -> Any:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+    coro.close()
+    raise RuntimeError("Use OpenRewardSdkSearchTool inside async code.")
 
 
-@dataclass
-class OpenRewardSearchConfig:
-    search_url: str = DEFAULT_SEARCH_URL
-    fetch_url: str = DEFAULT_FETCH_URL
-    api_key: str = ""
-    api_key_env: str = "OPENREWARD_API_KEY"
-    max_snippet_chars: int = 2000
-    timeout_seconds: float = 90.0
+class OpenRewardSdkSearchTool:
+    """Async SDK-backed search that keeps Futuresim's combined search_news shape."""
 
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        search_url: str = "",
+        fetch_url: str = "",
+        max_snippet_chars: int = SEARCH_RESULT_TEXT_CHARS,
+    ):
+        from openreward.web_service import WebServiceConfig
 
-class OpenRewardSearchTool(BaseSearchTool):
-    """Use OpenReward's beta CC-NEWS search while preserving Futuresim's tool shape."""
-
-    def __init__(self, config: OpenRewardSearchConfig | None = None):
-        self.config = config or OpenRewardSearchConfig()
-        self._api_key = (
-            self.config.api_key
-            or os.environ.get(self.config.api_key_env, "")
-            or os.environ.get("OR_TOKEN", "")
+        self._api_key = api_key
+        self.max_snippet_chars = max_snippet_chars
+        truthy = {"1", "true", "yes", "on"}
+        self.config = WebServiceConfig(
+            api_key=api_key,
+            search_url=search_url
+            or os.environ.get("OPENREWARD_WEB_SEARCH_URL")
+            or os.environ.get("FSIM_OPENREWARD_SEARCH_URL")
+            or DEFAULT_SEARCH_URL,
+            fetch_url=fetch_url
+            or os.environ.get("OPENREWARD_WEB_FETCH_URL")
+            or os.environ.get("FSIM_OPENREWARD_FETCH_URL")
+            or DEFAULT_FETCH_URL,
+            domain_info_url=os.environ.get(
+                "OPENREWARD_WEB_DOMAIN_INFO_URL",
+                DEFAULT_DOMAIN_INFO_URL,
+            ),
+            skip_preflight=os.environ.get("OPENREWARD_WEB_SKIP_PREFLIGHT", "").lower() in truthy,
+            preapproved_hosts=frozenset(
+                host.strip().lower()
+                for host in os.environ.get("OPENREWARD_WEB_PREAPPROVED_HOSTS", "").split(",")
+                if host.strip()
+            ),
+            default_as_of=os.environ.get("OPENREWARD_WEB_AS_OF", "").strip() or None,
         )
 
     @classmethod
-    def from_env(cls, api_key: str = "") -> "OpenRewardSearchTool":
-        return cls(OpenRewardSearchConfig(
-            search_url=os.environ.get("FSIM_OPENREWARD_SEARCH_URL", os.environ.get("OR_API", DEFAULT_SEARCH_URL)),
-            fetch_url=os.environ.get("FSIM_OPENREWARD_FETCH_URL", os.environ.get("OR_FETCH_API", DEFAULT_FETCH_URL)),
-            api_key=api_key,
-            api_key_env=os.environ.get("FSIM_OPENREWARD_API_KEY_ENV", "OPENREWARD_API_KEY"),
-            max_snippet_chars=int(os.environ.get("FSIM_OPENREWARD_SNIPPET_CHARS", "2000")),
-            timeout_seconds=float(os.environ.get("FSIM_OPENREWARD_TIMEOUT_SECONDS", "90")),
-        ))
+    def from_env(
+        cls,
+        api_key: str = "",
+        search_url: str = "",
+        fetch_url: str = "",
+    ) -> "OpenRewardSdkSearchTool":
+        key = api_key or os.environ.get("OPENREWARD_API_KEY", "") or os.environ.get("OR_TOKEN", "")
+        return cls(api_key=key, search_url=search_url, fetch_url=fetch_url)
 
     @property
     def is_available(self) -> bool:
         return bool(self._api_key)
 
-    def search(
+    async def search(
         self,
         query: str,
-        max_results: int = 10,
+        max_results: int = 5,
         max_date: Optional[date] = None,
         search_type: str = "hybrid",
         min_date: Optional[date] = None,
     ) -> list[SearchResult]:
+        from openreward.tools import Backfetch, Backsearch
+
         if not self.is_available:
             return []
         if search_type != "hybrid":
@@ -112,53 +134,65 @@ class OpenRewardSearchTool(BaseSearchTool):
 
         as_of = max_date or date.today()
         k = min(max(1, int(max_results or 5)), 5)
-        response = self._post(self.config.search_url, {
-            "query": query,
-            "as_of": as_of.isoformat(),
-            "k": k,
-            "mode": "hybrid",
-        })
-        hits = response.get("hits") or response.get("results") or []
+        result = await Backsearch(config=self.config, k=k).run(query, as_of=as_of.isoformat())
+        if not result.ok:
+            raise RuntimeError(result.output)
+
+        hits = (result.data or {}).get("hits") or []
         if not isinstance(hits, list):
             return []
 
+        fetcher = Backfetch(config=self.config)
         results: list[SearchResult] = []
         for hit in hits:
             if not isinstance(hit, dict):
                 continue
-            results.append(self._hit_to_result(hit, as_of))
+            results.append(await self._hit_to_result(hit, fetcher, as_of))
             if len(results) >= k:
                 break
         return results
 
-    def get_article(self, article_id: str) -> Optional[Article]:
-        if not self.is_available:
+    async def get_article(self, article_id: str) -> Optional[Article]:
+        if not self.is_available or not article_id.startswith(("http://", "https://")):
             return None
-        url = article_id if article_id.startswith(("http://", "https://")) else ""
-        if not url:
+
+        from openreward.tools import Backfetch
+
+        page = await Backfetch(config=self.config).run(
+            article_id,
+            "Extract the full article text.",
+            as_of=date.today().isoformat(),
+        )
+        if not page.ok:
             return None
-        data = self._fetch(url, date.today())
-        text = _clean_text(data.get("text") or data.get("content") or "")
+
+        data = page.data or {}
+        content = _clean_text(data.get("content") or page.output)
         return Article(
-            id=url,
+            id=article_id,
             title=str(data.get("title") or ""),
-            source=str(data.get("source") or data.get("host") or _hostname(url)),
+            source=str(data.get("source") or data.get("host") or _hostname(article_id)),
             date=_parse_date(data.get("crawl_date") or data.get("date")),
-            content=text,
-            url=url,
+            content=content,
+            url=article_id,
             description=str(data.get("description") or ""),
         )
 
-    def _hit_to_result(self, hit: dict[str, Any], as_of: date) -> SearchResult:
+    async def _hit_to_result(self, hit: dict[str, Any], fetcher: Any, as_of: date) -> SearchResult:
         url = str(hit.get("url") or hit.get("link") or "")
         fetched: dict[str, Any] = {}
         text = _clean_text(hit.get("snippet") or hit.get("text") or hit.get("content"))
-        if url and len(text) < 400:
-            try:
-                fetched = self._fetch(url, as_of)
-                text = _clean_text(fetched.get("text") or fetched.get("content") or text)
-            except RuntimeError:
-                pass
+        if url:
+            page = await fetcher.run(
+                url,
+                "Extract the article text relevant to this forecasting question.",
+                as_of=as_of.isoformat(),
+            )
+            if page.ok:
+                fetched = page.data or {}
+                text = _clean_text(fetched.get("content") or page.output or text)
+            elif not text:
+                text = page.output
 
         title = str(fetched.get("title") or hit.get("title") or "")
         crawl_date = _parse_date(
@@ -183,41 +217,52 @@ class OpenRewardSearchTool(BaseSearchTool):
             source=source,
             date=crawl_date,
             date_publish=publish_date,
-            snippet=_clip_text(text, self.config.max_snippet_chars),
+            snippet=_clip_text(text, self.max_snippet_chars),
             score=float(hit.get("score") or hit.get("_score") or 0.0),
             url=url,
         )
 
-    def _fetch(self, url: str, as_of: date) -> dict[str, Any]:
-        return self._post(self.config.fetch_url, {
-            "url": url,
-            "as_of": as_of.isoformat(),
-            "summarize": False,
-        })
 
-    def _post(self, url: str, payload: dict[str, Any]) -> dict[str, Any]:
-        body = json.dumps(payload).encode()
-        headers = {
-            "Content-Type": "application/json",
-            "x-api-key": self._api_key,
-            "Authorization": f"Bearer {self._api_key}",
-        }
-        request = urllib.request.Request(url, data=body, headers=headers, method="POST")
-        try:
-            if _is_loopback_url(url):
-                opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-                response_cm = opener.open(request, timeout=self.config.timeout_seconds)
-            else:
-                response_cm = urllib.request.urlopen(request, timeout=self.config.timeout_seconds)
-            with response_cm as response:
-                data = json.loads(response.read())
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode(errors="replace")
-            raise RuntimeError(f"OpenReward search HTTP {exc.code}: {detail}") from exc
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-            raise RuntimeError(f"OpenReward search request failed: {exc}") from exc
-        if isinstance(data, dict) and data.get("detail"):
-            raise RuntimeError(f"OpenReward search error: {data['detail']}")
-        if not isinstance(data, dict):
-            raise RuntimeError("OpenReward search returned non-object JSON")
-        return data
+class OpenRewardSearchTool(BaseSearchTool):
+    """Synchronous BaseSearchTool wrapper around OpenReward's SDK web tools."""
+
+    def __init__(self, *, api_key: str = "", search_url: str = "", fetch_url: str = ""):
+        self._async_tool = OpenRewardSdkSearchTool.from_env(
+            api_key=api_key,
+            search_url=search_url,
+            fetch_url=fetch_url,
+        )
+
+    @classmethod
+    def from_env(
+        cls,
+        api_key: str = "",
+        search_url: str = "",
+        fetch_url: str = "",
+    ) -> "OpenRewardSearchTool":
+        return cls(api_key=api_key, search_url=search_url, fetch_url=fetch_url)
+
+    @property
+    def is_available(self) -> bool:
+        return self._async_tool.is_available
+
+    def search(
+        self,
+        query: str,
+        max_results: int = 10,
+        max_date: Optional[date] = None,
+        search_type: str = "hybrid",
+        min_date: Optional[date] = None,
+    ) -> list[SearchResult]:
+        return _run_async(
+            self._async_tool.search(
+                query,
+                max_results=max_results,
+                max_date=max_date,
+                search_type=search_type,
+                min_date=min_date,
+            )
+        )
+
+    def get_article(self, article_id: str) -> Optional[Article]:
+        return _run_async(self._async_tool.get_article(article_id))

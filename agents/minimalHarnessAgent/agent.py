@@ -142,10 +142,10 @@ class MinimalHarnessAgent(StateHelpers, McpHelpers, SandboxHelpers, BaseAgent):
                     "gets a fresh Codex session."
                 )
             self._feedback_handler = None
-        elif self.config.prompt_mode not in ("default", "no_memory"):
+        elif self.config.prompt_mode not in ("default", "no_memory", "max_search"):
             raise ValueError(
                 f"Unknown prompt_mode={self.config.prompt_mode!r}; "
-                "expected 'default', 'no_memory', 'active_memory', 'warmup', 'static_search', or 'active_memory2'."
+                "expected 'default', 'no_memory', 'max_search', 'active_memory', 'warmup', 'static_search', or 'active_memory2'."
             )
         else:
             self._feedback_handler = None
@@ -465,7 +465,7 @@ class MinimalHarnessAgent(StateHelpers, McpHelpers, SandboxHelpers, BaseAgent):
             )
         else:
             _build_system_prompt = build_system_prompt
-        prompt = _build_system_prompt(
+        prompt_kwargs = dict(
             workspace=str(self.workspace),
             current_date=self._current_date or self.config.start_date,
             start_date=self.config.start_date or self._current_date,
@@ -483,6 +483,9 @@ class MinimalHarnessAgent(StateHelpers, McpHelpers, SandboxHelpers, BaseAgent):
             next_active_date=next_active_date,
             handholding_version=self.config.handholding_version,
         )
+        if self.config.prompt_mode != "no_memory":
+            prompt_kwargs["prompt_mode"] = self.config.prompt_mode
+        prompt = _build_system_prompt(**prompt_kwargs)
         prompt_path = self._internal_dir / "system_prompt.md"
         with open(prompt_path, "w") as f:
             f.write(prompt)

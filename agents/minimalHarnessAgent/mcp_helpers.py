@@ -65,8 +65,11 @@ class McpHelpers:
             "--workspace", str(self.workspace),
             "--internal-dir", str(self._internal_dir),
             "--repo-root", repo_root,
+            "--search-backend", self.config.search_backend or "",
             "--search-db", self.config.search_db or "",
             "--embedding-model", self.config.embedding_model or "",
+            "--openreward-search-url", self.config.openreward_search_url or "",
+            "--openreward-fetch-url", self.config.openreward_fetch_url or "",
             "--handholding-version", self.config.handholding_version,
             "--agent-id", self.agent_id,
         ]

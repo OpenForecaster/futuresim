@@ -160,24 +160,51 @@ def _ensure_search() -> None:
     if args.repo_root and args.repo_root not in sys.path:
         sys.path.insert(0, args.repo_root)
 
-    search_db = args.search_db or os.environ.get("FSIM_SEARCH_DB", _state.get("search_db", ""))
-    embedding_model_path = args.embedding_model or os.environ.get("FSIM_EMBEDDING_MODEL", _state.get("embedding_model", ""))
-
-    if not search_db or not os.path.exists(search_db):
-        return
-
     from futuresim_agents.search_tools.handler import SearchHandler
-    from futuresim_agents.search_tools.lancedb.store import LanceDBSearchTool
 
-    embedding_model = None
-    if args.embedding_server_url:
-        embedding_model = _VLLMEmbeddingClient(args.embedding_server_url, embedding_model_path)
+    search_backend = (
+        args.search_backend
+        or os.environ.get("FSIM_SEARCH_BACKEND", "")
+        or _state.get("search_backend", "")
+    ).strip().lower()
 
-    _search_tool = LanceDBSearchTool(
-        search_db,
-        embedding_model=embedding_model,
-        model_path=embedding_model_path if not embedding_model else None,
-    )
+    search_db = args.search_db or os.environ.get("FSIM_SEARCH_DB", _state.get("search_db", ""))
+    if not search_backend:
+        search_backend = "lancedb" if search_db else ""
+
+    if search_backend == "openreward":
+        from futuresim_agents.search_tools.openreward import OpenRewardSearchTool
+
+        _search_tool = OpenRewardSearchTool.from_env(
+            search_url=(
+                args.openreward_search_url
+                or os.environ.get("FSIM_OPENREWARD_SEARCH_URL", "")
+                or _state.get("openreward_search_url", "")
+                or "https://search.openreward.ai/search"
+            ),
+            fetch_url=(
+                args.openreward_fetch_url
+                or os.environ.get("FSIM_OPENREWARD_FETCH_URL", "")
+                or _state.get("openreward_fetch_url", "")
+                or "https://search.openreward.ai/fetch"
+            ),
+        )
+    else:
+        embedding_model_path = args.embedding_model or os.environ.get("FSIM_EMBEDDING_MODEL", _state.get("embedding_model", ""))
+        if not search_db or not os.path.exists(search_db):
+            return
+
+        from futuresim_agents.search_tools.lancedb.store import LanceDBSearchTool
+
+        embedding_model = None
+        if args.embedding_server_url:
+            embedding_model = _VLLMEmbeddingClient(args.embedding_server_url, embedding_model_path)
+
+        _search_tool = LanceDBSearchTool(
+            search_db,
+            embedding_model=embedding_model,
+            model_path=embedding_model_path if not embedding_model else None,
+        )
     _search_handler = SearchHandler(
         search_tool=_search_tool,
         search_cutoff_days=_search_cutoff_days,
@@ -361,7 +388,6 @@ def _build_feedback_recap(previous_label: str, active_count: int, *, mutate: boo
 @mcp.tool()
 def search_news(
     query: str,
-    max_results: int = 5,
     from_date: Optional[str] = None,
     to_date: Optional[str] = None,
 ) -> str:
@@ -369,7 +395,6 @@ def search_news(
 
     Args:
         query: Search query string.
-        max_results: Maximum number of article chunks to return (default 5, max 10).
         from_date: Optional earliest article date (YYYY-MM-DD).
         to_date: Optional latest article date (YYYY-MM-DD). Capped to sim date.
     """
@@ -379,12 +404,11 @@ def search_news(
     if _search_handler is None or not _search_handler.is_available:
         return "Search is not available for this simulation run."
 
-    max_results = min(max_results, 10)
     search_type = _state.get("search_type", "hybrid")
     with contextlib.redirect_stdout(sys.stderr):
         result_text, err = _search_handler.search(
             query,
-            max_results=max_results,
+            max_results=5,
             search_type=search_type,
             min_date=_parse_date(from_date),
             max_date=_parse_date(to_date),
@@ -692,8 +716,11 @@ def main():
     parser.add_argument("--workspace", default="", help="Path to CLI workspace")
     parser.add_argument("--internal-dir", default="", help="Path to internal dir (state.json, signals/)")
     parser.add_argument("--repo-root", default="", help="Repo root to add to sys.path")
+    parser.add_argument("--search-backend", default="", help="Search backend: lancedb or openreward")
     parser.add_argument("--search-db", default="", help="Path to LanceDB search index")
     parser.add_argument("--embedding-model", default="", help="Path to embedding model")
+    parser.add_argument("--openreward-search-url", default="", help="OpenReward search endpoint override")
+    parser.add_argument("--openreward-fetch-url", default="", help="OpenReward fetch endpoint override")
     parser.add_argument("--embedding-server-url", default="",
                         help="URL of an already-running vLLM embedding server (e.g. http://127.0.0.1:8001)")
     parser.add_argument(

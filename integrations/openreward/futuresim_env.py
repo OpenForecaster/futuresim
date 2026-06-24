@@ -6,15 +6,16 @@ import json
 import os
 import shlex
 import tempfile
-from datetime import date
+import base64
+from datetime import date, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
 from futuresim_agents.minimalHarnessAgent.prompts.prompt import build_system_prompt
-from futuresim_agents.search_tools.handler import SearchHandler
-from futuresim_agents.search_tools.openreward import OpenRewardSearchTool
+from futuresim_agents.search_tools.handler import format_search_results
+from futuresim_agents.search_tools.openreward import OpenRewardSdkSearchTool
 from integrations.adapter_runtime import (
     FuturesimAdapterConfig,
     FuturesimAdapterRuntime,
@@ -85,7 +86,28 @@ def _default_task_rows() -> list[dict[str, Any]]:
     ]
 
 
+def _patch_openreward_codex_toolset_workdir() -> None:
+    """Accept Codex's shell workdir field in OpenReward's codex toolset."""
+    try:
+        from openreward.toolsets import codex as codex_toolset
+    except Exception:
+        return
+
+    class _CodexBashParams(BaseModel, extra="ignore"):
+        command: str
+        description: str = ""
+        timeout: Optional[float] = 30.0
+        workdir: Optional[str] = None
+
+    # openreward==0.1.134 documents "Always set workdir" but rejects that
+    # field. Codex also emits local shell metadata like max_output_tokens. Those
+    # values are local-Codex concerns rather than guaranteed sandbox controls,
+    # so the safest compatibility behavior is to accept and ignore extras.
+    codex_toolset.BashParams = _CodexBashParams
+
+
 if _OPENREWARD_IMPORT_ERROR is None:
+    _patch_openreward_codex_toolset_workdir()
 
     class FuturesimOpenRewardEnv(Environment):
         """Futuresim as an OpenReward harness-toolset environment."""
@@ -123,18 +145,11 @@ if _OPENREWARD_IMPORT_ERROR is None:
                 )
 
             self.runtime = FuturesimAdapterRuntime(self.config)
-            self.search_handler = SearchHandler(
-                OpenRewardSearchTool.from_env(api_key=api_key),
-                search_cutoff_days=self.config.article_search_cutoff_days,
-            )
+            self.search_tool = OpenRewardSdkSearchTool.from_env(api_key=api_key)
             self._sandbox_started = False
             self._day_started = False
             self.mount_articles = as_bool(sandbox_cfg.get("mount_articles", False))
             self._feedback_seen_qids: set[str] = set()
-            self._feedback_brier_sum = 0.0
-            self._feedback_tw_sum = 0.0
-            self._feedback_accuracy_count = 0
-            self._feedback_resolved_count = 0
             self._today_predictions: list[dict[str, Any]] = []
 
             bucket_config = sandbox_cfg.get("bucket_config")
@@ -195,20 +210,44 @@ if _OPENREWARD_IMPORT_ERROR is None:
         @tool
         async def search_news(self, params: SearchNewsParams) -> ToolOutput:
             """Search date-gated news evidence for the current simulation day."""
-            self.search_handler.set_date(self.runtime.env.current_date)
             try:
                 min_date = parse_iso_date(params.from_date)
-                max_date = parse_iso_date(params.to_date)
+                requested_max_date = parse_iso_date(params.to_date)
             except ValueError as exc:
                 return self._text(f"Search error: {exc}")
-            text, err = self.search_handler.search(
-                params.query,
-                max_results=5,
-                search_type="hybrid",
-                min_date=min_date,
-                max_date=max_date,
-            )
-            return ToolOutput(blocks=[TextBlock(text=f"Search error: {err}" if err else text)])
+
+            allowed_max_date = self.runtime.env.current_date - timedelta(days=self.config.article_search_cutoff_days)
+            max_date = allowed_max_date
+            info_lines = []
+            if requested_max_date is not None:
+                max_date = min(requested_max_date, allowed_max_date)
+                if requested_max_date > allowed_max_date:
+                    info_lines.append(
+                        f"Note: maximum allowed search date is {allowed_max_date.isoformat()}. "
+                        f"Your requested to-date {requested_max_date.isoformat()} was capped."
+                    )
+            if min_date and min_date > max_date:
+                info_lines.append(
+                    f"Note: your requested from-date {min_date.isoformat()} is after the effective to-date "
+                    f"{max_date.isoformat()}, so from-date was ignored."
+                )
+                min_date = None
+
+            try:
+                results = await self.search_tool.search(
+                    params.query,
+                    max_results=5,
+                    search_type="hybrid",
+                    min_date=min_date,
+                    max_date=max_date,
+                )
+            except Exception as exc:
+                return self._text(f"Search error: {exc}")
+
+            text = format_search_results(results) if results else "No articles found matching your query."
+            if info_lines:
+                text = "\n".join(info_lines + ["", text])
+            return self._text(text)
 
         @tool
         async def submit_forecasts(self, params: SubmitForecastsParams) -> ToolOutput:
@@ -242,6 +281,7 @@ if _OPENREWARD_IMPORT_ERROR is None:
         async def next_day(self, params: NextDayParams) -> ToolOutput:
             """Advance the simulation after the agent is done with the current day."""
             previous_date = self.runtime.env.current_date
+            previous_active_count = len(self.runtime.active_questions)
             result = self.runtime.finish_day()
             await self._upload_prediction_snapshot(previous_date)
             self._day_started = False
@@ -250,6 +290,7 @@ if _OPENREWARD_IMPORT_ERROR is None:
                     previous_date.isoformat(),
                     active_count=0,
                     mutate=True,
+                    metrics=result.metrics,
                 )
                 text = "\n\n".join(
                     part for part in (
@@ -271,11 +312,13 @@ if _OPENREWARD_IMPORT_ERROR is None:
             parts = [
                 f"Day advanced to {new_date.isoformat()}.",
                 self._new_articles_message(previous_date, new_date),
+                self._daily_update_instruction(new_date),
             ]
             feedback = self._feedback_recap(
                 f"{previous_date.isoformat()} -> {new_date.isoformat()}",
-                active_count=len(self.runtime.active_questions),
+                active_count=previous_active_count,
                 mutate=True,
+                metrics=result.metrics,
             )
             if feedback:
                 parts.append("\n" + feedback)
@@ -286,7 +329,6 @@ if _OPENREWARD_IMPORT_ERROR is None:
                 return
             self.runtime.begin_day()
             self._today_predictions = []
-            self.search_handler.set_date(self.runtime.env.current_date)
             await self._upload_market_csv()
             if self.mount_articles:
                 await self._upload_articles()
@@ -330,8 +372,28 @@ if _OPENREWARD_IMPORT_ERROR is None:
             uploads, marker = self.runtime.prepare_article_uploads()
             for upload in uploads:
                 await self.sandbox.run(f"mkdir -p {shlex.quote(str(PurePosixPath(upload.remote_path).parent))}")
-                await self.sandbox.upload(upload.local_path, upload.remote_path)
+                await self._upload_large_file(upload.local_path, upload.remote_path)
             self.runtime.commit_article_uploads(marker)
+
+        async def _upload_large_file(
+            self,
+            local_path: Path,
+            remote_path: str,
+            *,
+            chunk_size: int = 256 * 1024,
+        ) -> None:
+            quoted_remote = shlex.quote(remote_path)
+            await self.sandbox.run(f": > {quoted_remote}")
+            with open(local_path, "rb") as f:
+                while True:
+                    chunk = f.read(chunk_size)
+                    if not chunk:
+                        break
+                    encoded = base64.b64encode(chunk).decode("ascii")
+                    await self.sandbox.run(
+                        f"printf %s {shlex.quote(encoded)} | base64 -d >> {quoted_remote}",
+                        max_bytes=2_000,
+                    )
 
         def _new_articles_message(self, previous_date: Optional[date], current_date: Optional[date]) -> str:
             if previous_date is None or current_date is None:
@@ -363,79 +425,90 @@ if _OPENREWARD_IMPORT_ERROR is None:
                 "or via the search_news tool."
             )
 
-        def _feedback_recap(self, previous_label: str, active_count: int, *, mutate: bool) -> str:
+        def _daily_update_instruction(self, current_date: date) -> str:
+            active_count = len(self.runtime.active_questions)
+            return (
+                f"{active_count} question(s) are still active. Re-read market.csv for "
+                f"{current_date.isoformat()}, including your existing my_prediction / "
+                "my_prediction_date values; search the newly available news; update "
+                "any still-active forecast where new information changes your view; "
+                "then call next_day. Do not immediately call next_day again until you "
+                "have reviewed whether forecasts should change."
+            )
+
+        def _feedback_recap(
+            self,
+            previous_label: str,
+            active_count: int,
+            *,
+            mutate: bool,
+            metrics: Optional[list[dict[str, Any]]] = None,
+        ) -> str:
             events = [
                 ev for ev in self.runtime.env.resolution_events
                 if ev.get("qid") not in self._feedback_seen_qids
             ]
-            if not events:
+            metric_row = next(
+                (row for row in (metrics or []) if row.get("agent_id") == self.runtime.agent_id),
+                None,
+            )
+            if not events and not metric_row:
                 return ""
 
-            lines = [f"## RESULTS SINCE YOUR LAST SESSION ({previous_label})", ""]
-            brier_sum = self._feedback_brier_sum
-            tw_sum = self._feedback_tw_sum
-            accuracy_count = self._feedback_accuracy_count
-            resolved_count = self._feedback_resolved_count
+            lines = []
 
-            for ev in events:
-                qid = str(ev.get("qid", ev.get("question_id", "?")))
-                title = ev.get("title", "")
-                truth = ev.get("ground_truth", "?")
-                stats = (ev.get("agents") or {}).get(self.runtime.agent_id)
-                if stats:
-                    brier = float(stats.get("brier") or 0.0)
-                    tw_peer = float(stats.get("tw_peer") or 0.0)
-                    best_outcome = stats.get("best_outcome", "?")
-                    best_prob = float(stats.get("best_prob") or 0.0)
-                    pred = (
-                        self.runtime.env.resolved_agent_predictions
-                        .get(qid, {})
-                        .get(self.runtime.agent_id, {})
-                        .get("outcomes", {})
-                    )
-                    if pred:
-                        dist = "{" + ", ".join(
-                            f"{outcome}: {float(prob):.2f}"
-                            for outcome, prob in sorted(pred.items(), key=lambda item: -float(item[1]))
-                        ) + "}"
+            if events:
+                lines = [f"## RESULTS SINCE YOUR LAST SESSION ({previous_label})", ""]
+                for ev in events:
+                    qid = str(ev.get("qid", ev.get("question_id", "?")))
+                    title = ev.get("title", "")
+                    truth = ev.get("ground_truth", "?")
+                    stats = (ev.get("agents") or {}).get(self.runtime.agent_id)
+                    if stats:
+                        brier = float(stats.get("brier") or 0.0)
+                        tw_peer = float(stats.get("tw_peer") or 0.0)
+                        best_outcome = stats.get("best_outcome", "?")
+                        best_prob = float(stats.get("best_prob") or 0.0)
+                        pred = (
+                            self.runtime.env.resolved_agent_predictions
+                            .get(qid, {})
+                            .get(self.runtime.agent_id, {})
+                            .get("outcomes", {})
+                        )
+                        if pred:
+                            dist = "{" + ", ".join(
+                                f"{outcome}: {float(prob):.2f}"
+                                for outcome, prob in sorted(pred.items(), key=lambda item: -float(item[1]))
+                            ) + "}"
+                        else:
+                            dist = f"{{{best_outcome}: {best_prob:.2f}}}"
+                        lines.append(
+                            f"- \"{title}\"\n"
+                            f"  Your prediction distribution: {dist} | Truth: {truth}\n"
+                            f"  Brier: {brier:+.2f} | TW-Score: {tw_peer:+.2f}"
+                        )
                     else:
-                        dist = f"{{{best_outcome}: {best_prob:.2f}}}"
-                    brier_sum += brier
-                    tw_sum += tw_peer
-                    resolved_count += 1
-                    if stats.get("is_accurate"):
-                        accuracy_count += 1
-                    lines.append(
-                        f"- \"{title}\"\n"
-                        f"  Your prediction distribution: {dist} | Truth: {truth}\n"
-                        f"  Brier: {brier:+.2f} | TW-Score: {tw_peer:+.2f}"
-                    )
-                else:
-                    resolved_count += 1
-                    lines.append(f"- \"{title}\" → {truth}")
-                if mutate:
-                    self._feedback_seen_qids.add(qid)
+                        lines.append(f"- \"{title}\" → {truth}")
+                    if mutate:
+                        self._feedback_seen_qids.add(qid)
 
-            denom = resolved_count + active_count
-            if denom > 0:
-                avg_brier = brier_sum / denom
-                accuracy = accuracy_count / denom * 100
-                total_preds = self.runtime.env.agent_questions.get(self.runtime.agent_id, 0)
+            if metric_row:
+                total_preds = int(metric_row.get("total_predictions") or 0)
+                total_questions = int(metric_row.get("total_questions") or 0)
+                display_resolved = max(0, total_questions - active_count)
                 lines.extend([
                     "",
                     "## YOUR CUMULATIVE PERFORMANCE TILL TODAY",
-                    f"- Total Predictions: {total_preds} ({resolved_count} resolved, {active_count} active)",
-                    f"- accuracy: {accuracy:.1f}% | brier skill score: {avg_brier:.3f} | time weighted score: {tw_sum:.2f}",
+                    f"- Total Predictions: {total_preds} ({display_resolved} resolved, {active_count} active)",
+                    (
+                        f"- accuracy: {float(metric_row.get('accuracy') or 0.0):.1f}% | "
+                        f"brier skill score: {float(metric_row.get('avg_brier') or 0.0):.3f} | "
+                        f"time weighted score: {float(metric_row.get('tw_peer_score') or 0.0):.2f}"
+                    ),
                     "  accuracy = fraction of ALL questions (resolved + active) where your top outcome matched the truth (0 credit for questions you did not predict or that have not resolved); "
                     "brier skill score = mean brier skill score across ALL questions (0 for questions you did not predict or that have not resolved); "
                     "time weighted score = sum of brier skill scores across all resolved questions, across all days you held your respective predictions",
                 ])
-
-            if mutate:
-                self._feedback_brier_sum = brier_sum
-                self._feedback_tw_sum = tw_sum
-                self._feedback_accuracy_count = accuracy_count
-                self._feedback_resolved_count = resolved_count
             return "\n".join(lines)
 
         def _text(self, text: str) -> ToolOutput:

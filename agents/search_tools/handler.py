@@ -7,6 +7,21 @@ from typing import List, Optional, Tuple
 from futuresim_agents.search_tools.base import BaseSearchTool, SearchResult
 
 
+def format_search_results(results: List[SearchResult]) -> str:
+    lines = [f"Found {len(results)} relevant article chunk(s):\n"]
+    for i, r in enumerate(results, 1):
+        lines.append(f"═══ [{i}] ═══════════════════════════════════════")
+        lines.append(f"HEADLINE: {r.title}")
+        lines.append(f"SOURCE: {r.source}")
+        lines.append(f"PUBLISHED: {r.date_publish or 'Unknown'} | DOWNLOADED: {r.date}")
+        if r.url:
+            lines.append(f"URL: {r.url}")
+        lines.append("")
+        lines.append(r.snippet)
+        lines.append("")
+    return "\n".join(lines)
+
+
 class SearchHandler:
     """Wraps search tool for BasicAgent."""
 
@@ -113,16 +128,4 @@ class SearchHandler:
             return "", f"Search error: {e}"
 
     def _format_results(self, results: List[SearchResult]) -> str:
-        lines = [f"Found {len(results)} relevant article chunk(s):\n"]
-        for i, r in enumerate(results, 1):
-            # Format header with headline and metadata
-            lines.append(f"═══ [{i}] ═══════════════════════════════════════")
-            lines.append(f"HEADLINE: {r.title}")
-            lines.append(f"SOURCE: {r.source}")
-            lines.append(f"PUBLISHED: {r.date_publish or 'Unknown'} | DOWNLOADED: {r.date}")
-            if r.url:
-                lines.append(f"URL: {r.url}")
-            lines.append("")
-            lines.append(r.snippet)  # Full chunk content; chunk size comes from the search backend config.
-            lines.append("")
-        return "\n".join(lines)
+        return format_search_results(results)

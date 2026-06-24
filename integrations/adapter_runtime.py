@@ -59,7 +59,7 @@ class FuturesimAdapterConfig:
     enable_hybrid_search: bool = False
     hybrid_search: HybridSearchConfig = field(default_factory=HybridSearchConfig)
     matching: str = "openrouter"
-    matcher: str = "deepseek/deepseek-v3.2"
+    matcher: str = "deepseek/deepseek-v4-flash"
     matcher_cache: dict[str, Any] | None = None
     matcher_max_concurrency: int = 300
     matcher_api_key_env: str = "OPENROUTER_API_KEY"
@@ -130,6 +130,7 @@ class SandboxCommandResult:
 class AdapterDayResult:
     done: bool
     reward: float = 0.0
+    metrics: list[dict[str, Any]] = field(default_factory=list)
 
 
 def build_simulation_environment(
@@ -309,11 +310,12 @@ class FuturesimAdapterRuntime:
     def finish_day(self) -> AdapterDayResult:
         self.env.end_day(self.active_questions)
         self.active_questions = []
+        metrics = self.env.metrics()
         reward = self.reward()
         self.env.advance_day()
         if self.env.is_complete():
-            return AdapterDayResult(done=True, reward=reward)
-        return AdapterDayResult(done=False, reward=0.0)
+            return AdapterDayResult(done=True, reward=reward, metrics=metrics)
+        return AdapterDayResult(done=False, reward=0.0, metrics=metrics)
 
     def prepare_article_uploads(self) -> tuple[list[SandboxUpload], Optional[date]]:
         corpus = self.env.article_corpus
@@ -365,6 +367,13 @@ class FuturesimAdapterRuntime:
         return 0.0
 
     def close(self) -> None:
+        matcher = getattr(self.env, "matcher", None)
+        persist_cache = getattr(matcher, "persist_cache", None)
+        if callable(persist_cache):
+            try:
+                persist_cache()
+            except Exception:
+                pass
         try:
             self.env.logger.close()
         except Exception:

@@ -2,13 +2,16 @@
 
 Futuresim can run as a hosted evaluation environment on:
 
-- Prime Intellect Verifiers
 - OpenReward / ORS
+- Prime Intellect Verifiers
 
+The OpenReward integration exposes Futuresim through OpenReward/Firehorse
+sessions. For the `codex` and `claude-code` agents,
+Firehorse launches the user's local Codex or Claude Code CLI on the driver
+machine, then connects that CLI to the OpenReward environment through the
+OpenReward harness toolset. The CLI does not run inside the OpenReward sandbox.
 The Verifiers integration targets strict MinimalHarness-compatible CLI
-reproduction through MCP. The OpenReward integration uses OpenReward-native
-harness toolsets plus Futuresim task tools; it does not launch Codex or Claude
-Code CLIs inside the sandbox.
+reproduction through MCP.
 
 Useful links:
 
@@ -18,6 +21,11 @@ Useful links:
 - Article corpus: [shash42/forecast-news](https://huggingface.co/datasets/shash42/forecast-news)
 - LanceDB hybrid index: [shash42/forecast-news-embeddings](https://huggingface.co/datasets/shash42/forecast-news-embeddings)
 - Embedding model: [Qwen/Qwen3-Embedding-8B](https://huggingface.co/Qwen/Qwen3-Embedding-8B)
+- OpenReward docs: [docs.openreward.ai](https://docs.openreward.ai/)
+- Firehorse quickstart: [OpenReward harness quickstart](https://docs.openreward.ai/harnesses/quickstart)
+- Harness toolsets: [OpenReward harness toolsets](https://docs.openreward.ai/harnesses/harness-toolsets)
+- Prime Verifiers: [Verifiers overview](https://docs.primeintellect.ai/verifiers/overview)
+- Prime Sandboxes: [sandbox overview](https://docs.primeintellect.ai/sandboxes/overview)
 
 ## What You Need
 
@@ -27,6 +35,13 @@ For any run, provide:
   [nikhilchandak/OpenForesight](https://huggingface.co/datasets/nikhilchandak/OpenForesight)
   with split `aljazeera2026Q1`.
 - Your own model/API credentials. Futuresim does not include maintainer keys.
+
+For OpenReward runs, provide:
+
+- `OPENREWARD_API_KEY` for sessions, sandbox creation, and hosted search.
+- Firehorse on the driver machine.
+- Local Codex or Claude Code auth only when using the `codex` or `claude-code`
+  Firehorse agents. API-key agents such as `react` use provider keys directly.
 
 For Verifiers or local MinimalHarness-style runs, provide an article corpus
 directory if you want filesystem news access. It must use:
@@ -58,16 +73,360 @@ on your setup, GPU or embedding-server access. For faithful MinimalHarness
 paper reproduction, use hybrid LanceDB search and answer matching. The
 OpenReward-native path instead uses OpenReward hosted hybrid search by default.
 
-## Current Hosted Limitation
+## OpenReward / ORS
+
+The OpenReward integration has three moving parts:
+
+1. An OpenReward ORS environment server running `FuturesimOpenRewardEnv`.
+2. A Firehorse driver process on the user's machine.
+3. An agent. For `codex`/`claude-code`, Firehorse launches the local CLI and
+   authenticates with the user's existing CLI credentials. For API-key agents
+   such as `react`, Firehorse talks directly to the model provider.
+
+The model sees an OpenReward MCP server named `openreward`. That server exposes
+OpenReward's harness-toolset tools, including sandbox filesystem/shell tools,
+plus Futuresim task tools:
+
+- `market.csv` in the sandbox workspace for current questions and prior
+  predictions.
+- `search_news(query, from_date?, to_date?)`, backed by OpenReward hosted
+  search/fetch through the OpenReward SDK.
+- `submit_forecasts(question_id, outcomes)` for one forecast update.
+- `next_day()` to score the current simulation day and advance the environment.
+
+The sandbox should run with network disabled. Model calls happen outside the
+sandbox through the user's local CLI/provider auth, and search happens through
+the environment's OpenReward SDK client, not arbitrary sandbox networking.
+
+```bash
+pip install --no-compile -e ".[openreward]" firehorse-cli
+```
+
+`--no-compile` is optional, but it avoids slow bytecode writes on shared
+filesystems.
+
+Required credentials depend on the run:
+
+```bash
+# Always required for OpenReward sessions and sandbox creation.
+export OPENREWARD_API_KEY=...
+
+# Required when Futuresim answer matching uses OpenRouter.
+export OPENROUTER_API_KEY=...
+
+# Required only for API-key agents/models, not for Codex ChatGPT-login runs.
+export OPENAI_API_KEY=...
+export ANTHROPIC_API_KEY=...
+```
+
+For Codex ChatGPT-login runs, install and authenticate the local Codex CLI in
+the normal way:
+
+```bash
+codex login
+```
+
+For Claude Code runs, install and authenticate the local Claude Code CLI in the
+normal way. The integration needs those local CLIs only because that is the
+default access path for Codex/Claude Code agents; API-key agents can run without
+local Codex/Claude Code.
+
+Run a hosted OpenReward environment with Firehorse. Use
+`futuresim-openreward-firehorse` instead of bare `firehorse` when Futuresim
+answer matching uses OpenRouter; the wrapper passes `OPENROUTER_API_KEY` as a
+domain-scoped OpenReward secret. The closest reproduction of Futuresim results
+uses a CLI agent such as `codex` or `claude-code`, launched with the user's
+local CLI auth.
+
+Choose the Firehorse harness with `--agent`:
+
+- `react` or `resum`: API-direct agents. They need a provider API key such as
+  `OPENROUTER_API_KEY`, but no local Codex or Claude Code CLI.
+- `codex`: launches the local Codex CLI and connects it to OpenReward tools.
+- `claude-code`: launches the local Claude Code CLI and connects it to
+  OpenReward tools.
+
+Closest reproduction with Codex CLI:
+
+```bash
+futuresim-openreward-firehorse \
+  --env <namespace>/futuresim \
+  --agent codex \
+  --model openai/gpt-5.5 \
+  --effort xhigh \
+  --split test \
+  --max-tasks 1
+```
+
+Claude Code CLI example:
+
+```bash
+futuresim-openreward-firehorse \
+  --env <namespace>/futuresim \
+  --agent claude-code \
+  --model anthropic/claude-sonnet-4-6 \
+  --effort high \
+  --split test \
+  --max-tasks 1
+```
+
+API-direct OpenRouter smoke example:
+
+```bash
+futuresim-openreward-firehorse \
+  --env <namespace>/futuresim \
+  --agent react \
+  --model openrouter/deepseek/deepseek-v4-flash \
+  --split test \
+  --max-tasks 1 \
+  --run-name futuresim-openreward-react \
+  --output-dir ./runs/futuresim-openreward-react
+```
+
+### Differences From Local Futuresim Runs
+
+The OpenReward-native path shares Futuresim's simulation core, scoring, answer
+matching, `market.csv` format, and output files, but differs from original
+local Futuresim runs in the following ways:
+
+- **Tool server:** local runs expose Futuresim's `forecast` MCP server, usually
+  as `mcp__forecast__...`. OpenReward exposes an `openreward` MCP server, so the
+  model sees tools as `mcp__openreward__search_news`,
+  `mcp__openreward__submit_forecasts`, and `mcp__openreward__next_day`, plus
+  the OpenReward harness-toolset filesystem/shell tools.
+- **Search backend:** original paper-style local runs used the local LanceDB
+  hybrid index and, when configured, a browsable `articles/` tree. The
+  OpenReward-native default uses OpenReward hosted search through the SDK. The
+  `search_news` tool keeps Futuresim's combined search shape for the model, but
+  under the hood it calls OpenReward `Backsearch` for up to 5 hits and
+  `Backfetch` for each hit, then formats the fetched articles as search
+  results. Each fetched article body is capped at 5,000 characters before
+  formatting.
+- **Sandbox resources:** the default OpenReward sandbox is CPU-only. Search uses
+  OpenReward hosted search and answer matching uses OpenRouter by default, so
+  no sandbox GPU is needed.
+- **Article files:** `mount_articles` defaults to `false`; the sandbox usually
+  has no grep-able `articles/` directory. Set `mount_articles: true` and provide
+  `articles_base` only when the ORS server can read the dated article tree and
+  you want filesystem article browsing.
+- **Forecast submission timing:** local MCP buffers submissions until
+  `next_day`. OpenReward records each `submit_forecasts` call immediately, but
+  the sandbox `market.csv` is refreshed only after `next_day`. Normal
+  model-visible file behavior is therefore the same; interrupted partial
+  episodes can differ.
+- **Auth and execution:** for `codex` and `claude-code`, Firehorse launches the
+  user's local CLI with their local auth. API-key agents such as `react` do not
+  need local Codex/Claude Code and instead use provider keys through Firehorse.
+
+For the closest reproduction of Futuresim results, match the
+dataset, split, date window, answer matcher, model, reasoning effort, and output
+directory layout. If the historical run used LanceDB/articles, the
+OpenReward-native hosted-search path should be treated as a different retrieval
+condition unless you add a matching hosted hybrid-search mode.
+
+### Task Spec
+
+Pass task rows through the OpenReward deployment's task source. For local ORS
+development, `FuturesimOpenRewardEnv` also accepts `FSIM_OPENREWARD_TASKS` as a
+JSON object or list of objects.
+
+Minimal task spec:
+
+```json
+{
+  "example_id": "futuresim-openreward-smoke",
+  "futuresim": {
+    "dataset": "openforesight",
+    "dataset_path": "nikhilchandak/OpenForesight",
+    "split": "aljazeera2026Q1",
+    "start_date": "2025-12-31",
+    "end_date": "2025-12-24",
+    "resolution_start": "2025-12-31",
+    "resolution_end": "2026-03-28",
+    "lookback_days": 7,
+    "timegap_days": 1,
+    "min_forecasters": 0,
+    "resolved_only": false,
+    "max_outcomes_per_question": 5,
+    "output_base": "/path/writable/by/the/ors-server",
+    "agent_id": "minimalHarness_gpt-55_001",
+    "matching": "openrouter",
+    "matcher": "deepseek/deepseek-v4-flash",
+    "matcher_api_key_env": "OPENROUTER_API_KEY"
+  },
+  "openreward_sandbox": {
+    "environment": "<namespace>/futuresim",
+    "image": "generalreasoning/python-ds:3.12-tools",
+    "machine_size": "2:8",
+    "block_network": true,
+    "mount_articles": false
+  }
+}
+```
+
+Paths and fields new users usually need to change:
+
+- `dataset_path`: use a Hugging Face dataset id such as
+  `nikhilchandak/OpenForesight`, or use `dataset: custom` with a custom dataset
+  file as shown below.
+- `split`: a split present in `dataset_path`. The public dataset includes
+  `aljazeera2026Q1`.
+- `output_base`: where Futuresim writes `actions.jsonl`, `daily_metrics.csv`,
+  `test_daily_metrics.csv`, `matcher.jsonl`, and `market.csv`. This path is on
+  the machine/container running the ORS environment server, not necessarily on
+  the Firehorse driver machine.
+- `matcher_cache`: optional answer-matcher cache controls. By default,
+  OpenReward runs write `matcher_cache.json` under `output_base`; when
+  `FSIM_SIM_MATCHER_CACHE_DIR` is set and `split: test`, they use the shared
+  `<matcher_slug>.json` cache there.
+- `articles_base`: optional dated article tree. Leave it unset when using the
+  OpenReward search tool without filesystem article mounting.
+- `openreward_sandbox.environment`: the OpenReward environment used to create
+  the agent sandbox.
+- `openreward_sandbox.image` and `machine_size`: change only if the default
+  CPU Python tools image is insufficient. The default OpenReward sandbox does
+  not need a GPU because search uses OpenReward hosted search and answer
+  matching uses OpenRouter by default.
+
+### Loading Alternate Datasets
+
+OpenReward task specs pass their dataset settings directly into Futuresim.
+`dataset_path` is resolved by the ORS environment server, not by the Firehorse
+driver and not by the agent sandbox.
+
+Use the public OpenForesight Hugging Face dataset:
+
+```json
+{
+  "futuresim": {
+    "dataset": "openforesight",
+    "dataset_path": "nikhilchandak/OpenForesight",
+    "split": "aljazeera2026Q1"
+  }
+}
+```
+
+Use a custom CSV, JSONL, JSON, or Parquet dataset:
+
+```json
+{
+  "futuresim": {
+    "dataset": "custom",
+    "dataset_path": "/path/readable/by/ors/questions.jsonl",
+    "split": "test"
+  }
+}
+```
+
+A custom directory may contain split files such as `test.jsonl`, `test.csv`,
+`test.parquet`, or `test-*.parquet`. Required columns are:
+
+| Required field | Accepted aliases |
+| --- | --- |
+| `qid` | `question_id`, `id` |
+| `title` | `question_title`, `question` |
+| `resolution_date` | `close_time`, `resolve_time` |
+| `ground_truth_answer` | `ground_truth`, `answer`, `resolution`, `resolved_to` |
+
+Optional columns are `background`, `resolution_criteria`, `answer_type`,
+`options`, `source_split`, `prompt`, and `source`. `options` should be a JSON
+list for multiple-choice questions. `ground_truth_answer` is required because
+Futuresim scores the run after questions resolve.
+
+`futuresim-openreward-firehorse --output-dir` is separate from
+`futuresim.output_base`: it controls local Firehorse artifacts such as
+`run_result.json`, `trial_*.jsonl`, and `driver.log`. For local ORS result
+comparison runs, set both to the same timestamped directory. With a hosted ORS
+server, `output_base` is remote to the hosted server unless you configure a
+mounted volume or artifact export.
+
+By default this integration does not provide a local article corpus, LanceDB
+index, embedding model, or grep-able `articles/` directory in the sandbox. Do
+not prompt the model to use those resources unless you explicitly enable
+article mounting in the task spec.
+
+### Local ORS Development
+
+Local ORS is the easiest way to reproduce Futuresim's raw output folder layout,
+because the environment server writes files directly to your local
+`output_base`.
+
+Create `task.json` from the task spec above, then:
+
+```bash
+export OPENREWARD_API_KEY=...
+export OPENROUTER_API_KEY=...
+export OPENREWARD_API_URL=https://api.openreward.ai
+export NO_PROXY=127.0.0.1,localhost,::1
+export no_proxy=127.0.0.1,localhost,::1
+export FSIM_OPENREWARD_TASKS="$(jq -c '[.]' task.json)"
+
+# Shell 1: start the local ORS server.
+# Do not set OPENREWARD_SESSION_URL in this process; sandbox creation must
+# still use the hosted OpenReward session service.
+unset OPENREWARD_SESSION_URL
+futuresim-openreward-server --host 127.0.0.1 --port 8080
+```
+
+In another shell:
+
+```bash
+export OPENREWARD_API_KEY=...
+export OPENROUTER_API_KEY=...
+export OPENREWARD_API_URL=https://api.openreward.ai
+export OPENREWARD_SESSION_URL=http://127.0.0.1:8080
+export NO_PROXY=127.0.0.1,localhost,::1
+export no_proxy=127.0.0.1,localhost,::1
+
+futuresim-openreward-firehorse \
+  --env <namespace>/futuresim \
+  --agent codex \
+  --model openai/gpt-5.5 \
+  --effort xhigh \
+  --split test \
+  --max-tasks 1 \
+  --run-name futuresim-openreward-smoke \
+  --output-dir /same/path/as/task-json-output-base
+```
+
+If your cluster requires HTTP proxies, make sure `NO_PROXY` includes
+`127.0.0.1` and `localhost`; otherwise the Firehorse MCP bridge may try to reach
+the local ORS server through the proxy.
+
+### Hosted ORS Deployment
+
+To deploy on OpenReward, create a standard ORS environment and link this
+repository. The hosted deployment must point at a commit that includes
+`integrations/openreward/*` and the SDK-backed `search_news` implementation.
+
+```bash
+export OPENREWARD_API_KEY=...
+
+orwd create futuresim \
+  --namespace <your-openreward-namespace> \
+  --description "Futuresim forecasting simulation environment"
+
+orwd link <your-openreward-namespace>/futuresim OpenForecaster/futuresim \
+  --cpu-memory 2:4 \
+  --concurrency 20 \
+  --max-scale 2
+```
+
+## Verifiers / Prime
+
+### Current Hosted Limitation
 
 Strict hosted Codex/Claude MinimalHarness reproduction is currently blocked on
-default hosted sandboxes. Futuresim needs an inner `bubblewrap` sandbox, or
+default hosted sandboxes. Futuresim needs an inner `bubblewrap` sandbox or
 equivalent custom URL/network blocklisting, so the agent shell cannot use
-arbitrary web access while still reaching its model provider. The
+arbitrary web access while still reaching its model provider.
+[Prime Sandboxes](https://docs.primeintellect.ai/sandboxes/overview) document
+disabling network access, but the hosted Verifiers path does not currently
+expose the custom URL allowlist/blocklist surface Futuresim needs. The
 OpenReward-native toolset integration avoids this by disabling sandbox network
 and making model/search calls outside the sandbox.
 
-## Build The Sandbox Image
+### Build The Sandbox Image
 
 Clone Futuresim and enter the repo:
 
@@ -92,10 +451,11 @@ from reading raw LanceDB/search artifacts or using arbitrary network access.
 The platform sandbox must also allow bubblewrap to create an inner filesystem
 and network sandbox.
 
-## Common Task Config
+### Common Task Config
 
-Use this shape for Verifiers or local MinimalHarness-style smoke tests. The
-OpenReward-native task shape is shown in the OpenReward section below.
+Use this shape for Verifiers or local MinimalHarness-style smoke tests. For the
+closest reproduction of Futuresim results, keep the same model/reasoning effort
+and add the OpenRouter matcher plus LanceDB hybrid search settings below.
 
 ```json
 {
@@ -123,15 +483,17 @@ OpenReward-native task shape is shown in the OpenReward section below.
 }
 ```
 
-This exact match, no embeddings based search config is intentionally lightweight. It is not a faithful reproduction of the original paper experiments.
+This exact match, no embeddings based search config is intentionally
+lightweight. It is not a faithful reproduction of the original paper
+experiments.
 
-The actual recommended evaluation setup is to use answer matching with OpenRouter:
+The recommended evaluation setup uses answer matching with OpenRouter:
 
 ```json
 {
   "futuresim": {
     "matching": "openrouter",
-    "matcher": "deepseek/deepseek-v3.2",
+    "matcher": "deepseek/deepseek-v4-flash",
     "matcher_api_key_env": "OPENROUTER_API_KEY"
   }
 }
@@ -139,7 +501,7 @@ The actual recommended evaluation setup is to use answer matching with OpenRoute
 
 Set `OPENROUTER_API_KEY` as a platform secret or environment variable.
 
-## Hybrid Search
+### Hybrid Search
 
 For faithful reproduction of the original paper experiments, also enable the
 LanceDB hybrid MCP search tool:
@@ -165,7 +527,7 @@ Keep `agent_filesystem_sandbox: true` for public or reproducibility runs. With a
 supported platform sandbox, the MCP server can access LanceDB while the agent
 shell cannot directly read the raw index or embedding-model files.
 
-## Verifiers / Prime
+### Install And Load
 
 From a cloned checkout, install with the Verifiers extra:
 
@@ -215,128 +577,18 @@ env = load_environment(
 )
 ```
 
-This example uses the lightweight exact match and no embeddings search quick setup. We recommend adding LLM answer matching and the LanceDB search tool for reproducing our results.
+This example uses the lightweight exact match and no embeddings search quick
+setup. Add LLM answer matching and the LanceDB search tool when reproducing the
+paper-style results.
 
 `network_access: True` is for the outer platform sandbox so the CLI can reach
 its model provider. Strict CLI-agent reproduction still requires platform
 support for the inner `bubblewrap` sandbox or equivalent custom URL/network
-blocklisting; until then this path fails fast.
-
-## OpenReward / ORS
-
-The OpenReward integration uses native harness toolsets. You do not run Codex
-or Claude Code CLIs inside the sandbox. Instead, create a session with a
-toolset such as `claude-code`; OpenReward exposes that tool surface against the
-sandbox and merges it with Futuresim's tools.
-
-```bash
-pip install -e ".[openreward]"
-```
-
-Required keys:
-
-```bash
-export OPENREWARD_API_KEY=...
-```
-
-Install Firehorse on the machine that will run the agent:
-
-```bash
-pip install firehorse-cli
-```
-
-For Codex ChatGPT-login runs, use a Firehorse build that lets the `codex`
-agent use local Codex auth for `openai/...` models. On proxy-only clusters,
-Firehorse must also forward proxy environment variables to its MCP bridge.
-
-For Codex, authenticate the local Codex CLI in the normal way:
-
-```bash
-codex login
-```
-
-Run a hosted OpenReward environment with the native Codex harness. Use the
-Futuresim wrapper instead of bare `firehorse` when answer matching uses
-OpenRouter; it passes `OPENROUTER_API_KEY` as a domain-scoped OpenReward secret.
-
-```bash
-export OPENROUTER_API_KEY=...
-
-futuresim-openreward-firehorse \
-  --env <namespace>/futuresim \
-  --agent codex \
-  --model openai/gpt-5.5 \
-  --effort xhigh \
-  --split test \
-  --max-tasks 1
-```
-
-This path uses:
-
-- `market.csv` in the sandbox workspace for current questions and prior predictions.
-- `search_news(query, from_date?, to_date?)`, backed by OpenReward's hosted hybrid search.
-- `submit_forecasts(question_id, outcomes)` for one forecast update.
-- `next_day()` to advance the simulation; zero forecasts on a day are allowed.
-- OpenReward's sandbox filesystem tools for inspecting the workspace.
-
-The sandbox should run with network disabled. Model calls happen outside the
-sandbox through the user's local CLI/provider auth, for example Codex CLI
-login. The hosted search tool is called by the environment, not by arbitrary
-sandbox networking.
-
-By default this integration does not provide a local article corpus, LanceDB
-index, embedding model, or grep-able `articles/` directory in the sandbox. Do
-not prompt the model to use those resources unless you explicitly enable
-article mounting in the task spec.
-
-OpenReward task spec example:
-
-```json
-{
-  "futuresim": {
-    "matching": "openrouter",
-    "matcher": "deepseek/deepseek-v3.2",
-    "matcher_api_key_env": "OPENROUTER_API_KEY"
-  },
-  "openreward_sandbox": {
-    "environment": "<namespace>/futuresim",
-    "image": "generalreasoning/python-ds:3.12-tools",
-    "machine_size": "2:8",
-    "block_network": true,
-    "mount_articles": false
-  }
-}
-```
-
-For local server development:
-
-```bash
-docker build -t futuresim-openreward-server:latest .
-docker run --rm -p 8080:8080 \
-  -e OPENREWARD_API_KEY="$OPENREWARD_API_KEY" \
-  -e OPENREWARD_ENVIRONMENT="<namespace>/futuresim" \
-  futuresim-openreward-server:latest
-```
-
-To deploy on OpenReward, create a standard ORS environment and link this
-repository:
-
-```bash
-export OPENREWARD_API_KEY=...
-
-orwd create futuresim \
-  --namespace <your-openreward-namespace> \
-  --description "Futuresim forecasting simulation environment"
-
-orwd link <your-openreward-namespace>/futuresim OpenForecaster/futuresim \
-  --cpu-memory 2:4 \
-  --concurrency 20 \
-  --max-scale 2
-```
-
-Do not enable Harbor mode for this integration. Futuresim ships a custom ORS
-server in `server.py`; Harbor is for repositories made of Harbor task
-directories where OpenReward generates the server.
+blocklisting. As of June 24, 2026,
+[Prime Sandboxes](https://docs.primeintellect.ai/sandboxes/overview) document
+disabling network access, but the hosted Verifiers path does not expose the
+custom URL allowlist/blocklist support Futuresim needs, so this path fails fast
+for strict reproduction.
 
 ## Credentials
 
@@ -348,8 +600,11 @@ Common credentials:
 | Credential | Needed for |
 | --- | --- |
 | `OPENROUTER_API_KEY` | OpenRouter answer matcher or OpenRouter-backed agents |
-| `OPENREWARD_API_KEY` | OpenReward sandbox creation |
-| `OPENREWARD_ENVIRONMENT` | OpenReward sandbox environment name |
+| `OPENREWARD_API_KEY` | OpenReward sessions, sandbox creation, and hosted search |
+| `OPENREWARD_API_URL` | Optional API endpoint override; keep hosted API when using local ORS |
+| `OPENREWARD_SESSION_URL` | Optional session endpoint override; set only in the Firehorse driver/MCP bridge for local ORS |
+| `OPENREWARD_ENVIRONMENT` | Default sandbox environment name when omitted from the task spec |
+| `FSIM_OPENREWARD_TASKS` | Local ORS task-spec override, JSON object or list |
 | Codex CLI login or `CODEX_HOME` | Codex CLI reproduction |
 | Anthropic / Claude Code credentials | Claude Code reproduction |
 

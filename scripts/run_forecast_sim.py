@@ -436,10 +436,13 @@ def create_agents_from_config(config: dict, args, output_dir: str, search_tool=N
             prompt_mode = str(agent_def.get('prompt_mode', defaults.get('prompt_mode', 'default')))
             cc_config = MinimalHarnessConfig(
                 model=model,
+                search_backend=agent_def.get('search_backend', defaults.get('search_backend', getattr(args, 'search_backend', ''))),
                 search_db=getattr(args, 'search_db', '') or '',
                 embedding_model=getattr(args, 'embedding_model', '') or '',
                 search_type=agent_def.get('search_type', defaults.get('search_type', 'hybrid')),
                 search_cutoff_days=cc_search_cutoff,
+                openreward_search_url=getattr(args, 'openreward_search_url', '') or '',
+                openreward_fetch_url=getattr(args, 'openreward_fetch_url', '') or '',
                 freeze_search_after_start=cc_freeze_search_after_start,
                 resolution_guard=_optional_int(
                     agent_def.get('resolution_guard', defaults.get('resolution_guard', getattr(args, 'resolution_guard', None)))
@@ -860,8 +863,14 @@ def main():
     # Search settings
     parser.add_argument("--search_db", default="",
                        help="Path to LanceDB directory for article search (optional)")
+    parser.add_argument("--search_backend", choices=["", "lancedb", "openreward"], default=os.getenv("FSIM_SEARCH_BACKEND", ""),
+                       help="Search backend for search_news: lancedb when --search_db is set, or openreward")
     parser.add_argument("--embedding_model", default=EMBEDDING_MODEL_PATH,
                        help="Path to embedding model for semantic search")
+    parser.add_argument("--openreward_search_url", default=os.getenv("FSIM_OPENREWARD_SEARCH_URL", ""),
+                       help="OpenReward search endpoint override")
+    parser.add_argument("--openreward_fetch_url", default=os.getenv("FSIM_OPENREWARD_FETCH_URL", ""),
+                       help="OpenReward fetch endpoint override")
     parser.add_argument("--embedding_gpu_mem", type=float, default=0.4,
                        help="GPU memory fraction for embedding model (0.0-1.0, default 0.4)")
     parser.add_argument("--matcher_gpu_mem", type=float, default=0.3,
@@ -1182,7 +1191,23 @@ def main():
     # Setup search tool if specified (preload embedding model)
     # Note: This comes AFTER matcher server is initialized
     search_tool = None
-    if args.search_db:
+    search_backend = (getattr(args, "search_backend", "") or "").strip().lower()
+    if not search_backend and args.search_db:
+        search_backend = "lancedb"
+    if search_backend == "openreward":
+        print(f"\nSetting up OpenReward search tool...", flush=True)
+        from futuresim_agents.search_tools.openreward import OpenRewardSearchTool
+
+        search_tool = OpenRewardSearchTool.from_env(
+            search_url=args.openreward_search_url or "https://search.openreward.ai/search",
+            fetch_url=args.openreward_fetch_url or "https://search.openreward.ai/fetch",
+        )
+        if search_tool.is_available:
+            print("  OpenReward search ready (mode=hybrid, max_results defaults to 5)")
+        else:
+            print("  Warning: OPENREWARD_API_KEY is not set; search_news will be unavailable")
+            search_tool = None
+    elif args.search_db:
         print(f"\nSetting up search tool...", flush=True)
         from futuresim_agents.search_tools.lancedb import LanceDBSearchTool
         
@@ -1393,9 +1418,12 @@ def main():
             from futuresim_agents.minimalHarnessAgent.agent import MinimalHarnessAgent, MinimalHarnessConfig
             cc_config = MinimalHarnessConfig(
                 model=model_name,
+                search_backend=getattr(args, 'search_backend', '') or '',
                 search_db=getattr(args, 'search_db', '') or '',
                 embedding_model=getattr(args, 'embedding_model', '') or '',
                 search_cutoff_days=getattr(args, 'search_cutoff_days', 0),
+                openreward_search_url=getattr(args, 'openreward_search_url', '') or '',
+                openreward_fetch_url=getattr(args, 'openreward_fetch_url', '') or '',
                 articles_base=getattr(args, 'articles_base', os.environ.get('FSIM_ARTICLES_BASE', '')),
                 start_date=sim_start,
                 end_date=getattr(args, 'end_date', None),

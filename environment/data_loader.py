@@ -120,7 +120,7 @@ class QuestionPool:
         """
         return [
             self._all_questions[qid] 
-            for _, qid in self._heap 
+            for _, qid in sorted(self._heap)
             if qid not in self._resolved
         ]
     

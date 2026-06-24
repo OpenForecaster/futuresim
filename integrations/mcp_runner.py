@@ -12,8 +12,6 @@ from datetime import date
 from pathlib import Path, PurePosixPath
 from typing import Any, Optional, Protocol
 
-import pandas as pd
-
 from futuresim_agents.minimalHarnessAgent.prompts.prompt import build_system_prompt
 from integrations.adapter_runtime import (
     FuturesimAdapterConfig,
@@ -333,21 +331,7 @@ class FuturesimMcpRunner:
         return uploads, marker
 
     def _write_market_csv(self, path: Path) -> None:
-        forecast_interface = self.runtime.forecast_interface()
-        src = forecast_interface.get_market_csv_path()
-        if not src:
-            raise RuntimeError("Simulation did not produce a market.csv path.")
-        df = pd.read_csv(src, dtype={"qid": str})
-        agent_preds = forecast_interface.get_agent_predictions(self.runtime.agent_id) or {}
-        df["my_prediction"] = df["qid"].apply(
-            lambda qid: json.dumps(agent_preds[qid]["outcomes"])
-            if qid in agent_preds and agent_preds[qid].get("outcomes") else None
-        )
-        df["my_prediction_date"] = df["qid"].apply(
-            lambda qid: str(agent_preds[qid]["date"])
-            if qid in agent_preds and agent_preds[qid].get("date") else None
-        )
-        df.to_csv(path, index=False)
+        self.runtime.write_agent_market_csv(path)
 
     def _write_state(self, path: Path) -> None:
         forecast_interface = self.runtime.forecast_interface()

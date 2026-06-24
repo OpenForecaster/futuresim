@@ -14,6 +14,7 @@ from typing import Any
 from dotenv import load_dotenv
 
 OPENROUTER_DOMAINS = ["openrouter.ai", "api.openrouter.ai"]
+LOCAL_CLI_OPENAI_KEY_SENTINEL = "__FUTURESIM_LOCAL_CLI_AUTH__"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -41,6 +42,18 @@ def main(argv: list[str] | None = None) -> int:
 
     if not os.environ.get("OPENREWARD_API_KEY"):
         raise SystemExit("OPENREWARD_API_KEY is required.")
+
+    local_cli_agents = {"codex", "claude-code", "claude_code"}
+    if (
+        args.agent in local_cli_agents
+        and args.model.startswith("openai/")
+        and not os.environ.get("OPENAI_API_KEY")
+    ):
+        # Firehorse's top-level provider preflight requires OPENAI_API_KEY for
+        # all openai/* models, but local Codex/Claude Code CLIs may authenticate
+        # through their own login state. Use a sentinel only to satisfy that
+        # preflight, and strip it before spawning the CLI below.
+        os.environ["OPENAI_API_KEY"] = LOCAL_CLI_OPENAI_KEY_SENTINEL
 
     secrets: dict[str, Any] = {}
     openrouter_key = os.environ.get("OPENROUTER_API_KEY")
@@ -88,11 +101,27 @@ except Exception:
         original_create_subprocess_exec = asyncio.create_subprocess_exec
 
         async def create_subprocess_exec(*cmd, **kwargs):
+            proc_env = kwargs.get("env")
+            if (
+                isinstance(proc_env, dict)
+                and proc_env.get("OPENAI_API_KEY") == LOCAL_CLI_OPENAI_KEY_SENTINEL
+            ):
+                proc_env = dict(proc_env)
+                proc_env.pop("OPENAI_API_KEY", None)
+                kwargs["env"] = proc_env
             if len(cmd) >= 2 and str(cmd[1]) == "exec":
+                mcp_env_flags = []
+                for key in ("OPENREWARD_URL", "OPENREWARD_API_URL", "OPENREWARD_SESSION_URL"):
+                    if os.environ.get(key):
+                        mcp_env_flags.extend([
+                            "-c",
+                            f"mcp_servers.openreward.env.{key}={json.dumps(os.environ[key])}",
+                        ])
                 cmd = (
                     *cmd[:-1],
                     "-c",
                     f"mcp_servers.openreward.env.PYTHONPATH={json.dumps(os.environ['PYTHONPATH'])}",
+                    *mcp_env_flags,
                     cmd[-1],
                 )
             return await original_create_subprocess_exec(*cmd, **kwargs)
