@@ -64,6 +64,23 @@ def _run_async(coro: Any) -> Any:
     raise RuntimeError("Use OpenRewardSdkSearchTool inside async code.")
 
 
+def _proxy_aware_web_client(config: Any) -> Any:
+    from openreward.web_service import AiohttpTransport, WebServiceClient
+
+    class ProxyAwareAiohttpTransport(AiohttpTransport):
+        async def _ensure_session(self) -> Any:
+            if self._session is None:
+                import aiohttp
+
+                self._session = aiohttp.ClientSession(
+                    timeout=aiohttp.ClientTimeout(total=self._timeout),
+                    trust_env=True,
+                )
+            return self._session
+
+    return WebServiceClient(config, transport=ProxyAwareAiohttpTransport())
+
+
 class OpenRewardSdkSearchTool:
     """Async SDK-backed search that keeps Futuresim's combined search_news shape."""
 
@@ -125,7 +142,7 @@ class OpenRewardSdkSearchTool:
         search_type: str = "hybrid",
         min_date: Optional[date] = None,
     ) -> list[SearchResult]:
-        from openreward.tools import Backfetch, Backsearch
+        from openreward.tools.web import run_search
 
         if not self.is_available:
             return []
@@ -134,37 +151,52 @@ class OpenRewardSdkSearchTool:
 
         as_of = max_date or date.today()
         k = min(max(1, int(max_results or 5)), 5)
-        result = await Backsearch(config=self.config, k=k).run(query, as_of=as_of.isoformat())
-        if not result.ok:
-            raise RuntimeError(result.output)
+        client = _proxy_aware_web_client(self.config)
+        try:
+            result = await run_search(
+                query=query,
+                as_of=as_of.isoformat(),
+                k=k,
+                config=self.config,
+                client=client,
+            )
+            if not result.ok:
+                raise RuntimeError(result.output)
 
-        hits = (result.data or {}).get("hits") or []
-        if not isinstance(hits, list):
-            return []
+            hits = (result.data or {}).get("hits") or []
+            if not isinstance(hits, list):
+                return []
 
-        fetcher = Backfetch(config=self.config)
-        results: list[SearchResult] = []
-        for hit in hits:
-            if not isinstance(hit, dict):
-                continue
-            results.append(await self._hit_to_result(hit, fetcher, as_of))
-            if len(results) >= k:
-                break
-        return results
+            results: list[SearchResult] = []
+            for hit in hits:
+                if not isinstance(hit, dict):
+                    continue
+                results.append(await self._hit_to_result(hit, client, as_of))
+                if len(results) >= k:
+                    break
+            return results
+        finally:
+            await client.aclose()
 
     async def get_article(self, article_id: str) -> Optional[Article]:
         if not self.is_available or not article_id.startswith(("http://", "https://")):
             return None
 
-        from openreward.tools import Backfetch
+        from openreward.tools.web import run_fetch
 
-        page = await Backfetch(config=self.config).run(
-            article_id,
-            "Extract the full article text.",
-            as_of=date.today().isoformat(),
-        )
-        if not page.ok:
-            return None
+        client = _proxy_aware_web_client(self.config)
+        try:
+            page = await run_fetch(
+                url=article_id,
+                prompt="Extract the full article text.",
+                as_of=date.today().isoformat(),
+                config=self.config,
+                client=client,
+            )
+            if not page.ok:
+                return None
+        finally:
+            await client.aclose()
 
         data = page.data or {}
         content = _clean_text(data.get("content") or page.output)
@@ -178,15 +210,19 @@ class OpenRewardSdkSearchTool:
             description=str(data.get("description") or ""),
         )
 
-    async def _hit_to_result(self, hit: dict[str, Any], fetcher: Any, as_of: date) -> SearchResult:
+    async def _hit_to_result(self, hit: dict[str, Any], client: Any, as_of: date) -> SearchResult:
+        from openreward.tools.web import run_fetch
+
         url = str(hit.get("url") or hit.get("link") or "")
         fetched: dict[str, Any] = {}
         text = _clean_text(hit.get("snippet") or hit.get("text") or hit.get("content"))
         if url:
-            page = await fetcher.run(
-                url,
-                "Extract the article text relevant to this forecasting question.",
+            page = await run_fetch(
+                url=url,
+                prompt="Extract the article text relevant to this forecasting question.",
                 as_of=as_of.isoformat(),
+                config=self.config,
+                client=client,
             )
             if page.ok:
                 fetched = page.data or {}
