@@ -286,14 +286,17 @@ tools: `search_news`, `submit_forecasts`, and `next_day`. See also
 [OpenReward harness toolsets](https://docs.openreward.ai/harnesses/harness-toolsets).
 
 For `codex` and `claude-code` agents, Firehorse launches the user's local CLI
-with the user's local auth. API-key agents such as `react` do not need local
-Codex/Claude Code; Firehorse calls the model provider directly.
+with the user's local auth and connects it to the OpenReward sandbox tools.
+The environment itself does not perform model I/O; custom prompt scaffolds can
+be supplied through `openreward_agent.prompt_builder` in the task spec.
+For API-key models, Firehorse can instead run an API agent such as `react` with
+an OpenReward harness toolset such as `claude-code`; this is useful for smoke
+tests and model comparisons, but it does not reproduce the original paper runs
+because it is not the actual local Codex or Claude Code CLI harness.
 
 OpenReward run commands use Firehorse and choose the harness with `--agent`.
 The closest reproduction of Futuresim results uses a CLI agent such as `codex`
-or `claude-code`, launched with the user's local CLI auth. API-direct agents
-such as `react` and `resum` use provider keys directly and do not need a local
-CLI.
+or `claude-code`, launched with the user's local CLI auth.
 
 ```bash
 pip install --no-compile -e ".[openreward]" firehorse-cli
@@ -311,8 +314,8 @@ futuresim-openreward-firehorse \
   --max-tasks 1
 ```
 
-Claude Code and API-direct OpenReward runs use the same wrapper but different
-`--agent` / `--model` values:
+Claude Code runs use the same wrapper with different `--agent` / `--model`
+values:
 
 ```bash
 # Claude Code CLI, using local Claude Code auth.
@@ -323,16 +326,20 @@ futuresim-openreward-firehorse \
   --effort high \
   --split test \
   --max-tasks 1
+```
 
-# API-direct smoke run, no local CLI.
+OpenRouter API models can run without local Codex or Claude Code auth by using
+the Firehorse React agent with an OpenReward toolset:
+
+```bash
+# API-direct model, using the OpenReward Claude Code toolset.
 futuresim-openreward-firehorse \
   --env <namespace>/futuresim \
   --agent react \
-  --model openrouter/deepseek/deepseek-v4-flash \
+  --toolset claude-code \
+  --model openrouter/deepseek/deepseek-v4-pro \
   --split test \
-  --max-tasks 1 \
-  --run-name futuresim-openreward-react \
-  --output-dir ./runs/futuresim-openreward-react
+  --max-tasks 1
 ```
 
 The OpenReward-native path uses the same Futuresim simulation/scoring core, but

@@ -40,8 +40,10 @@ For OpenReward runs, provide:
 
 - `OPENREWARD_API_KEY` for sessions, sandbox creation, and hosted search.
 - Firehorse on the driver machine.
-- Local Codex or Claude Code auth only when using the `codex` or `claude-code`
-  Firehorse agents. API-key agents such as `react` use provider keys directly.
+- Local Codex or Claude Code auth for the `codex` or `claude-code` Firehorse
+  agents.
+- `OPENROUTER_API_KEY` when using OpenRouter for answer matching or API-direct
+  model runs.
 
 For Verifiers or local MinimalHarness-style runs, provide an article corpus
 directory if you want filesystem news access. It must use:
@@ -81,7 +83,8 @@ The OpenReward integration has three moving parts:
 2. A Firehorse driver process on the user's machine.
 3. An agent. For `codex`/`claude-code`, Firehorse launches the local CLI and
    authenticates with the user's existing CLI credentials. For API-key agents
-   such as `react`, Firehorse talks directly to the model provider.
+   such as `react`, Firehorse talks directly to the model provider and can
+   attach an OpenReward harness toolset such as `claude-code`.
 
 The model sees an OpenReward MCP server named `openreward`. That server exposes
 OpenReward's harness-toolset tools, including sandbox filesystem/shell tools,
@@ -97,6 +100,30 @@ plus Futuresim task tools:
 The sandbox should run with network disabled. Model calls happen outside the
 sandbox through the user's local CLI/provider auth, and search happens through
 the environment's OpenReward SDK client, not arbitrary sandbox networking.
+
+Agent-specific code is intentionally separate from the OpenReward environment:
+
+- `integrations/openreward/futuresim_env.py` owns Futuresim state, sandbox file
+  staging, and environment tools.
+- `integrations/openreward/agent.py` owns the default agent-facing prompt
+  scaffold and toolset compatibility shims.
+- `integrations/openreward/firehorse_run.py` owns Firehorse launch-time model
+  and local CLI wiring.
+
+To customize prompts without editing the environment, point the task spec at an
+importable prompt builder:
+
+```json
+{
+  "openreward_agent": {
+    "prompt_builder": "my_package.prompts:build_prompt"
+  }
+}
+```
+
+The function is called as `build_prompt(runtime, config, mount_articles=...)`
+and must return the prompt string. The module must be importable in the ORS
+environment process.
 
 ```bash
 pip install --no-compile -e ".[openreward]" firehorse-cli
@@ -128,8 +155,7 @@ codex login
 
 For Claude Code runs, install and authenticate the local Claude Code CLI in the
 normal way. The integration needs those local CLIs only because that is the
-default access path for Codex/Claude Code agents; API-key agents can run without
-local Codex/Claude Code.
+supported access path for Codex/Claude Code agents.
 
 Run a hosted OpenReward environment with Firehorse. Use
 `futuresim-openreward-firehorse` instead of bare `firehorse` when Futuresim
@@ -140,11 +166,11 @@ local CLI auth.
 
 Choose the Firehorse harness with `--agent`:
 
-- `react` or `resum`: API-direct agents. They need a provider API key such as
-  `OPENROUTER_API_KEY`, but no local Codex or Claude Code CLI.
 - `codex`: launches the local Codex CLI and connects it to OpenReward tools.
 - `claude-code`: launches the local Claude Code CLI and connects it to
   OpenReward tools.
+- `react`: calls an API model directly. Use `--toolset claude-code` to give it
+  OpenReward's Claude Code-style sandbox/file tools.
 
 Closest reproduction with Codex CLI:
 
@@ -170,18 +196,24 @@ futuresim-openreward-firehorse \
   --max-tasks 1
 ```
 
-API-direct OpenRouter smoke example:
+OpenRouter API model example:
 
 ```bash
 futuresim-openreward-firehorse \
   --env <namespace>/futuresim \
   --agent react \
-  --model openrouter/deepseek/deepseek-v4-flash \
+  --toolset claude-code \
+  --model openrouter/deepseek/deepseek-v4-pro \
   --split test \
-  --max-tasks 1 \
-  --run-name futuresim-openreward-react \
-  --output-dir ./runs/futuresim-openreward-react
+  --max-tasks 1
 ```
+
+The API-direct path is useful for smoke tests and model comparisons when users
+do not want to install local Codex or Claude Code. It does not reproduce the
+original paper runs: the model sees an OpenReward toolset that resembles a CLI
+tool surface, but it is not the actual Codex or Claude Code CLI harness,
+session behavior, system prompting, or tool formatting used by the original
+local runs.
 
 ### Differences From Local Futuresim Runs
 
@@ -215,8 +247,9 @@ local Futuresim runs in the following ways:
   model-visible file behavior is therefore the same; interrupted partial
   episodes can differ.
 - **Auth and execution:** for `codex` and `claude-code`, Firehorse launches the
-  user's local CLI with their local auth. API-key agents such as `react` do not
-  need local Codex/Claude Code and instead use provider keys through Firehorse.
+  user's local CLI with their local auth. API-direct `react` runs use provider
+  keys and an OpenReward harness toolset instead; they are not faithful
+  reproductions of local CLI-agent runs.
 
 For the closest reproduction of Futuresim results, match the
 dataset, split, date window, answer matcher, model, reasoning effort, and output
@@ -230,7 +263,7 @@ Pass task rows through the OpenReward deployment's task source. For local ORS
 development, `FuturesimOpenRewardEnv` also accepts `FSIM_OPENREWARD_TASKS` as a
 JSON object or list of objects.
 
-Minimal task spec:
+Closest-reproduction task spec:
 
 ```json
 {

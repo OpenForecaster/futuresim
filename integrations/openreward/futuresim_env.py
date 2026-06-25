@@ -14,7 +14,6 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
-from futuresim_agents.minimalHarnessAgent.prompts.prompt import build_system_prompt
 from futuresim_agents.search_tools.handler import format_search_results
 from futuresim_agents.search_tools.openreward import OpenRewardSdkSearchTool
 from integrations.adapter_runtime import (
@@ -23,6 +22,7 @@ from integrations.adapter_runtime import (
     as_bool,
     parse_iso_date,
 )
+from integrations.openreward.agent import patch_openreward_cli_toolsets, resolve_prompt_builder
 
 try:
     from openreward import AsyncOpenReward, SandboxBucketConfig, SandboxSettings
@@ -87,28 +87,8 @@ def _default_task_rows() -> list[dict[str, Any]]:
     ]
 
 
-def _patch_openreward_codex_toolset_workdir() -> None:
-    """Accept Codex's shell workdir field in OpenReward's codex toolset."""
-    try:
-        from openreward.toolsets import codex as codex_toolset
-    except Exception:
-        return
-
-    class _CodexBashParams(BaseModel, extra="ignore"):
-        command: str
-        description: str = ""
-        timeout: Optional[float] = 30.0
-        workdir: Optional[str] = None
-
-    # openreward==0.1.134 documents "Always set workdir" but rejects that
-    # field. Codex also emits local shell metadata like max_output_tokens. Those
-    # values are local-Codex concerns rather than guaranteed sandbox controls,
-    # so the safest compatibility behavior is to accept and ignore extras.
-    codex_toolset.BashParams = _CodexBashParams
-
-
 if _OPENREWARD_IMPORT_ERROR is None:
-    _patch_openreward_codex_toolset_workdir()
+    patch_openreward_cli_toolsets()
 
     class FuturesimOpenRewardEnv(Environment):
         """Futuresim as an OpenReward harness-toolset environment."""
@@ -145,6 +125,7 @@ if _OPENREWARD_IMPORT_ERROR is None:
                     "task_spec['openreward_sandbox']['environment']."
                 )
 
+            self.prompt_builder = resolve_prompt_builder(self.task_spec)
             self.runtime = FuturesimAdapterRuntime(self.config)
             self.search_tool = OpenRewardSdkSearchTool.from_env(api_key=api_key)
             self._sandbox_started = False
@@ -183,29 +164,10 @@ if _OPENREWARD_IMPORT_ERROR is None:
             await self._ensure_sandbox_started()
             if not self._day_started:
                 await self._start_day()
-            forecast_interface = self.runtime.forecast_interface()
-            questions = forecast_interface.list_questions()
-            resolved = getattr(forecast_interface, "resolved_questions", [])
-            prompt = build_system_prompt(
-                workspace=self.runtime.workspace_path,
-                current_date=self.runtime.env.current_date,
-                start_date=self.runtime.env.start_date,
-                end_date=parse_iso_date(self.config.end_date) or self.runtime.env.current_date,
-                source_context=getattr(forecast_interface, "source_context", "") or "",
-                source_name=getattr(forecast_interface, "source_name", "openforesight"),
-                num_questions=len(questions) + len(resolved),
-                num_active=len(questions),
-                num_resolved=len(resolved),
-                max_outcomes_per_question=self.config.max_outcomes_per_question,
-                search_cutoff_days=self.config.article_search_cutoff_days,
-                timegap_days=self.config.timegap_days,
-                new_articles_count=None,
-                last_active_date=getattr(forecast_interface, "last_active_date", None),
-                next_active_date=getattr(forecast_interface, "next_active_date", None),
-                handholding_version=self.config.handholding_version,
-                prompt_mode=self.config.prompt_mode,
-                article_files_available=self.mount_articles,
-                tool_prefix="mcp__openreward__",
+            prompt = self.prompt_builder(
+                self.runtime,
+                self.config,
+                mount_articles=self.mount_articles,
             )
             return [TextBlock(text=prompt)]
 
@@ -303,12 +265,6 @@ if _OPENREWARD_IMPORT_ERROR is None:
                     return self._text(
                         f"Day is already advanced to {self.runtime.env.current_date.isoformat()}. "
                         "Continue forecasting from the current market.csv before calling next_day again."
-                    )
-
-                if not self._today_predictions:
-                    return self._text(
-                        f"No forecasts have been submitted for {self.runtime.env.current_date.isoformat()}. "
-                        "Submit at least one forecast before calling next_day."
                     )
 
                 previous_date = self.runtime.env.current_date
