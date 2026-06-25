@@ -311,8 +311,15 @@ futuresim-openreward-firehorse \
   --model openai/gpt-5.5 \
   --effort xhigh \
   --split test \
-  --max-tasks 1
+  --max-tasks 1 \
+  --output-dir runs/openreward/codex-gpt55-xhigh \
+  --futuresim-handholding-version v1 \
+  --futuresim-agent-id codex-gpt55-xhigh
 ```
+
+For a short day 0 + day 1 smoke run, add `--futuresim-days 2`. With the
+default `start_date=2025-12-31` and `lookback_days=7`, this runs
+`2025-12-24` and `2025-12-25`.
 
 Claude Code runs use the same wrapper with different `--agent` / `--model`
 values:
@@ -325,7 +332,9 @@ futuresim-openreward-firehorse \
   --model anthropic/claude-sonnet-4-6 \
   --effort high \
   --split test \
-  --max-tasks 1
+  --max-tasks 1 \
+  --output-dir runs/openreward/claude-sonnet \
+  --futuresim-agent-id claude-sonnet
 ```
 
 OpenRouter API models can run without local Codex or Claude Code auth by using
@@ -339,8 +348,19 @@ futuresim-openreward-firehorse \
   --toolset claude-code \
   --model openrouter/deepseek/deepseek-v4-pro \
   --split test \
-  --max-tasks 1
+  --max-tasks 1 \
+  --output-dir runs/openreward/deepseek-v4-pro-react \
+  --futuresim-handholding-version v3 \
+  --futuresim-agent-id deepseek-v4-pro-react
 ```
+
+Common task overrides are first-class wrapper flags: use
+`--futuresim-days 1` for day 0 only, `--futuresim-days 2` for day 0 + day 1,
+`--futuresim-split`, `--futuresim-start-date`, `--futuresim-end-date`,
+`--futuresim-matcher`, `--futuresim-matcher-cache`, and
+`--futuresim-mount-articles` as needed. When `--output-dir` is provided, the
+wrapper also sets `futuresim.output_base` to that directory unless
+`--futuresim-output-base` overrides it.
 
 The OpenReward-native path uses the same Futuresim simulation/scoring core, but
 differs from original local Futuresim runs in the following ways:

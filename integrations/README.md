@@ -181,8 +181,15 @@ futuresim-openreward-firehorse \
   --model openai/gpt-5.5 \
   --effort xhigh \
   --split test \
-  --max-tasks 1
+  --max-tasks 1 \
+  --output-dir runs/openreward/codex-gpt55-xhigh \
+  --futuresim-handholding-version v1 \
+  --futuresim-agent-id codex-gpt55-xhigh
 ```
+
+For a quick day 0 + day 1 check, add `--futuresim-days 2`. With the default
+`start_date=2025-12-31` and `lookback_days=7`, that limits the hosted task to
+`2025-12-24` and `2025-12-25`. Use `--futuresim-days 1` for day 0 only.
 
 Claude Code CLI example:
 
@@ -193,7 +200,9 @@ futuresim-openreward-firehorse \
   --model anthropic/claude-sonnet-4-6 \
   --effort high \
   --split test \
-  --max-tasks 1
+  --max-tasks 1 \
+  --output-dir runs/openreward/claude-sonnet \
+  --futuresim-agent-id claude-sonnet
 ```
 
 OpenRouter API model example:
@@ -205,7 +214,10 @@ futuresim-openreward-firehorse \
   --toolset claude-code \
   --model openrouter/deepseek/deepseek-v4-pro \
   --split test \
-  --max-tasks 1
+  --max-tasks 1 \
+  --output-dir runs/openreward/deepseek-v4-pro-react \
+  --futuresim-handholding-version v3 \
+  --futuresim-agent-id deepseek-v4-pro-react
 ```
 
 The API-direct path is useful for smoke tests and model comparisons when users
@@ -214,6 +226,13 @@ original paper runs: the model sees an OpenReward toolset that resembles a CLI
 tool surface, but it is not the actual Codex or Claude Code CLI harness,
 session behavior, system prompting, or tool formatting used by the original
 local runs.
+
+Common Futuresim task fields can be overridden without editing hosted task
+JSON: `--futuresim-days`, `--futuresim-split`, `--futuresim-start-date`,
+`--futuresim-end-date`, `--futuresim-dataset-path`, `--futuresim-matcher`,
+`--futuresim-matcher-cache`, and `--futuresim-mount-articles`. When
+`--output-dir` is set, the wrapper also sets `futuresim.output_base` to the same
+directory unless `--futuresim-output-base` is supplied.
 
 ### Differences From Local Futuresim Runs
 
@@ -370,12 +389,12 @@ Optional columns are `background`, `resolution_criteria`, `answer_type`,
 list for multiple-choice questions. `ground_truth_answer` is required because
 Futuresim scores the run after questions resolve.
 
-`futuresim-openreward-firehorse --output-dir` is separate from
-`futuresim.output_base`: it controls local Firehorse artifacts such as
-`run_result.json`, `trial_*.jsonl`, and `driver.log`. For local ORS result
-comparison runs, set both to the same timestamped directory. With a hosted ORS
-server, `output_base` is remote to the hosted server unless you configure a
-mounted volume or artifact export.
+`futuresim-openreward-firehorse --output-dir` controls local Firehorse artifacts
+such as `run_result.json`, `trial_*.jsonl`, and `driver.log`. The Futuresim
+wrapper also sends that path as `futuresim.output_base` so Futuresim actions and
+metrics land with the trajectory logs when the environment server can write the
+same path. Override with `--futuresim-output-base` when the hosted server needs
+a different writable path.
 
 By default this integration does not provide a local article corpus, LanceDB
 index, embedding model, or grep-able `articles/` directory in the sandbox. Do
