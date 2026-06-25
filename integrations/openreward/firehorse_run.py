@@ -10,10 +10,10 @@ import json
 import os
 import sys
 import tempfile
-from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import yaml
 from dotenv import load_dotenv
 
 OPENROUTER_DOMAINS = ["openrouter.ai", "api.openrouter.ai"]
@@ -39,39 +39,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-turns", type=int)
     parser.add_argument("--provider-url")
     parser.add_argument("--toolset")
+    parser.add_argument(
+        "--task-spec",
+        help="JSON/YAML OpenReward task-spec overlay applied to each fetched hosted task.",
+    )
     parser.add_argument("--no-logging", action="store_true")
     parser.add_argument("--use-env-descriptions", action="store_true")
     parser.add_argument("--use-all-filesystem-tools", action="store_true")
-    parser.add_argument(
-        "--futuresim-days",
-        type=int,
-        help=(
-            "Limit the Futuresim task to the first N simulation days. "
-            "With start_date=2025-12-31 and lookback_days=7, N=2 runs "
-            "2025-12-24 and 2025-12-25."
-        ),
-    )
-    parser.add_argument("--futuresim-dataset")
-    parser.add_argument("--futuresim-dataset-path")
-    parser.add_argument("--futuresim-dataset-cache")
-    parser.add_argument("--futuresim-split")
-    parser.add_argument("--futuresim-start-date")
-    parser.add_argument("--futuresim-end-date")
-    parser.add_argument("--futuresim-resolution-start")
-    parser.add_argument("--futuresim-resolution-end")
-    parser.add_argument("--futuresim-lookback-days", type=int)
-    parser.add_argument("--futuresim-output-base")
-    parser.add_argument("--futuresim-agent-id")
-    parser.add_argument("--futuresim-handholding-version")
-    parser.add_argument("--futuresim-matching")
-    parser.add_argument("--futuresim-matcher")
-    parser.add_argument("--futuresim-matcher-cache")
-    parser.add_argument(
-        "--futuresim-mount-articles",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help="Override openreward_sandbox.mount_articles in the fetched task spec.",
-    )
     if argv and argv[0] in {"resume", "replay"}:
         if not os.environ.get("OPENREWARD_API_KEY"):
             raise SystemExit("OPENREWARD_API_KEY is required.")
@@ -133,13 +107,24 @@ def main(argv: list[str] | None = None) -> int:
             use_all_filesystem_tools=args.use_all_filesystem_tools,
             toolset=args.toolset,
         )
-        summary = asyncio.run(_run_evaluation_with_futuresim_overrides(config, args))
+        summary = asyncio.run(
+            _run_evaluation_with_task_spec(
+                config,
+                task_spec_path=args.task_spec,
+                output_dir=args.output_dir,
+            )
+        )
         return 0 if summary.failed == 0 else 1
 
     return _run_with_firehorse_shim(run_firehorse)
 
 
-async def _run_evaluation_with_futuresim_overrides(config: Any, args: argparse.Namespace) -> Any:
+async def _run_evaluation_with_task_spec(
+    config: Any,
+    *,
+    task_spec_path: str | None,
+    output_dir: str | None,
+) -> Any:
     clients: list[Any] = []
     from openreward.client import AsyncOpenReward
 
@@ -150,13 +135,10 @@ async def _run_evaluation_with_futuresim_overrides(config: Any, args: argparse.N
         clients.append(self)
 
     AsyncOpenReward.__init__ = client_init
-    overrides = _futuresim_override_requested(args)
-    output_base = args.futuresim_output_base
-    if not output_base and args.output_dir:
-        output_base = os.path.abspath(args.output_dir)
-        overrides = True
+    task_spec_overlay = _load_task_spec(task_spec_path) if task_spec_path else None
+    output_base = os.path.abspath(output_dir) if output_dir else None
     try:
-        if not overrides:
+        if task_spec_overlay is None and output_base is None:
             from firehorse.orchestrator import run_evaluation
 
             return await run_evaluation(config)
@@ -168,10 +150,16 @@ async def _run_evaluation_with_futuresim_overrides(config: Any, args: argparse.N
 
         async def get_task_with_overrides(self: Any, split: str, index: int) -> Any:
             task = await original_get_task(self, split, index)
-            patched = _patch_futuresim_task_spec(task.task_spec, args, output_base)
+            patched = copy.deepcopy(task.task_spec)
+            if task_spec_overlay is not None:
+                _deep_update(patched, task_spec_overlay)
+            if output_base:
+                futuresim = patched.setdefault("futuresim", {})
+                if not futuresim.get("output_base"):
+                    futuresim["output_base"] = output_base
             if patched == task.task_spec:
                 return task
-            _print_futuresim_task_diff(task.task_spec, patched)
+            _print_task_spec_diff(task.task_spec, patched, task_spec_path)
             return dataclasses.replace(task, task_spec=patched)
 
         AsyncEnvironment.get_task = get_task_with_overrides
@@ -184,29 +172,6 @@ async def _run_evaluation_with_futuresim_overrides(config: Any, args: argparse.N
         await _close_openreward_clients(clients)
 
 
-def _futuresim_override_requested(args: argparse.Namespace) -> bool:
-    names = [
-        "futuresim_days",
-        "futuresim_dataset",
-        "futuresim_dataset_path",
-        "futuresim_dataset_cache",
-        "futuresim_split",
-        "futuresim_start_date",
-        "futuresim_end_date",
-        "futuresim_resolution_start",
-        "futuresim_resolution_end",
-        "futuresim_lookback_days",
-        "futuresim_output_base",
-        "futuresim_agent_id",
-        "futuresim_handholding_version",
-        "futuresim_matching",
-        "futuresim_matcher",
-        "futuresim_matcher_cache",
-        "futuresim_mount_articles",
-    ]
-    return any(getattr(args, name, None) is not None for name in names)
-
-
 async def _close_openreward_clients(clients: list[Any]) -> None:
     for client in clients:
         rollout = getattr(client, "_rollout_api", None)
@@ -217,54 +182,28 @@ async def _close_openreward_clients(clients: list[Any]) -> None:
             await environments.aclose()
 
 
-def _patch_futuresim_task_spec(
-    task_spec: dict[str, Any],
-    args: argparse.Namespace,
-    output_base: str | None,
-) -> dict[str, Any]:
-    patched = copy.deepcopy(task_spec)
-    futuresim = patched.setdefault("futuresim", {})
-    sandbox = patched.setdefault("openreward_sandbox", {})
-
-    field_args = {
-        "dataset": args.futuresim_dataset,
-        "dataset_path": args.futuresim_dataset_path,
-        "dataset_cache": args.futuresim_dataset_cache,
-        "split": args.futuresim_split,
-        "start_date": args.futuresim_start_date,
-        "end_date": args.futuresim_end_date,
-        "resolution_start": args.futuresim_resolution_start,
-        "resolution_end": args.futuresim_resolution_end,
-        "lookback_days": args.futuresim_lookback_days,
-        "agent_id": args.futuresim_agent_id,
-        "handholding_version": args.futuresim_handholding_version,
-        "matching": args.futuresim_matching,
-        "matcher": args.futuresim_matcher,
-    }
-    for key, value in field_args.items():
-        if value is not None:
-            futuresim[key] = value
-    if args.futuresim_matcher_cache is not None:
-        futuresim["matcher_cache"] = {"path": args.futuresim_matcher_cache}
-    if output_base:
-        futuresim["output_base"] = output_base
-    if args.futuresim_mount_articles is not None:
-        sandbox["mount_articles"] = args.futuresim_mount_articles
-
-    if args.futuresim_days is not None:
-        if args.futuresim_days < 1:
-            raise SystemExit("--futuresim-days must be >= 1")
-        start = datetime.strptime(str(futuresim["start_date"]), "%Y-%m-%d").date()
-        lookback_days = int(futuresim.get("lookback_days") or 0)
-        first_sim_day = start - timedelta(days=max(0, lookback_days))
-        futuresim["end_date"] = (
-            first_sim_day + timedelta(days=args.futuresim_days - 1)
-        ).isoformat()
-
-    return patched
+def _load_task_spec(path: str) -> dict[str, Any]:
+    spec_path = Path(path)
+    with spec_path.open() as f:
+        data = json.load(f) if spec_path.suffix == ".json" else yaml.safe_load(f)
+    if not isinstance(data, dict):
+        raise SystemExit(f"--task-spec must contain a JSON/YAML object: {path}")
+    return data
 
 
-def _print_futuresim_task_diff(before: dict[str, Any], after: dict[str, Any]) -> None:
+def _deep_update(target: dict[str, Any], overlay: dict[str, Any]) -> None:
+    for key, value in overlay.items():
+        if isinstance(value, dict) and isinstance(target.get(key), dict):
+            _deep_update(target[key], value)
+        else:
+            target[key] = copy.deepcopy(value)
+
+
+def _print_task_spec_diff(
+    before: dict[str, Any],
+    after: dict[str, Any],
+    task_spec_path: str | None,
+) -> None:
     before_fsim = before.get("futuresim") or {}
     after_fsim = after.get("futuresim") or {}
     before_sandbox = before.get("openreward_sandbox") or {}
@@ -288,7 +227,8 @@ def _print_futuresim_task_diff(before: dict[str, Any], after: dict[str, Any]) ->
     ]
     changed = [f"{name}={new!r}" for name, old, new in interesting if old != new]
     if changed:
-        print("Futuresim task overrides: " + ", ".join(changed), file=sys.stderr)
+        source = f"{task_spec_path}: " if task_spec_path else ""
+        print("OpenReward task spec overlay: " + source + ", ".join(changed), file=sys.stderr)
 
 
 def _run_with_firehorse_shim(target: Any, *, resume_mode: bool = False) -> int:

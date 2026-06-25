@@ -1,0 +1,37 @@
+example_id: futuresim-openreward-aljazeera2026Q1-v1-day0-day1
+futuresim:
+  dataset: openforesight
+  dataset_path: nikhilchandak/OpenForesight
+  dataset_cache: ""
+  split: aljazeera2026Q1
+  start_date: "2025-12-31"
+  end_date: "2025-12-25"
+  resolution_start: "2025-12-31"
+  resolution_end: "2026-03-28"
+  lookback_days: 7
+  timegap_days: 1
+  min_forecasters: 0
+  resolved_only: false
+  max_outcomes_per_question: 5
+  articles_base: ""
+  article_stage_mode: copy
+  article_search_cutoff_days: 0
+  article_freeze_after_start: false
+  output_base: ""
+  resume_dir: ""
+  agent_id: openreward-v1
+  sandbox_workspace: /workspace
+  workspace_articles_subdir: articles
+  prompt_mode: default
+  handholding_version: v1
+  matching: openrouter
+  matcher: deepseek/deepseek-v3.2
+  matcher_cache: null
+  matcher_max_concurrency: 32
+  matcher_api_key_env: OPENROUTER_API_KEY
+openreward_sandbox:
+  image: generalreasoning/python-ds:3.12-tools
+  machine_size: "2:8"
+  block_network: true
+  mount_articles: false
+  environment: ShashwatGoel/futuresim

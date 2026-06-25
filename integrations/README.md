@@ -183,13 +183,14 @@ futuresim-openreward-firehorse \
   --split test \
   --max-tasks 1 \
   --output-dir runs/openreward/codex-gpt55-xhigh \
-  --futuresim-handholding-version v1 \
-  --futuresim-agent-id codex-gpt55-xhigh
+  --task-spec configs/openreward/aljazeera2026Q1_v1_day0_day1.yaml
 ```
 
-For a quick day 0 + day 1 check, add `--futuresim-days 2`. With the default
-`start_date=2025-12-31` and `lookback_days=7`, that limits the hosted task to
-`2025-12-24` and `2025-12-25`. Use `--futuresim-days 1` for day 0 only.
+The bundled OpenReward task specs include day 0 + day 1 and 7-day smoke
+windows. With the default `start_date=2025-12-31` and `lookback_days=7`, the
+2-day specs run `2025-12-24` and `2025-12-25`; the 7-day specs run through
+`2025-12-30`. Use `configs/openreward/aljazeera2026Q1_v1_7day.yaml` or
+`configs/openreward/aljazeera2026Q1_v3_7day.yaml` for the 7-day versions.
 
 Claude Code CLI example:
 
@@ -202,7 +203,7 @@ futuresim-openreward-firehorse \
   --split test \
   --max-tasks 1 \
   --output-dir runs/openreward/claude-sonnet \
-  --futuresim-agent-id claude-sonnet
+  --task-spec configs/openreward/aljazeera2026Q1_v1_day0_day1.yaml
 ```
 
 OpenRouter API model example:
@@ -216,8 +217,7 @@ futuresim-openreward-firehorse \
   --split test \
   --max-tasks 1 \
   --output-dir runs/openreward/deepseek-v4-pro-react \
-  --futuresim-handholding-version v3 \
-  --futuresim-agent-id deepseek-v4-pro-react
+  --task-spec configs/openreward/aljazeera2026Q1_v3_day0_day1.yaml
 ```
 
 The API-direct path is useful for smoke tests and model comparisons when users
@@ -227,12 +227,11 @@ tool surface, but it is not the actual Codex or Claude Code CLI harness,
 session behavior, system prompting, or tool formatting used by the original
 local runs.
 
-Common Futuresim task fields can be overridden without editing hosted task
-JSON: `--futuresim-days`, `--futuresim-split`, `--futuresim-start-date`,
-`--futuresim-end-date`, `--futuresim-dataset-path`, `--futuresim-matcher`,
-`--futuresim-matcher-cache`, and `--futuresim-mount-articles`. When
-`--output-dir` is set, the wrapper also sets `futuresim.output_base` to the same
-directory unless `--futuresim-output-base` is supplied.
+`--task-spec` accepts a JSON or YAML OpenReward task-spec overlay. Copy one of
+the files under `configs/openreward/` to change the dataset, date window,
+answer matcher, handholding version, article mounting, or sandbox settings.
+When `--output-dir` is set and the task spec leaves `futuresim.output_base`
+blank, the wrapper also sets `output_base` to the same directory.
 
 ### Differences From Local Futuresim Runs
 
@@ -393,8 +392,8 @@ Futuresim scores the run after questions resolve.
 such as `run_result.json`, `trial_*.jsonl`, and `driver.log`. The Futuresim
 wrapper also sends that path as `futuresim.output_base` so Futuresim actions and
 metrics land with the trajectory logs when the environment server can write the
-same path. Override with `--futuresim-output-base` when the hosted server needs
-a different writable path.
+same path. Put a non-empty `futuresim.output_base` in the task spec when the
+hosted server needs a different writable path.
 
 By default this integration does not provide a local article corpus, LanceDB
 index, embedding model, or grep-able `articles/` directory in the sandbox. Do

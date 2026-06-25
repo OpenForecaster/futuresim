@@ -313,13 +313,14 @@ futuresim-openreward-firehorse \
   --split test \
   --max-tasks 1 \
   --output-dir runs/openreward/codex-gpt55-xhigh \
-  --futuresim-handholding-version v1 \
-  --futuresim-agent-id codex-gpt55-xhigh
+  --task-spec configs/openreward/aljazeera2026Q1_v1_day0_day1.yaml
 ```
 
-For a short day 0 + day 1 smoke run, add `--futuresim-days 2`. With the
-default `start_date=2025-12-31` and `lookback_days=7`, this runs
-`2025-12-24` and `2025-12-25`.
+The bundled OpenReward task specs include day 0 + day 1 and 7-day smoke
+windows. With the default `start_date=2025-12-31` and `lookback_days=7`, the
+2-day specs run `2025-12-24` and `2025-12-25`; the 7-day specs run through
+`2025-12-30`. Use `configs/openreward/aljazeera2026Q1_v1_7day.yaml` or
+`configs/openreward/aljazeera2026Q1_v3_7day.yaml` for the 7-day versions.
 
 Claude Code runs use the same wrapper with different `--agent` / `--model`
 values:
@@ -334,7 +335,7 @@ futuresim-openreward-firehorse \
   --split test \
   --max-tasks 1 \
   --output-dir runs/openreward/claude-sonnet \
-  --futuresim-agent-id claude-sonnet
+  --task-spec configs/openreward/aljazeera2026Q1_v1_day0_day1.yaml
 ```
 
 OpenRouter API models can run without local Codex or Claude Code auth by using
@@ -350,17 +351,14 @@ futuresim-openreward-firehorse \
   --split test \
   --max-tasks 1 \
   --output-dir runs/openreward/deepseek-v4-pro-react \
-  --futuresim-handholding-version v3 \
-  --futuresim-agent-id deepseek-v4-pro-react
+  --task-spec configs/openreward/aljazeera2026Q1_v3_day0_day1.yaml
 ```
 
-Common task overrides are first-class wrapper flags: use
-`--futuresim-days 1` for day 0 only, `--futuresim-days 2` for day 0 + day 1,
-`--futuresim-split`, `--futuresim-start-date`, `--futuresim-end-date`,
-`--futuresim-matcher`, `--futuresim-matcher-cache`, and
-`--futuresim-mount-articles` as needed. When `--output-dir` is provided, the
-wrapper also sets `futuresim.output_base` to that directory unless
-`--futuresim-output-base` overrides it.
+`--task-spec` accepts a JSON or YAML OpenReward task-spec overlay. Copy one of
+the files under `configs/openreward/` to change the dataset, date window,
+answer matcher, handholding version, article mounting, or sandbox settings.
+When `--output-dir` is provided and the task spec leaves `futuresim.output_base`
+blank, the wrapper sets `output_base` to the same directory.
 
 The OpenReward-native path uses the same Futuresim simulation/scoring core, but
 differs from original local Futuresim runs in the following ways:
